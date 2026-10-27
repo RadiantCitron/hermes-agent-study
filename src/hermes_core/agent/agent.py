@@ -1,0 +1,262 @@
+"""AI 에이전트 핵심 루프 및 턴 오케스트레이터 (Hermes Agent Loop).
+
+[원본 레퍼런스 매핑]
+- 대응 원본: hermes-agent/run_agent.py (AIAgent 클래스)
+- 핵심 원리:
+  1. 세션별 프롬프트 캐싱(Prompt Caching):
+     - `_build_system_prompt()`는 세션당 1회만 조립되고 캐싱되어, 대화가 진행되는 동안 Prefix Cache를 보존.
+  2. 엄격한 메시지 역할 교대(Strict Role Alternation):
+     - user -> assistant(tool_calls) -> tool -> assistant 의 순서를 철저히 유지.
+  3. 도구 실행 및 세션 원장 동기화:
+     - 도구 실행 결과가 발생하는 즉시 SQLite SessionDB에 영구 기록.
+  4. 테스트 격리를 위한 MockLLMClient 내장.
+"""
+
+from dataclasses import dataclass
+import json
+import logging
+from typing import Any, Optional
+import uuid
+
+from hermes_core.agent.prompt_builder import (
+    DEFAULT_AGENT_IDENTITY,
+    MEMORY_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE,
+    build_context_files_prompt,
+    build_system_prompt,
+)
+from hermes_core.session_db import SessionDB
+from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
+from hermes_core.tools.memory_tool import MemoryStore
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Mock LLM 클라이언트 (테스트 및 오프라인 환경 대응)
+# =============================================================================
+
+@dataclass
+class MockToolCall:
+    id: str
+    function: dict[str, str]  # {"name": "...", "arguments": "{...}"}
+
+
+@dataclass
+class MockLLMResponse:
+    content: Optional[str] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+
+
+class MockLLMClient:
+    """오프라인 및 단위 테스트를 위한 Mock LLM 응답 시퀀스 재생기."""
+
+    def __init__(self, responses: Optional[list[MockLLMResponse]] = None):
+        self.responses = responses or []
+        self._index = 0
+        self.call_history: list[dict[str, Any]] = []
+
+    def queue_response(self, content: Optional[str] = None, tool_calls: Optional[list[dict[str, Any]]] = None) -> None:
+        self.responses.append(MockLLMResponse(content=content, tool_calls=tool_calls))
+
+    def chat_completion(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]] = None) -> MockLLMResponse:
+        self.call_history.append({"messages": messages, "tools": tools})
+        if self._index >= len(self.responses):
+            return MockLLMResponse(content="[Mock] Default completion: No more queued responses.")
+        resp = self.responses[self._index]
+        self._index += 1
+        return resp
+
+
+# =============================================================================
+# HermesAgent 메인 클래스
+# =============================================================================
+
+class HermesAgent:
+    """Hermes AI 에이전트 턴 오케스트레이터 클래스."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o",
+        system_message: Optional[str] = None,
+        session_id: Optional[str] = None,
+        session_db: Optional[SessionDB] = None,
+        memory_store: Optional[MemoryStore] = None,
+        dispatcher: Optional[ToolDispatcher] = None,
+        llm_client: Optional[Any] = None,
+        max_iterations: int = 50,
+        quiet_mode: bool = False,
+    ):
+        self.model = model
+        self.system_message = system_message
+        self.session_id = session_id or str(uuid.uuid4())
+        self.max_iterations = max_iterations
+        self.quiet_mode = quiet_mode
+
+        # 의존성 주입 및 격리
+        self.session_db = session_db or SessionDB()
+        self.memory_store = memory_store or MemoryStore()
+        self.dispatcher = dispatcher or create_default_dispatcher(
+            memory_store=self.memory_store,
+            session_db=self.session_db,
+        )
+        self.llm_client = llm_client or MockLLMClient()
+
+        # 메모리 디스크 로드 및 동결 스냅샷 캡처
+        self.memory_store.load_from_disk()
+
+        # 세션 DB 레코드 생성
+        self.session_db.create_session(
+            session_id=self.session_id,
+            source="cli",
+            model=self.model,
+            system_prompt=None,
+        )
+
+        # 시스템 프롬프트 캐시 변수 (Prompt Caching 보존)
+        self._cached_system_prompt: Optional[str] = None
+
+    def _build_system_prompt(self, system_message: Optional[str] = None) -> str:
+        """세션 시작 시 단 1회 시스템 프롬프트를 조립하고 캐싱."""
+        if self._cached_system_prompt is not None and system_message is None:
+            return self._cached_system_prompt
+
+        # 메모리 블록 렌더링
+        mem_parts = []
+        mem_block = self.memory_store.format_for_system_prompt("memory")
+        user_block = self.memory_store.format_for_system_prompt("user")
+        if mem_block:
+            mem_parts.append(mem_block)
+        if user_block:
+            mem_parts.append(user_block)
+        memory_full_block = "\n\n".join(mem_parts) if mem_parts else None
+
+        # 작업 디렉터리 컨텍스트 파일
+        context_block = build_context_files_prompt()
+
+        caller_prompt = system_message if system_message is not None else self.system_message
+
+        assembled = build_system_prompt(
+            agent_identity=DEFAULT_AGENT_IDENTITY,
+            tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE],
+            caller_prompt=caller_prompt,
+            memory_block=memory_full_block,
+            context_files_block=context_block if context_block else None,
+            platform="cli",
+        )
+
+        self._cached_system_prompt = assembled
+        self.session_db.update_system_prompt(self.session_id, assembled)
+        return assembled
+
+    def _execute_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """assistant_message의 tool_calls를 실행하고 결과를 messages에 append."""
+        for tc in tool_calls:
+            call_id = tc.get("id") or str(uuid.uuid4())
+            func_obj = tc.get("function", {})
+            func_name = func_obj.get("name") or tc.get("name", "unknown")
+            args_str = func_obj.get("arguments", "{}")
+
+            if not self.quiet_mode:
+                print(f"  [Tool Call] {func_name}({args_str})")
+
+            try:
+                args = json.loads(args_str) if isinstance(args_str, str) else args_str
+            except Exception:
+                args = {}
+
+            # 디스패처 단일 진입로 실행
+            result_str = self.dispatcher.handle_function_call(func_name, args)
+
+            # messages에 추가 (Strict Role Alternation)
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": result_str,
+            }
+            messages.append(tool_msg)
+
+            # 세션 DB 원장 기록
+            self.session_db.append_message(
+                session_id=self.session_id,
+                role="tool",
+                content=result_str,
+                tool_call_id=call_id,
+                tool_name=func_name,
+            )
+
+    def run_conversation(
+        self,
+        user_message: str,
+        system_message: Optional[str] = None,
+        conversation_history: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """단일 대화 턴 루프 실행. 최종 응답 문자열과 전체 messages 목록 반환."""
+        sys_prompt = self._build_system_prompt(system_message)
+
+        # 메시지 히스토리 조립
+        messages: list[dict[str, Any]] = []
+        if conversation_history:
+            messages.extend(conversation_history)
+        else:
+            messages.append({"role": "system", "content": sys_prompt})
+
+        # 사용자 메시지 추가 및 원장 기록
+        messages.append({"role": "user", "content": user_message})
+        self.session_db.append_message(
+            session_id=self.session_id,
+            role="user",
+            content=user_message,
+        )
+
+        final_response: str = ""
+        iterations = 0
+
+        while iterations < self.max_iterations:
+            iterations += 1
+
+            # LLM 호출
+            tools_schema = self.dispatcher.get_tools_schema()
+            resp = self.llm_client.chat_completion(
+                messages=messages,
+                tools=tools_schema if tools_schema else None,
+            )
+
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            if resp.content:
+                assistant_msg["content"] = resp.content
+            if resp.tool_calls:
+                assistant_msg["tool_calls"] = resp.tool_calls
+
+            messages.append(assistant_msg)
+
+            # 세션 DB 기록
+            self.session_db.append_message(
+                session_id=self.session_id,
+                role="assistant",
+                content=resp.content,
+                tool_calls=resp.tool_calls,
+            )
+
+            # 도구 호출이 있으면 실행 후 루프 계속
+            if resp.tool_calls:
+                self._execute_tool_calls(resp.tool_calls, messages)
+            else:
+                # 도구 호출이 없으면 최종 텍스트 응답으로 루프 종료
+                final_response = resp.content or ""
+                break
+
+        return {
+            "final_response": final_response,
+            "messages": messages,
+            "iterations": iterations,
+            "session_id": self.session_id,
+        }
+
+
+# 원본 인터페이스 호환을 위한 클래스 별칭
+AIAgent = HermesAgent

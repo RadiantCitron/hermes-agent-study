@@ -30,6 +30,40 @@ from hermes_core.constants import (
 )
 
 
+MEMORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "memory",
+        "description": "Manage persistent bounded memory (add, replace, or remove durable facts).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "replace", "remove"],
+                    "description": "Action to perform on memory.",
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["memory", "user"],
+                    "description": "Target store: 'memory' for environment facts, 'user' for user preferences.",
+                    "default": "memory",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "New fact content to add or replacement text.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "Substring of existing entry to find for replace or remove.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
+
 class MemoryStore:
     """바운디드 큐레이티드 메모리 관리 클래스.
 
