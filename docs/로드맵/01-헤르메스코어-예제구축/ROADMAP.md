@@ -26,20 +26,23 @@ flowchart TD
         A2 --> A3["복잡한 프로세스간 통신 / 소유권 관리 / 외부 봇 플러그인"]
     end
 
-    subgraph ToBe["구현할 독립형 코어 엔진 (src/hermes_core)"]
-        B1["사용자 입력 (CLI / Main Loop)"] --> B2["PromptBuilder (정체성 + 규칙 + 메모리 주입)"]
-        B2 --> B3["Agent Loop (LLM 추론)"]
-        B3 --> B4["Tool Dispatcher (안전 격리 실행 레일)"]
-        B4 --> B5["Memory & Session Storage (MEMORY.md + SQLite FTS5)"]
-        B5 --> B3
+    subgraph ToBe["구현할 독립형 코어 엔진 (src/hermes_core — 원본 1:1 미러링)"]
+        B1["cli.py (터미널 REPL 진입점)"] --> B2["run_agent.py (AIAgent 루프)"]
+        B2 --> B3["agent/prompt_builder.py (시스템 프롬프트 조립)"]
+        B2 --> B4["model_tools.py (handle_function_call 디스패처)"]
+        B4 --> B5["tools/memory_tool.py (MemoryStore + memory_tool)"]
+        B4 --> B6["tools/session_search_tool.py (세션 검색)"]
+        B2 --> B7["hermes_state.py (SessionDB 원장 저장)"]
     end
 ```
 
 | 비교 항목 | As-Is (최신 Hermes Agent) | To-Be (`hermes_core` 엔진) |
 |---|---|---|
-| **코드 규모** | 수만 줄, 200개 이상의 모듈 | 핵심 파일 5개, 총 ~1,500줄 내외 |
+| **코드 규모** | 수만 줄, 200개 이상의 모듈 | 원본 핵심 6개 파일 모방, 총 ~1,500줄 내외 |
+| **파일명/구조** | 분산된 마이크로 파일 구조 | **원본 1:1 미러링 (`run_agent.py`, `agent/`, `tools/`, `hermes_state.py`, `model_tools.py`, `cli.py`)** |
+| **클래스/함수명** | 복잡한 믹스인 체인 | **원본 인터페이스 준수 (`AIAgent`, `SessionDB`, `MemoryStore`, `run_conversation`)** |
 | **의존성** | Electron, Node.js, 수십 개 서드파티 라이브러리 | `httpx` 또는 `openai`, `pydantic` 등 표준 최소 의존성 |
-| **실행 방식** | 데스크톱 앱 및 복합 게이트웨이 데몬 | `python -m hermes_core.main` 단일 CLI 명령 |
+| **실행 방식** | 데스크톱 앱 및 복합 게이트웨이 데몬 | `python -m hermes_core.cli` 단일 CLI 명령 |
 | **검증 용이성** | 복잡한 E2E 환경 구축 필요 | Mock LLM을 통한 100% 로컬 독립 단위 테스트 가능 |
 
 ---
