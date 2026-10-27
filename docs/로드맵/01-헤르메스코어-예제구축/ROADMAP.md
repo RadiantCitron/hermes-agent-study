@@ -1,7 +1,7 @@
 # [마스터 설계도] 01-헤르메스코어 예제 구축
 
 > **상태**: `Draft`  
-> **대시보드**: [01-README.md](file:///Users/<user>/Programming/hermes-agent-study/docs/로드맵/01-헤르메스코어-예제구축/README.md)  
+> **대시보드**: [01-README.md](README.md)  
 > **기준 레퍼런스**: Hermes Agent 2026-02-21 코어 버전 (`6134939882`)
 
 ---

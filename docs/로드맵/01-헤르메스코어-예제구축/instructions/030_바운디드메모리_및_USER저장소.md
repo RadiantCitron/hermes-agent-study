@@ -1,8 +1,8 @@
 # [구현지시서 030] 바운디드 메모리 및 USER 저장소
 
-> **상위 대시보드**: [01-README.md](file:///Users/<user>/Programming/hermes-agent-study/docs/로드맵/01-헤르메스코어-예제구축/README.md)  
+> **상위 대시보드**: [01-README.md](../README.md)  
 > **선행 조건**: 020 단계 완료 (`Done`)  
-> **기준 레퍼런스**: `hermes-agent` commit `6134939882`의 [`tools/memory_tool.py`](file:///Users/<user>/Programming/hermes-agent-study/hermes-agent/tools/memory_tool.py)
+> **기준 레퍼런스**: `hermes-agent` commit `6134939882`의 [`tools/memory_tool.py`](../../../../hermes-agent/tools/memory_tool.py)
 
 ---
 

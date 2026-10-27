@@ -1,8 +1,8 @@
 # [구현지시서 040] SQLite 세션 DB 및 FTS5 전문 검색
 
-> **상위 대시보드**: [01-README.md](file:///Users/<user>/Programming/hermes-agent-study/docs/로드맵/01-헤르메스코어-예제구축/README.md)  
+> **상위 대시보드**: [01-README.md](../README.md)  
 > **선행 조건**: 030 단계 완료 (`Done`)  
-> **기준 레퍼런스**: `hermes-agent` commit `6134939882`의 [`hermes_state.py`](file:///Users/<user>/Programming/hermes-agent-study/hermes-agent/hermes_state.py)
+> **기준 레퍼런스**: `hermes-agent` commit `6134939882`의 [`hermes_state.py`](../../../../hermes-agent/hermes_state.py)
 
 ---
 
