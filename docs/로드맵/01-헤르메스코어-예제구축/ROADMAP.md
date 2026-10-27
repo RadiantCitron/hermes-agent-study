@@ -10,6 +10,8 @@
 
 본 로드맵의 목적은 Hermes Agent의 가장 순수하고 응집도 높은 아키텍처(2026-02-21 `6134939882` 커밋)를 바탕으로, 외부 복잡한 부가기능(데스크톱 앱, 수많은 메시징 봇 어댑터, 방대한 플랫폼 인프라)을 걷어내고 **AI 코딩 에이전트의 3대 핵심 메커니즘을 온전히 구현한 독립형 코어 엔진(`src/hermes_core`)**을 구축하는 것이다.
 
+단순한 축약 복사(Cargo Cult)를 지양하고, **현대적 파이썬 클린 아키텍처(모듈 응집도, 엄격한 타입 힌팅, 의존성 주입)**로 정제하여 개발하되, 원본 `hermes-agent`와의 **개념 대조표(Concept Mapping)**를 제공하여 학습 효과를 극대화한다.
+
 ### 핵심 학습 및 구현 3대 요소
 1. **계층형 시스템 프롬프트 조립 (System Prompt Assembly)**: 에이전트 정체성 + 컨텍스트 파일(`AGENTS.md`, `SOUL.md`) + 메모리 스냅샷 주입 + 프롬프트 캐싱 최적화.
 2. **자가 정리형 영구 메모리 (Curated Bounded Memory)**: 토큰 낭비와 환각을 막는 문자 수 제한(MEMORY.md / USER.md) 및 `§` 구분자 기반 동적 교체/삭제/추가.
@@ -26,21 +28,21 @@ flowchart TD
         A2 --> A3["복잡한 프로세스간 통신 / 소유권 관리 / 외부 봇 플러그인"]
     end
 
-    subgraph ToBe["구현할 독립형 코어 엔진 (src/hermes_core — 원본 1:1 미러링)"]
-        B1["cli.py (터미널 REPL 진입점)"] --> B2["run_agent.py (AIAgent 루프)"]
+    subgraph ToBe["구현할 독립형 코어 엔진 (src/hermes_core — 핵심 정제 및 모듈화)"]
+        B1["cli.py (터미널 REPL 진입점)"] --> B2["agent.py (HermesAgent 루프)"]
         B2 --> B3["agent/prompt_builder.py (시스템 프롬프트 조립)"]
-        B2 --> B4["model_tools.py (handle_function_call 디스패처)"]
+        B2 --> B4["tools/dispatcher.py (ToolDispatcher 레일)"]
         B4 --> B5["tools/memory_tool.py (MemoryStore + memory_tool)"]
         B4 --> B6["tools/session_search_tool.py (세션 검색)"]
-        B2 --> B7["hermes_state.py (SessionDB 원장 저장)"]
+        B2 --> B7["session_db.py (SessionDB 원장 저장)"]
     end
 ```
 
 | 비교 항목 | As-Is (최신 Hermes Agent) | To-Be (`hermes_core` 엔진) |
 |---|---|---|
-| **코드 규모** | 수만 줄, 200개 이상의 모듈 | 원본 핵심 6개 파일 모방, 총 ~1,500줄 내외 |
-| **파일명/구조** | 분산된 마이크로 파일 구조 | **원본 1:1 미러링 (`run_agent.py`, `agent/`, `tools/`, `hermes_state.py`, `model_tools.py`, `cli.py`)** |
-| **클래스/함수명** | 복잡한 믹스인 체인 | **원본 인터페이스 준수 (`AIAgent`, `SessionDB`, `MemoryStore`, `run_conversation`)** |
+| **코드 규모** | 수만 줄, 200개 이상의 모듈 | 핵심 메커니즘 정제, 총 ~1,500줄 내외 |
+| **패키지 구조** | 분산된 마이크로 파일 구조 | **역할 중심의 클린 패키지 구조 (`agent.py`, `session_db.py`, `tools/`, `agent/`, `cli.py`)** |
+| **클래스/인터페이스** | 복잡한 믹스인 및 God Object | **명확한 책임 분리 (`HermesAgent`, `SessionDB`, `ToolDispatcher`) + 원본 매핑 독스트링** |
 | **의존성** | Electron, Node.js, 수십 개 서드파티 라이브러리 | `httpx` 또는 `openai`, `pydantic` 등 표준 최소 의존성 |
 | **실행 방식** | 데스크톱 앱 및 복합 게이트웨이 데몬 | `python -m hermes_core.cli` 단일 CLI 명령 |
 | **검증 용이성** | 복잡한 E2E 환경 구축 필요 | Mock LLM을 통한 100% 로컬 독립 단위 테스트 가능 |
