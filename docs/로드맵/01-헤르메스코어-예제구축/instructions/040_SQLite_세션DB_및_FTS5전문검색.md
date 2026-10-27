@@ -8,7 +8,7 @@
 
 ## 1. 구현 내용 명세
 
-1. **SQLite SessionDB 모듈 (`src/examples/hermes_core/session_db.py`)**:
+1. **SQLite SessionDB 모듈 (`src/hermes_core/session_db.py`)**:
    - `sessions` 테이블: `session_id`, `created_at`, `model`, `parent_session_id`, `status`
    - `messages` 테이블: 대화 턴 히스토리 (`session_id`, `role`, `content`, `tool_calls`, `tool_call_id`)
    - `messages_fts` 가상 테이블: SQLite **FTS5**를 활용한 전체 대화 내용 및 도구 호출 텍스트 전문 검색 인덱스
@@ -27,7 +27,7 @@
 
 ## 2. 변경할 파일 목록
 
-- `src/examples/hermes_core/session_db.py` (신규)
+- `src/hermes_core/session_db.py` (신규)
 - `tests/test_hermes_core/test_session_db.py` (신규)
 
 ---

@@ -8,12 +8,12 @@
 
 ## 1. 구현 내용 명세
 
-1. **Curated Memory 저장소 클래스 (`src/examples/hermes_core/memory_store.py`)**:
+1. **Curated Memory 저장소 클래스 (`src/hermes_core/memory_store.py`)**:
    - `MEMORY.md` (사실/환경 메모리, 기본 2,200자 제한)
    - `USER.md` (사용자 성향/선호 메모리, 기본 1,375자 제한)
    - 엔트리 구분자: `§` (섹션 기호) 단위로 사실 항목 분할
    - `format_for_system_prompt()`: 시스템 프롬프트에 주입할 마크다운 스냅샷 텍스트 생성
-2. **메모리 편집 도구 (`src/examples/hermes_core/memory_tool.py`)**:
+2. **메모리 편집 도구 (`src/hermes_core/memory_tool.py`)**:
    - `add`: 새로운 기억 항목을 `§`로 구분하여 끝에 추가 (용량 초과 시 거부 및 압축 가이드 반환)
    - `replace`: 기존 기억(`old_text`)을 찾아 새로운 내용(`new_text`)으로 부분 교체
    - `remove`: 불필요하거나 폐기된 기억 항목 삭제
@@ -28,8 +28,8 @@
 
 ## 2. 변경할 파일 목록
 
-- `src/examples/hermes_core/memory_store.py` (신규)
-- `src/examples/hermes_core/memory_tool.py` (신규)
+- `src/hermes_core/memory_store.py` (신규)
+- `src/hermes_core/memory_tool.py` (신규)
 - `tests/test_hermes_core/test_memory_tool.py` (신규)
 
 ---

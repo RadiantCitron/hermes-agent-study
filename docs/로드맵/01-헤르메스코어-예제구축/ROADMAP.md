@@ -8,7 +8,7 @@
 
 ## 1. 배경 및 목적 (Why)
 
-본 로드맵의 목적은 Hermes Agent의 가장 순수하고 응집도 높은 아키텍처(2026-02-21 `6134939882` 커밋)를 바탕으로, 외부 복잡한 부가기능(데스크톱 앱, 수많은 메시징 봇 어댑터, 방대한 플랫폼 인프라)을 걷어내고 **AI 코딩 에이전트의 3대 핵심 메커니즘을 온전히 구현한 독립형 예제(`src/examples/hermes_core`)**를 구축하는 것이다.
+본 로드맵의 목적은 Hermes Agent의 가장 순수하고 응집도 높은 아키텍처(2026-02-21 `6134939882` 커밋)를 바탕으로, 외부 복잡한 부가기능(데스크톱 앱, 수많은 메시징 봇 어댑터, 방대한 플랫폼 인프라)을 걷어내고 **AI 코딩 에이전트의 3대 핵심 메커니즘을 온전히 구현한 독립형 코어 엔진(`src/hermes_core`)**을 구축하는 것이다.
 
 ### 핵심 학습 및 구현 3대 요소
 1. **계층형 시스템 프롬프트 조립 (System Prompt Assembly)**: 에이전트 정체성 + 컨텍스트 파일(`AGENTS.md`, `SOUL.md`) + 메모리 스냅샷 주입 + 프롬프트 캐싱 최적화.
@@ -26,7 +26,7 @@ flowchart TD
         A2 --> A3["복잡한 프로세스간 통신 / 소유권 관리 / 외부 봇 플러그인"]
     end
 
-    subgraph ToBe["구현할 독립형 코어 (src/examples/hermes_core)"]
+    subgraph ToBe["구현할 독립형 코어 엔진 (src/hermes_core)"]
         B1["사용자 입력 (CLI / Main Loop)"] --> B2["PromptBuilder (정체성 + 규칙 + 메모리 주입)"]
         B2 --> B3["Agent Loop (LLM 추론)"]
         B3 --> B4["Tool Dispatcher (안전 격리 실행 레일)"]
@@ -35,7 +35,7 @@ flowchart TD
     end
 ```
 
-| 비교 항목 | As-Is (최신 Hermes Agent) | To-Be (`hermes_core` 예제) |
+| 비교 항목 | As-Is (최신 Hermes Agent) | To-Be (`hermes_core` 엔진) |
 |---|---|---|
 | **코드 규모** | 수만 줄, 200개 이상의 모듈 | 핵심 파일 5개, 총 ~1,500줄 내외 |
 | **의존성** | Electron, Node.js, 수십 개 서드파티 라이브러리 | `httpx` 또는 `openai`, `pydantic` 등 표준 최소 의존성 |
@@ -47,13 +47,13 @@ flowchart TD
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
 
 - **수정/생성 대상 경로**:
-  - `src/examples/hermes_core/**` (전체 신규 생성)
+  - `src/hermes_core/**` (전체 신규 생성)
   - `tests/test_hermes_core/**` (신규 테스트)
   - `pyproject.toml` (루트 패키징 및 의존성 정의)
 - **무영향 근거**:
   - `hermes-agent/` 디렉터리는 순수 읽기 전용으로 일체 변경되지 않는다.
   - 기존 `docs/` 내의 ADR, 작업자료, 대화록 문서 구조에 영향을 주지 않는다.
-  - `src/examples/hermes_core/` 내부에 로컬 상태 디렉터리(`.hermes/`)를 격리하여 호스트 머신의 `~/.hermes`를 일체 오염시키지 않는다.
+  - `src/hermes_core/` 내부에 로컬 상태 디렉터리(`.hermes/`)를 격리하여 호스트 머신의 `~/.hermes`를 일체 오염시키지 않는다.
 
 ---
 
