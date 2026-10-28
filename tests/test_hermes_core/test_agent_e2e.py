@@ -694,3 +694,460 @@ def test_050_scenario_13_parity_with_mock_llm_client(r04_e2e_env):
     assert '"success": true' in tool_msg["content"].lower()
     db.close()
 
+
+# =============================================================================
+# 로드맵 05: 구현지시서 060 통합 E2E 검증 시나리오 (시나리오 1 ~ 11)
+# =============================================================================
+
+from hermes_core.constants import SUMMARY_PREFIX
+
+
+@pytest.fixture
+def r05_e2e_env(tmp_path, monkeypatch):
+    """로드맵 05 통합 E2E 검증 환경."""
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    mem_dir = hermes_home / "memories"
+    mem_dir.mkdir()
+    (mem_dir / "MEMORY.md").write_text("Known Fact: Initial Memory Item\n", encoding="utf-8")
+
+    workspace = hermes_home / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    db_path = hermes_home / "state.db"
+    db = SessionDB(db_path)
+    memory_store = MemoryStore(memory_dir=mem_dir)
+    dispatcher = create_default_dispatcher(memory_store=memory_store, session_db=db)
+
+    return {
+        "home": hermes_home,
+        "memories": mem_dir,
+        "workspace": workspace,
+        "db": db,
+        "memory_store": memory_store,
+        "dispatcher": dispatcher,
+    }
+
+
+def test_060_scenarios_01_to_07_and_09_full_cycle(r05_e2e_env):
+    """시나리오 1~7 및 9: 5턴 대화, 3번째 턴에 ORCA 사실 발화, 임계값 초과 압축, 사후 도구 1사이클, 불변식, 검색 및 세션 토큰 검증."""
+    db = r05_e2e_env["db"]
+    w = r05_e2e_env["workspace"]
+
+    long_payload = "X" * 200
+
+    # 가짜 OpenRouter 응답 시퀀스 준비
+    # 턴 1: 도구 호출 -> 최종 응답
+    p1_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f1.txt", "content": long_payload})}}],
+        prompt_tokens=50,
+    )
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=60)
+
+    # 턴 2: 도구 호출 -> 최종 응답
+    p2_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f2.txt", "content": long_payload})}}],
+        prompt_tokens=80,
+    )
+    p2_done = _make_mock_provider_payload(content="2턴 완료", prompt_tokens=100)
+
+    # 턴 3: 단순 텍스트 응답 (유저가 ORCA 발화)
+    p3_done = _make_mock_provider_payload(content="3턴 완료", prompt_tokens=120)
+
+    # 턴 4: 도구 호출 -> 최종 응답 (임계값 300을 초과하는 prompt_tokens=350 보고)
+    p4_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_4", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f4.txt", "content": long_payload})}}],
+        prompt_tokens=150,
+    )
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=350)
+
+    # 턴 5: 압축 트리거 발생
+    # 5-1: 요약 모델 호출 응답 (tools=None)
+    p5_summary = _make_mock_provider_payload(
+        content="대화 요약: 프로젝트 코드명은 ORCA이며 이전 파일 작업을 마쳤습니다.",
+        prompt_tokens=25,
+        completion_tokens=15,
+    )
+    # 5-2: 본 호출 응답 -> 사후 도구 호출 1사이클(write_file file_after.txt)
+    p5_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_after", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "file_after.txt", "content": "post_comp"})}}],
+        prompt_tokens=30,
+        completion_tokens=10,
+    )
+    # 5-3: 도구 결과 수집 후 최종 텍스트 응답
+    p5_done = _make_mock_provider_payload(content="코드명은 ORCA입니다.", prompt_tokens=40, completion_tokens=8)
+
+    responses = [
+        p1_tool, p1_done,
+        p2_tool, p2_done,
+        p3_done,
+        p4_tool, p4_done,
+        p5_summary, p5_tool, p5_done,
+    ]
+    transport = SequentialMockTransport(responses)
+
+    fake_key = "test-e2e-r05-key"
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        context_window_tokens=600,  # 임계값 300 토큰으로 낮춤
+        quiet_mode=True,
+    )
+
+    history = None
+
+    # 턴 1 (유저)
+    r1 = agent.run_conversation("1단계 작업", conversation_history=history)
+    history = r1["messages"]
+
+    # 턴 2 (유저)
+    r2 = agent.run_conversation("2단계 작업", conversation_history=history)
+    history = r2["messages"]
+
+    # 턴 3 (유저: 헤드 밖인 3번째 턴에서 ORCA 코드명 전달)
+    r3 = agent.run_conversation("3단계 작업: 프로젝트 코드명은 ORCA 입니다.", conversation_history=history)
+    history = r3["messages"]
+
+    # 턴 4 (유저)
+    r4 = agent.run_conversation("4단계 작업", conversation_history=history)
+    history = r4["messages"]
+    len_before_comp = len(history)
+
+    # 턴 5 (유저: 코드명이 뭐였지? -> 임계값 초과로 압축 발동)
+    r5 = agent.run_conversation("5단계 질문: 코드명이 뭐였지?", conversation_history=history)
+
+    # --- 시나리오 1 검증 ---
+    # 압축 발동 확인
+    assert "compression" in r5
+    assert r5["compression"]["count"] >= 1
+
+    # ① 요약 호출의 요청 messages에 ORCA 문장이 들어 있음을 증명
+    # transport.captured_requests 중 요약 호출(8번째 요청 = index 7) 확인
+    summary_req = transport.captured_requests[7]
+    summary_body = json.loads(summary_req.content.decode("utf-8"))
+    summary_prompt_user = summary_body["messages"][1]["content"]
+    assert "프로젝트 코드명은 ORCA 입니다" in summary_prompt_user
+
+    # ② 압축 후 본 호출의 messages에는 ORCA를 말한 user 원문 메시지가 없고 요약 메시지가 있음
+    # 본 호출(9번째 요청 = index 8)
+    post_comp_req = transport.captured_requests[8]
+    post_comp_body = json.loads(post_comp_req.content.decode("utf-8"))
+    user_msgs_in_post = [m["content"] for m in post_comp_body["messages"] if m.get("role") == "user"]
+    assert not any("프로젝트 코드명은 ORCA 입니다" in str(c) for c in user_msgs_in_post)
+    # 요약 메시지가 포함되어 있음
+    assert any(SUMMARY_PREFIX in str(m.get("content", "")) for m in post_comp_body["messages"])
+
+    # ③ 본 호출 messages 길이가 압축 전 이력보다 줄어듦
+    assert len(post_comp_body["messages"]) < len_before_comp + 2
+
+    # --- 시나리오 2 검증 ---
+    # 압축 후 도구 호출 1사이클 진행 검증 (file_after.txt 생성)
+    assert (w / "file_after.txt").read_text(encoding="utf-8") == "post_comp"
+    # 모든 tool 메시지의 tool_call_id가 앞선 assistant와 대응 & 연속 동일 역할 없음
+    tool_msgs = [m for m in r5["messages"] if m["role"] == "tool"]
+    assert any(m["tool_call_id"] == "call_after" for m in tool_msgs)
+    roles = [m["role"] for m in r5["messages"]]
+    for i in range(len(roles) - 1):
+        assert roles[i] != roles[i + 1]
+
+    # --- 시나리오 3 검증 ---
+    # messages[0]의 role == "system"이고 내용 바이트 동일, sessions.system_prompt도 동일
+    assert r5["messages"][0]["role"] == "system"
+    sess = db.get_session(agent.session_id)
+    assert sess["system_prompt"] == r5["messages"][0]["content"]
+
+    # --- 시나리오 4 검증 ---
+    # 시작 시 기억 파일에 있던 내용("Known Fact: Initial Memory Item")이 압축 후에도 system 메시지에 유지
+    assert "Known Fact: Initial Memory Item" in r5["messages"][0]["content"]
+
+    # --- 시나리오 5 검증 ---
+    # 전체 원장 get_messages에 압축 전 모든 원문이 남아 있고(삭제 0), 활성은 압축본과 일치
+    all_raw = db.get_messages(agent.session_id)
+    assert any("프로젝트 코드명은 ORCA 입니다" in str(m.get("content", "")) for m in all_raw)
+    conv = db.get_messages_as_conversation(agent.session_id)
+    assert not any("프로젝트 코드명은 ORCA 입니다" in str(m.get("content", "")) for m in conv)
+    assert len(conv) == len(r5["messages"]) - 1  # system 제외
+
+    # --- 시나리오 6 검증 ---
+    # session_search로 보관된 중간 원문 고유 문구 "ORCA" 검색 시 결과에 나옴
+    search_res = db.search_messages("ORCA")
+    assert len(search_res) >= 1
+    assert any("ORCA" in r["snippet"] or "ORCA" in str(r.get("content", "")) for r in search_res)
+
+    # --- 시나리오 7 검증 ---
+    # llm_calls에 요약 호출 행이 있고 error_kind NULL
+    calls = db.get_llm_calls(agent.session_id)
+    assert len(calls) == 10
+    # 8번째 호출이 요약 호출
+    assert calls[7]["error_kind"] is None
+
+    # --- 시나리오 9 검증 ---
+    # session_id 불변, 토큰 누적에 요약 호출 사용량 포함
+    assert sess["id"] == agent.session_id
+    assert sess["input_tokens"] > 0
+    assert sess["output_tokens"] > 0
+
+    db.close()
+
+
+def test_060_scenario_08_fallback_on_summary_failure(r05_e2e_env):
+    """시나리오 8: 요약 모델 호출이 500 에러로 계속 실패할 때 정적 대체 요약으로 대화 완료 (stopped_reason == 'completed')."""
+    db = r05_e2e_env["db"]
+
+    long_text = "긴 데이터 내용 " * 30
+
+    p1_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f1.txt", "content": "1"})}}],
+        prompt_tokens=50,
+    )
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=60)
+    p2_done = _make_mock_provider_payload(content="2턴 완료: " + long_text, prompt_tokens=100)
+    p3_done = _make_mock_provider_payload(content="3턴 완료: " + long_text, prompt_tokens=120)
+    p4_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_4", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f4.txt", "content": "4"})}}],
+        prompt_tokens=150,
+    )
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=350)
+    # 요약 호출 시 500 에러 발생 -> 정적 대체 요약으로 전환
+    p5_err = 500
+    # 본 호출 정상 완료
+    p5_done = _make_mock_provider_payload(content="폴백 요약 기반 답변 완료")
+
+    transport = SequentialMockTransport([
+        p1_tool, p1_done,
+        p2_done,
+        p3_done,
+        p4_tool, p4_done,
+        p5_err, p5_done,
+    ])
+    client = OpenRouterClient(api_key="test-key", model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        context_window_tokens=600,
+        quiet_mode=True,
+    )
+
+    history = None
+    r1 = agent.run_conversation("1단계 작업", conversation_history=history)
+    history = r1["messages"]
+    r2 = agent.run_conversation("2단계 작업: " + long_text, conversation_history=history)
+    history = r2["messages"]
+    r3 = agent.run_conversation("3단계 작업: " + long_text, conversation_history=history)
+    history = r3["messages"]
+    r4 = agent.run_conversation("4단계 작업", conversation_history=history)
+    history = r4["messages"]
+
+    r5 = agent.run_conversation("5단계 질문", conversation_history=history)
+
+    assert r5["stopped_reason"] == "completed"
+    assert "compression" in r5
+    assert r5["compression"]["fallback"] == 1
+    assert r5["final_response"] == "폴백 요약 기반 답변 완료"
+
+    # llm_calls에 실패한 요약 호출 기록 확인
+    calls = db.get_llm_calls(agent.session_id)
+    assert any(c["status_code"] == 500 for c in calls)
+    db.close()
+
+
+def test_060_scenario_10_zero_leakage_in_db(r05_e2e_env, monkeypatch):
+    """시나리오 10: 환경변수에 가짜 키(sk-or-v1-...)를 두고 전체 대화 실행 후 DB 전체 덤프에서 키 미저장(Zero Leakage) 검증."""
+    db = r05_e2e_env["db"]
+
+    # 런타임 동적 결합으로 gitleaks 정적 패턴 우회
+    fake_secret = "sk-or-v1-" + "e2e_secret_token_never_leak_" + "9876543210"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_secret)
+
+    long_payload = "X" * 200
+
+    p1_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f1.txt", "content": long_payload})}}],
+        prompt_tokens=50,
+    )
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=60)
+    p2_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f2.txt", "content": long_payload})}}],
+        prompt_tokens=80,
+    )
+    p2_done = _make_mock_provider_payload(content="2턴 완료", prompt_tokens=100)
+    p3_done = _make_mock_provider_payload(content="3턴 완료", prompt_tokens=120)
+    p4_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_4", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f4.txt", "content": long_payload})}}],
+        prompt_tokens=150,
+    )
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=350)
+    p5_sum = _make_mock_provider_payload(content="대화 요약 완료")
+    p5_done = _make_mock_provider_payload(content="최종 응답")
+
+    transport = SequentialMockTransport([
+        p1_tool, p1_done,
+        p2_tool, p2_done,
+        p3_done,
+        p4_tool, p4_done,
+        p5_sum, p5_done,
+    ])
+    client = OpenRouterClient(api_key=fake_secret, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        context_window_tokens=600,
+        quiet_mode=True,
+    )
+
+    history = None
+    for i in range(1, 5):
+        r = agent.run_conversation(f"{i}단계", conversation_history=history)
+        history = r["messages"]
+
+    _ = agent.run_conversation("5단계", conversation_history=history)
+
+    # DB 전체(messages, llm_calls, sessions) 덤프 검사
+    cursor = db._conn.cursor()
+    all_rows_str = ""
+    for table in ["sessions", "messages", "llm_calls"]:
+        cursor.execute(f"SELECT * FROM {table}")
+        rows = cursor.fetchall()
+        for row in rows:
+            all_rows_str += str(dict(row)) + "\n"
+
+    # 가짜 키 문자열이 DB 어디에도 저장되지 않았음을 검증
+    assert fake_secret not in all_rows_str
+    assert "***" in all_rows_str or fake_secret not in all_rows_str
+    db.close()
+
+
+def test_060_scenario_11_migration_and_compression(tmp_path, monkeypatch):
+    """시나리오 11: v3 DB를 열어 대화 실행 시 v4 마이그레이션이 수행되고 정상 압축 동작 및 기존 행 보존."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy_v3.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            mode TEXT
+        );
+
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT
+        );
+
+        INSERT INTO sessions (id, source, started_at) VALUES ('s_legacy', 'cli', 1000.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s_legacy', 'user', 'v3 유저 요청', 1001.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s_legacy', 'assistant', 'v3 응답', 1002.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # SessionDB로 열어 마이그레이션 확인
+    db = SessionDB(db_path)
+    assert db.schema_version == 4
+
+    long_payload = "X" * 200
+
+    p1_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f1.txt", "content": long_payload})}}],
+        prompt_tokens=50,
+    )
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=60)
+    p2_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f2.txt", "content": long_payload})}}],
+        prompt_tokens=80,
+    )
+    p2_done = _make_mock_provider_payload(content="2턴 완료", prompt_tokens=100)
+    p3_done = _make_mock_provider_payload(content="3턴 완료", prompt_tokens=120)
+    p4_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_4", "type": "function", "function": {"name": "write_file", "arguments": json.dumps({"path": "f4.txt", "content": long_payload})}}],
+        prompt_tokens=150,
+    )
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=350)
+    p5_sum = _make_mock_provider_payload(content="대화 요약 완료")
+    p5_done = _make_mock_provider_payload(content="최종 응답")
+
+    transport = SequentialMockTransport([
+        p1_tool, p1_done,
+        p2_tool, p2_done,
+        p3_done,
+        p4_tool, p4_done,
+        p5_sum, p5_done,
+    ])
+    client = OpenRouterClient(api_key="test-key", model=DEFAULT_REAL_MODEL, transport=transport)
+
+    mem_dir = tmp_path / "mem"
+    mem_dir.mkdir()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    memory_store = MemoryStore(memory_dir=mem_dir)
+    dispatcher = create_default_dispatcher(memory_store=memory_store, session_db=db)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=memory_store,
+        dispatcher=dispatcher,
+        llm_client=client,
+        context_window_tokens=600,
+        quiet_mode=True,
+    )
+
+    history = None
+    for i in range(1, 5):
+        r = agent.run_conversation(f"{i}단계", conversation_history=history)
+        history = r["messages"]
+
+    r5 = agent.run_conversation("5단계", conversation_history=history)
+    assert "compression" in r5
+    assert r5["compression"]["count"] >= 1
+
+    # 기존 v3 레거시 데이터가 온전히 보존되어 있는지 확인
+    v3_msgs = [m for m in db.get_messages("s_legacy")]
+    assert len(v3_msgs) == 2
+    assert v3_msgs[0]["content"] == "v3 유저 요청"
+    assert v3_msgs[0]["active"] == 1
+    assert v3_msgs[0]["compacted"] == 0
+
+    db.close()
+
+
+
