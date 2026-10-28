@@ -45,3 +45,21 @@ def is_inside(value: str, workspace: Path) -> bool:
     except (OSError, ValueError, RuntimeError):
         return False
     return resolved.is_relative_to(workspace)
+
+
+def check_path(path: str, workspace: Path) -> tuple[Optional[Path], Optional[str]]:
+    """파일 도구용 경로 검증. 제어문자 및 작업 폴더 이탈을 확인한다.
+
+    제어문자가 있으면 (None, "Path contains control characters."),
+    작업 폴더 밖이면 (None, f"Path '{path}' is outside the workspace.")을 반환한다.
+    통과하면 ((workspace / path).resolve(), None)을 반환하며 ~는 확장하지 않는다.
+    """
+    for ch in path:
+        code = ord(ch)
+        if code < 32 or code == 127 or code == 0x85 or ch in ("\u2028", "\u2029"):
+            return None, "Path contains control characters."
+
+    if not is_inside(path, workspace):
+        return None, f"Path '{path}' is outside the workspace."
+
+    return (workspace / path).resolve(), None
