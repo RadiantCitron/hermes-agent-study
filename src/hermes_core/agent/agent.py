@@ -34,6 +34,7 @@ from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
+    SKILLS_GUIDANCE,
     build_context_files_prompt,
     build_system_prompt,
 )
@@ -206,7 +207,7 @@ class HermesAgent:
 
         assembled = build_system_prompt(
             agent_identity=DEFAULT_AGENT_IDENTITY,
-            tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE],
+            tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE],
             caller_prompt=caller_prompt,
             memory_block=memory_full_block,
             context_files_block=context_block if context_block else None,

@@ -46,6 +46,12 @@ SESSION_SEARCH_GUIDANCE = (
     "cross-session context exists, use session_search to recall it before asking them to repeat themselves."
 )
 
+SKILLS_GUIDANCE = (
+    "You have access to reusable skills (procedural memories) stored as read-only reference files. "
+    "Before starting a task, use skills_list to check available skill names and descriptions. "
+    "If a relevant skill exists, use skill_view to read its full procedure or attached files and follow its instructions."
+)
+
 PLATFORM_HINTS = {
     "cli": "You are a CLI AI Agent. Try not to use markdown but simple text renderable inside a terminal.",
     "discord": "You are in a Discord server communicating with your user.",
