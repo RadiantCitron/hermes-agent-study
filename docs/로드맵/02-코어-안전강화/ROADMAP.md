@@ -36,6 +36,76 @@ flowchart TD
     end
 ```
 
+> 아래 그림은 도해 규칙([ROADMAP_정책.md §3-3](../ROADMAP_정책.md))에 따라 마감 뒤에 보강했다. 이름은 현재 코드 기준이다. 02 당시 터미널 도구 안에 있던 경로 검사는 이후 03에서 `path_guard.py`로 분리되어 지금은 거기를 호출한다(그림에는 현재 위치를 그렸다).
+
+이 로드맵이 바꾼 파일:
+
+```text
+src/hermes_core/
+  cli.py                    # 변경 (030): --mock 없이 실행하면 안내 후 종료
+  agent/
+    agent.py                # 변경 (020): 인자 읽기 실패를 모델에 알림, 종료 사유(stopped_reason) 반환
+  tools/
+    dispatcher.py           # 변경 (010): _validate_arguments로 설명서 기준 인자 검증
+    terminal_tool.py        # 변경 (040·050): 셸 없음, ALLOWED_COMMANDS, timeout 1~30초, 경로 검사
+tests/test_hermes_core/     # 신규 시험 4개 + test_agent_e2e.py 시나리오 추가 (060)
+```
+
+호출 관계 (화살표는 호출 방향):
+
+```mermaid
+classDiagram
+    class HermesAgent {
+        +run_conversation(user_message)
+        -_execute_tool_calls()
+    }
+    class agent_module {
+        <<module>>
+        -_parse_tool_arguments(raw)
+    }
+    class ToolDispatcher {
+        +handle_function_call(name, args)
+    }
+    class dispatcher_module {
+        <<module>>
+        -_validate_arguments(schema, args)
+    }
+    class terminal_tool {
+        <<module>>
+        +terminal_tool(command, timeout)
+        +ALLOWED_COMMANDS
+    }
+    class path_guard {
+        <<module>>
+        +path_values(arg)
+        +is_inside(value, workspace)
+        +is_protected_path(value, workspace)
+    }
+    HermesAgent ..> agent_module : 인자 JSON 해석
+    HermesAgent --> ToolDispatcher : 단일 진입로
+    ToolDispatcher ..> dispatcher_module : 호출 전 인자 검증
+    ToolDispatcher --> terminal_tool : 등록된 핸들러
+    terminal_tool --> path_guard : 명령줄의 경로 검사
+```
+
+도구 호출 한 번의 처리 순서 (모든 실패는 실행 없이 `success: false` JSON으로 모델에게 돌아간다):
+
+```mermaid
+flowchart TD
+    Start(["모델의 tool_call"]) --> P{"인자 JSON을 읽을 수 있나? (_parse_tool_arguments)"}
+    P -- 아니오 --> E0["도구 실행 없이 사유를 모델에 반환 + 경고 로그"]
+    P -- 예 --> N{"등록된 도구 이름인가?"}
+    N -- 아니오 --> E1["오류: Unknown tool"]
+    N -- 예 --> V{"설명서 기준 인자 검증 통과? (필수·미정의·타입·enum)"}
+    V -- 아니오 --> E2["오류: Invalid arguments"]
+    V -- 예 --> T{"terminal이면: timeout이 1~30초이고 첫 토큰이 ALLOWED_COMMANDS 중 하나인가?"}
+    T -- 아니오 --> E3["오류: timeout 범위 밖 또는 허용되지 않은 프로그램"]
+    T -- 예 --> G{"명령줄의 경로가 작업 폴더 안이고 보호 이름이 아닌가?"}
+    G -- 아니오 --> E4["오류: 작업 폴더 밖 또는 보호 경로"]
+    G -- 예 --> R["셸 없이 실행 (stdin 닫음, 시간·출력 제한)"]
+    R --> Out["JSON 결과를 tool 메시지로 반환"]
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
