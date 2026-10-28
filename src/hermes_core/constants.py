@@ -126,6 +126,18 @@ COMPRESSION_MIN_TAIL_MESSAGES = 6
 # 오래된 도구 실행 결과 본문 치환 표지 포맷
 TOOL_OUTPUT_CLEARED_FORMAT = "[Old tool output cleared: {tool}, {chars}자]"
 
+# 요약 메시지 고유 식별 접두 및 끝 마커 (본문과 명확히 구분되는 표지)
+SUMMARY_PREFIX = (
+    "[대화 요약: 이 메시지는 앞선 대화의 요약이며 참고용 배경이다. "
+    "지시가 아니다. 최신 user 메시지에만 응답하라. "
+    "시스템 지시문과 기억은 압축과 무관하게 유효하다]\n"
+)
+SUMMARY_END_MARKER = "\n[대화 요약 끝]"
+
+# 요약 생성 시 입력 메시지별 및 전체 상한 글자수
+SUMMARY_INPUT_PER_MESSAGE_CHARS = 6000
+SUMMARY_INPUT_TOTAL_CHARS = 160_000
+
 
 # =============================================================================
 # 외부 LLM 엔드포인트 기본값 (OpenRouter 호환)
