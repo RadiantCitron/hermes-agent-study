@@ -53,6 +53,94 @@ flowchart TD
           └ 헤드(불변) ┘        └ 중간 대체 ┘      └ 테일(토큰 예산) ┘
 ```
 
+> 아래 그림은 도해 규칙([ROADMAP_정책.md §3-3](../ROADMAP_정책.md))에 따라 마감 뒤에 보강했다. 이름은 현재 코드 기준이다.
+
+이 로드맵이 만들거나 바꾼 파일:
+
+```text
+src/hermes_core/
+  constants.py              # 변경: 창 크기·임계 비율·보호 개수·요약 표지 상수
+  cli.py                    # 변경 (010·050): result.messages를 다음 턴 이력으로, --context-window
+  session_db.py             # 변경 (050): 스키마 v4(active·compacted·is_copy), archive_and_compact, 읽기 필터
+  agent/
+    context_budget.py       # 신규 (020): 토큰 추정, 임계값, 거부 후 재시도 판정
+    compression.py          # 신규 (030·040): 가지치기·경계·요약·조립·짝 정리, compress_messages
+    agent.py                # 변경 (050): 모델 호출 직전 한 지점에서 압축
+tests/test_hermes_core/
+  test_context_budget.py, test_compression_*.py   # 신규
+```
+
+모듈과 함수의 관계:
+
+```mermaid
+classDiagram
+    class HermesAgent {
+        +run_conversation(user_message, conversation_history)
+    }
+    class context_budget {
+        <<module>>
+        +estimate_messages_tokens(messages, tools)
+        +compression_threshold(window, ratio)
+        +should_compress(tokens, threshold)
+        +compression_tail_budget(threshold)
+        +may_retry_after_reject(current, rejected_at)
+    }
+    class compression {
+        <<module>>
+        +compress_messages(messages, llm_client, ...)
+        +find_previous_summary(messages)
+        +split_for_compression(messages, ...)
+        +prune_old_tool_results(messages, keep_from)
+        +generate_summary(...)
+        +build_static_summary(middle)
+        +assemble_compressed(head, summary, tail)
+        +sanitize_tool_pairs(messages)
+    }
+    class CompressionResult {
+        +messages
+        +summary
+        +used_fallback
+        +tokens_before
+        +tokens_after
+    }
+    class SessionDB {
+        +archive_and_compact(session_id, new_messages, summary_index)
+        +get_messages_as_conversation(session_id)
+    }
+    HermesAgent --> context_budget : 임계값 판정
+    HermesAgent --> compression : compress_messages
+    compression ..> CompressionResult : 반환 (거부면 None)
+    compression ..> context_budget : 토큰 추정
+    HermesAgent --> SessionDB : 압축 성공 시에만 원장 교체
+```
+
+압축이 발동하는 한 번의 순서 (모델 호출 직전):
+
+```mermaid
+sequenceDiagram
+    participant A as HermesAgent
+    participant B as context_budget
+    participant C as compression
+    participant L as LLM 클라이언트
+    participant DB as SessionDB
+
+    A->>B: 토큰 추정 · 임계값 비교 (should_compress)
+    B-->>A: 임계값 초과
+    A->>C: compress_messages(messages, llm_client)
+    C->>C: 이전 요약 찾기 → 헤드·중간·테일 나누기 → 도구 출력 가지치기
+    C->>L: 요약 요청 1회 (tools 없음)
+    alt 요약 성공
+        L-->>C: 요약문
+    else 요약 실패
+        C->>C: build_static_summary (정적 대체 요약, used_fallback)
+    end
+    C->>C: assemble_compressed → 도구 호출·결과 짝 정리
+    C-->>A: CompressionResult (줄지 않았으면 None = 거부)
+    A->>DB: archive_and_compact (보관 + 압축본 삽입, 단일 트랜잭션)
+    A->>A: messages[:] = 압축본 (DB 성공 뒤에만 교체)
+    A->>L: chat_completion(압축된 messages)
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
