@@ -37,6 +37,9 @@ SKILL_VIEW_MAX_CHARS = 20_000
 SKILL_LINKED_FILES_MAX_PER_KIND = 100
 SKILL_LINKED_DIRS = ("references", "templates", "assets", "scripts")
 
+# 서브에이전트(자식) 허용 도구 목록 (07 로드맵)
+CHILD_TOOL_NAMES = ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view")
+
 
 def get_hermes_home() -> Path:
     """Hermes 상태 데이터(메모리, 세션 DB)가 저장되는 홈 디렉터리 반환.

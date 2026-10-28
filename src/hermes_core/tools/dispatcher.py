@@ -8,10 +8,11 @@
   - 전역 의존성 해소: MemoryStore와 SessionDB를 명시적으로 주입받아 격리된 인스턴스를 유지.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 import json
 from typing import Any, Optional
 
+from hermes_core.constants import CHILD_TOOL_NAMES
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
@@ -127,41 +128,86 @@ class ToolDispatcher:
             )
 
 
+_DEFAULT_TOOL_NAMES = (
+    "memory",
+    "session_search",
+    "terminal",
+    "read_file",
+    "write_file",
+    "patch",
+    "skills_list",
+    "skill_view",
+)
+
+
 def create_default_dispatcher(
     memory_store: Optional[MemoryStore] = None,
     session_db: Optional[SessionDB] = None,
+    include: Optional[Collection[str]] = None,
 ) -> ToolDispatcher:
-    """Hermes 핵심 도구 3종(memory, session_search, terminal)이 등록된 기본 디스패처 생성."""
+    """Hermes 핵심 도구들이 등록된 기본 디스패처 생성.
+
+    include가 주어지면 해당 이름의 도구만 등록한다.
+    기본 도구 이름 목록에 없는 이름이 include에 있으면 ValueError를 발생시킨다.
+    """
+    if include is not None:
+        unknown = [name for name in include if name not in _DEFAULT_TOOL_NAMES]
+        if unknown:
+            raise ValueError(f"Unknown tool name(s) in include: {unknown}")
+        include_set = set(include)
+    else:
+        include_set = None
+
+    def _should_register(name: str) -> bool:
+        return include_set is None or name in include_set
+
     dispatcher = ToolDispatcher()
 
     # 1. Memory 도구 등록
-    def _memory_handler(**kwargs):
-        return memory_tool(store=memory_store, **kwargs)
+    if _should_register("memory"):
+        def _memory_handler(**kwargs):
+            return memory_tool(store=memory_store, **kwargs)
 
-    dispatcher.register_tool("memory", _memory_handler, MEMORY_SCHEMA)
+        dispatcher.register_tool("memory", _memory_handler, MEMORY_SCHEMA)
 
     # 2. Session Search 도구 등록
-    def _search_handler(**kwargs):
-        return session_search_tool(db=session_db, **kwargs)
+    if _should_register("session_search"):
+        def _search_handler(**kwargs):
+            return session_search_tool(db=session_db, **kwargs)
 
-    dispatcher.register_tool("session_search", _search_handler, SESSION_SEARCH_SCHEMA)
+        dispatcher.register_tool("session_search", _search_handler, SESSION_SEARCH_SCHEMA)
 
     # 3. Terminal 도구 등록
-    dispatcher.register_tool("terminal", terminal_tool, TERMINAL_SCHEMA)
+    if _should_register("terminal"):
+        dispatcher.register_tool("terminal", terminal_tool, TERMINAL_SCHEMA)
 
     # 4. Read File 도구 등록
-    dispatcher.register_tool("read_file", read_file_tool, READ_FILE_SCHEMA)
+    if _should_register("read_file"):
+        dispatcher.register_tool("read_file", read_file_tool, READ_FILE_SCHEMA)
 
     # 5. Write File 도구 등록
-    dispatcher.register_tool("write_file", write_file_tool, WRITE_FILE_SCHEMA)
+    if _should_register("write_file"):
+        dispatcher.register_tool("write_file", write_file_tool, WRITE_FILE_SCHEMA)
 
     # 6. Patch 도구 등록
-    dispatcher.register_tool("patch", patch_tool, PATCH_SCHEMA)
+    if _should_register("patch"):
+        dispatcher.register_tool("patch", patch_tool, PATCH_SCHEMA)
 
     # 7. Skills List 도구 등록
-    dispatcher.register_tool("skills_list", skills_list_tool, SKILLS_LIST_SCHEMA)
+    if _should_register("skills_list"):
+        dispatcher.register_tool("skills_list", skills_list_tool, SKILLS_LIST_SCHEMA)
 
     # 8. Skill View 도구 등록
-    dispatcher.register_tool("skill_view", skill_view_tool, SKILL_VIEW_SCHEMA)
+    if _should_register("skill_view"):
+        dispatcher.register_tool("skill_view", skill_view_tool, SKILL_VIEW_SCHEMA)
 
     return dispatcher
+
+
+def create_child_dispatcher() -> ToolDispatcher:
+    """서브에이전트(자식) 전용 디스패처 생성.
+
+    기억(memory)과 세션 검색(session_search)이 제외된 허용 목록 6종 도구만 등록된
+    새로운 인스턴스를 반환한다.
+    """
+    return create_default_dispatcher(include=CHILD_TOOL_NAMES)
