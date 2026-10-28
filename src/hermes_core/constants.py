@@ -32,6 +32,11 @@ SKILL_FILE_NAME = "SKILL.md"
 SKILL_NAME_MAX_CHARS = 64
 SKILL_DESCRIPTION_MAX_CHARS = 1024
 
+# 스킬 조회 및 연결 파일 제한 상수 (030 로드맵)
+SKILL_VIEW_MAX_CHARS = 20_000
+SKILL_LINKED_FILES_MAX_PER_KIND = 100
+SKILL_LINKED_DIRS = ("references", "templates", "assets", "scripts")
+
 
 def get_hermes_home() -> Path:
     """Hermes 상태 데이터(메모리, 세션 DB)가 저장되는 홈 디렉터리 반환.

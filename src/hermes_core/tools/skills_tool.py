@@ -13,12 +13,16 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_core.constants import (
+    FILE_MAX_BYTES,
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_FILE_NAME,
+    SKILL_LINKED_DIRS,
+    SKILL_LINKED_FILES_MAX_PER_KIND,
     SKILL_NAME_MAX_CHARS,
+    SKILL_VIEW_MAX_CHARS,
     get_skills_dir,
 )
-from hermes_core.tools.path_guard import is_inside, is_protected_path
+from hermes_core.tools.path_guard import check_path, is_inside, is_protected_path
 
 
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
@@ -271,6 +275,268 @@ SKILLS_LIST_SCHEMA = {
                     "description": "Optional category to filter skills by. If omitted or empty, lists all skills.",
                 },
             },
+        },
+    },
+}
+
+
+def _read_skill_text_file(target_file: Path) -> tuple[Optional[str], bool, int, Optional[str]]:
+    """스킬 본문 및 부속 파일을 읽는 공통 절차.
+
+    - 파일 크기 상한(FILE_MAX_BYTES) 초과 검사
+    - NUL 바이트 존재 시 이진 파일 거부
+    - utf-8-sig 디코딩 (BOM 제거)
+    - SKILL_VIEW_MAX_CHARS 기준 문자 수 자르기 (truncated 및 total_chars 반환)
+    반환: (content, truncated, total_chars, error_message)
+    """
+    try:
+        size = target_file.stat().st_size
+    except OSError as e:
+        return None, False, 0, f"Failed to access file '{target_file.name}': {e}"
+
+    if size > FILE_MAX_BYTES:
+        return None, False, 0, f"File size ({size} bytes) exceeds limit ({FILE_MAX_BYTES} bytes)."
+
+    try:
+        raw_bytes = target_file.read_bytes()
+    except OSError as e:
+        return None, False, 0, f"Failed to read file '{target_file.name}': {e}"
+
+    if b"\x00" in raw_bytes:
+        return None, False, 0, "Binary file detected (null byte)."
+
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        return None, False, 0, f"Failed to decode file as UTF-8: {e}"
+
+    total_chars = len(text)
+    if total_chars > SKILL_VIEW_MAX_CHARS:
+        content = text[:SKILL_VIEW_MAX_CHARS]
+        truncated = True
+    else:
+        content = text
+        truncated = False
+
+    return content, truncated, total_chars, None
+
+
+def _collect_linked_files(skill_dir: Path) -> dict[str, list[str]]:
+    """스킬 디렉터리 내 허용된 4대 폴더(references, templates, assets, scripts)의 유효한 파일 목록 수집."""
+    resolved_skill_dir = skill_dir.resolve()
+    result: dict[str, list[str]] = {}
+
+    for d in SKILL_LINKED_DIRS:
+        sub_dir = resolved_skill_dir / d
+        if not sub_dir.exists() or not sub_dir.is_dir():
+            continue
+
+        rel_list: list[str] = []
+        for f in sub_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            try:
+                rel_f = f.relative_to(resolved_skill_dir)
+            except ValueError:
+                continue
+
+            rel_posix = rel_f.as_posix()
+            # 보호 이름 검사 (.env*, .git 등)
+            if is_protected_path(rel_posix, resolved_skill_dir):
+                continue
+            # 탈출 및 심볼릭 링크 검사
+            if not is_inside(rel_posix, resolved_skill_dir):
+                continue
+
+            rel_list.append(rel_posix)
+
+        if rel_list:
+            rel_list.sort()
+            if len(rel_list) > SKILL_LINKED_FILES_MAX_PER_KIND:
+                rel_list = rel_list[:SKILL_LINKED_FILES_MAX_PER_KIND]
+            result[d] = rel_list
+
+    return result
+
+
+def skill_view_tool(
+    name: str,
+    file_path: Optional[str] = None,
+    skills_root: Optional[Path] = None,
+) -> str:
+    """스킬의 SKILL.md 본문 또는 부속 파일을 조회하여 JSON 문자열로 반환한다.
+
+    - skills_root가 None이면 get_skills_dir()를 사용하며 항상 resolve() 기준으로 검사한다.
+    - name과 file_path는 path_guard.check_path를 통해 제어문자, 경로 이탈, 보호 이름을 엄격히 검사한다.
+    - name 해석: path 정확 일치 우선 -> 폴더명 또는 머리말 name 일치. 중복 시 candidates, 없을 시 available_skills 반환.
+    - file_path 미지정 시: SKILL.md 본문(20,000자 상한, truncated, total_chars) 및 linked_files 목록 반환.
+    - file_path 지정 시: 스킬 폴더 내 부속 파일 조회 (존재하지 않으면 available_files 반환).
+    - 어떤 경우에도 파일을 생성, 수정, 삭제하지 않는다 (읽기 전용).
+    """
+    if skills_root is None:
+        target_root = get_skills_dir().resolve()
+    else:
+        target_root = Path(skills_root).resolve()
+
+    # 1. name 검사
+    if not isinstance(name, str) or not name.strip():
+        return json.dumps(
+            {"success": False, "error": "Skill name is required and cannot be empty."},
+            ensure_ascii=False,
+        )
+    trimmed_name = name.strip()
+
+    # 2. check_path로 제어문자, 이탈, 보호 이름 차단
+    _, err = check_path(trimmed_name, target_root)
+    if err:
+        return json.dumps(
+            {"success": False, "error": f"Invalid skill name or path: {err}"},
+            ensure_ascii=False,
+        )
+
+    # 3. 루트 디렉터리 존재 여부 확인 및 discover_skills
+    if not target_root.exists() or not target_root.is_dir():
+        return json.dumps(
+            {"success": False, "error": f"Skills directory '{target_root}' does not exist."},
+            ensure_ascii=False,
+        )
+
+    all_skills = discover_skills(target_root)
+
+    # 이름 해석: 1) path == trimmed_name 우선
+    exact_matches = [s for s in all_skills if s.get("path") == trimmed_name]
+    if len(exact_matches) == 1:
+        matched_skill = exact_matches[0]
+    elif len(exact_matches) > 1:
+        matched_skill = exact_matches[0]
+    else:
+        # 2) 폴더 이름 또는 머리말 name 일치
+        name_matches = [
+            s
+            for s in all_skills
+            if s.get("name") == trimmed_name
+            or (s.get("path") and Path(s["path"]).name == trimmed_name)
+        ]
+        if len(name_matches) == 1:
+            matched_skill = name_matches[0]
+        elif len(name_matches) > 1:
+            candidates = [s["path"] for s in name_matches if s.get("path")]
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Multiple skills matched '{trimmed_name}'. Please specify by path.",
+                    "candidates": candidates,
+                },
+                ensure_ascii=False,
+            )
+        else:
+            available = [s["path"] for s in all_skills[:20] if s.get("path")]
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Skill '{trimmed_name}' not found.",
+                    "available_skills": available,
+                },
+                ensure_ascii=False,
+            )
+
+    skill_path_str = matched_skill.get("path") or ""
+    skill_dir = (target_root / skill_path_str).resolve()
+
+    # 4. file_path 분기
+    trimmed_file_path = file_path.strip() if isinstance(file_path, str) and file_path.strip() else None
+
+    if trimmed_file_path is None:
+        # 본문 모드: SKILL.md
+        skill_file = skill_dir / SKILL_FILE_NAME
+        if not skill_file.exists() or not skill_file.is_file():
+            return json.dumps(
+                {"success": False, "error": f"SKILL.md not found in skill '{skill_path_str}'."},
+                ensure_ascii=False,
+            )
+
+        content, truncated, total_chars, read_err = _read_skill_text_file(skill_file)
+        if read_err:
+            return json.dumps({"success": False, "error": read_err}, ensure_ascii=False)
+
+        linked = _collect_linked_files(skill_dir)
+        res_main: dict[str, Any] = {
+            "success": True,
+            "name": matched_skill.get("name"),
+            "description": matched_skill.get("description"),
+            "category": matched_skill.get("category"),
+            "path": skill_path_str,
+            "content": content,
+            "truncated": truncated,
+            "total_chars": total_chars,
+        }
+        if linked:
+            res_main["linked_files"] = linked
+
+        return json.dumps(res_main, ensure_ascii=False)
+    else:
+        # 부속 파일 모드
+        resolved_sub, path_err = check_path(trimmed_file_path, skill_dir)
+        if path_err:
+            return json.dumps(
+                {"success": False, "error": f"Invalid file_path: {path_err}"},
+                ensure_ascii=False,
+            )
+
+        if not resolved_sub.exists():
+            available_files = _collect_linked_files(skill_dir)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"File '{trimmed_file_path}' not found in skill '{skill_path_str}'.",
+                    "available_files": available_files,
+                },
+                ensure_ascii=False,
+            )
+
+        if not resolved_sub.is_file():
+            return json.dumps(
+                {"success": False, "error": f"Path '{trimmed_file_path}' is a directory, not a file."},
+                ensure_ascii=False,
+            )
+
+        content, truncated, total_chars, read_err = _read_skill_text_file(resolved_sub)
+        if read_err:
+            return json.dumps({"success": False, "error": read_err}, ensure_ascii=False)
+
+        res_sub: dict[str, Any] = {
+            "success": True,
+            "name": matched_skill.get("name"),
+            "path": skill_path_str,
+            "file": trimmed_file_path,
+            "content": content,
+            "truncated": truncated,
+            "total_chars": total_chars,
+        }
+        return json.dumps(res_sub, ensure_ascii=False)
+
+
+SKILL_VIEW_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "skill_view",
+        "description": (
+            "View the full content of a skill (SKILL.md) or one of its linked/attached files. "
+            "To view the main skill, specify only 'name'. To view an attached file, also specify 'file_path'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name or relative path of the skill to view.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Optional relative path of an attached file inside the skill directory to view.",
+                },
+            },
+            "required": ["name"],
         },
     },
 }
