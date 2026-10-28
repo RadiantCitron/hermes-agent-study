@@ -4,14 +4,17 @@
 - 대응 원본: hermes-agent/tools/terminal_tool.py
 - 핵심 원리:
   - 셸을 거치지 않고 허용목록의 프로그램만 실행 (명령 문자열을 인자 목록으로 나눠 직접 실행).
+  - 작업 폴더에서 실행하고, 인자의 경로가 (심볼릭 링크를 풀어) 작업 폴더 밖이면 실행하지 않음.
+    명령줄에 적힌 경로만 검사하며, 프로그램이 스스로 따라가는 링크(예: grep -S)는 검사하지 못한다.
   - 서브프로세스 타임아웃(1~30초, 기본 30초) 및 출력 상한선(10,000자) 가드.
   - JSON 규격 반환으로 도구 디스패처에서 일관된 포맷 유지.
 """
 
 import json
 import shlex
+from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Optional
 
 TERMINAL_MAX_OUTPUT_CHARS = 10_000
 TERMINAL_MAX_TIMEOUT = 30
@@ -26,7 +29,8 @@ TERMINAL_SCHEMA = {
         "description": (
             "Run an allowed program without a shell and return its output. "
             f"Allowed programs: {', '.join(ALLOWED_COMMANDS)}. "
-            "Pipes, redirection, variables and command substitution are not interpreted."
+            "Pipes, redirection, variables and command substitution are not interpreted. "
+            "Paths in arguments must stay inside the working directory."
         ),
         "parameters": {
             "type": "object",
@@ -52,8 +56,33 @@ def _failure(error: str) -> str:
     return json.dumps({"success": False, "error": error}, ensure_ascii=False)
 
 
-def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT) -> str:
-    """허용목록의 프로그램 하나를 셸 없이 실행하고 JSON 문자열로 결과를 반환."""
+def _path_values(arg: str) -> list[str]:
+    """인자에서 경로로 검사할 값을 골라낸다. 옵션 자체는 건너뛰고, 옵션에 붙은 값은 검사 대상이다.
+
+    `--opt=값` → 값, `-fVALUE`(길이 3 이상인 짧은 옵션) → VALUE, `--opt`·`-r`·`-` → 없음, 그 밖 → 인자 전체.
+    """
+    if arg.startswith("--"):
+        _, has_value, value = arg.partition("=")
+        return [value] if has_value else []
+    if arg.startswith("-"):
+        return [arg[2:]] if len(arg) > 2 else []
+    return [arg]
+
+
+def _is_inside(value: str, workspace: Path) -> bool:
+    """작업 폴더 기준으로 value를 실제 경로로 풀었을 때(심볼릭 링크 포함) 작업 폴더 안인가."""
+    try:
+        resolved = (workspace / value).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return resolved.is_relative_to(workspace)
+
+
+def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT, workspace: Optional[Path] = None) -> str:
+    """허용목록의 프로그램 하나를 작업 폴더에서 셸 없이 실행하고 JSON 문자열로 결과를 반환.
+
+    workspace가 None이면 호출 시점의 현재 작업 폴더를 쓴다.
+    """
     command = command.strip()
     if not command:
         return _failure("Command cannot be empty.")
@@ -69,9 +98,15 @@ def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT) -> str:
     if args[0] not in ALLOWED_COMMANDS:
         return _failure(f"Command '{args[0]}' is not allowed. Allowed: {', '.join(ALLOWED_COMMANDS)}")
 
+    base = (Path(workspace) if workspace is not None else Path.cwd()).resolve()
+    for arg in args[1:]:
+        if not all(_is_inside(value, base) for value in _path_values(arg)):
+            return _failure(f"Path '{arg}' is outside the workspace.")
+
     try:
         proc = subprocess.run(
             args,
+            cwd=base,
             shell=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,

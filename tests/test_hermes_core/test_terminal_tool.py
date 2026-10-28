@@ -138,3 +138,123 @@ def test_timeout_inside_range_runs():  # 시나리오 20
     result = _run("echo hi", timeout=5)
     assert result["success"] is True
     assert result["stdout"] == "hi\n"
+
+
+# =============================================================================
+# 050: 작업 폴더 경로 제한
+# =============================================================================
+
+OUTSIDE_SECRET = "OUTSIDE-SECRET-CONTENT"
+
+
+@pytest.fixture
+def workspace(in_tmp_dir):
+    """작업 폴더 W: a.txt, sub/b.txt, 폴더 밖 outside.txt를 가리키는 링크 link."""
+    w = in_tmp_dir / "w"
+    (w / "sub").mkdir(parents=True)
+    (w / "a.txt").write_text("hello", encoding="utf-8")
+    (w / "sub" / "b.txt").write_text("bee", encoding="utf-8")
+    outside = in_tmp_dir / "outside.txt"
+    outside.write_text(OUTSIDE_SECRET, encoding="utf-8")
+    (w / "link").symlink_to(outside)
+    return w
+
+
+def _run_in(workspace, command):
+    raw = terminal_tool(command, workspace=workspace)
+    assert OUTSIDE_SECRET not in raw  # 폴더 밖 파일 내용은 어떤 반환값에도 나타나지 않는다
+    return json.loads(raw)
+
+
+def _assert_outside(result):
+    assert result["success"] is False
+    assert "outside" in result["error"]
+
+
+def test_file_in_workspace_is_readable(workspace):  # 시나리오 1
+    result = _run_in(workspace, "cat a.txt")
+    assert result["success"] is True
+    assert "hello" in result["stdout"]
+
+
+def test_file_in_subfolder_is_readable(workspace):  # 시나리오 2
+    assert _run_in(workspace, "cat sub/b.txt")["success"] is True
+
+
+def test_dotdot_that_stays_inside_is_allowed(workspace):  # 시나리오 3
+    assert _run_in(workspace, "cat sub/../a.txt")["success"] is True
+
+
+def test_absolute_path_outside_is_rejected(workspace):  # 시나리오 4
+    _assert_outside(_run_in(workspace, "cat /etc/hosts"))
+
+
+def test_relative_path_escaping_workspace_is_rejected(workspace):  # 시나리오 5
+    _assert_outside(_run_in(workspace, "cat ../outside.txt"))
+
+
+def test_symlink_to_outside_is_rejected(workspace):  # 시나리오 6
+    _assert_outside(_run_in(workspace, "cat link"))
+
+
+def test_recursive_grep_over_outside_path_is_rejected(workspace):  # 시나리오 7
+    assert _run_in(workspace, "grep -r root /etc")["success"] is False
+
+
+def test_grep_in_workspace_works(workspace):  # 시나리오 8
+    assert _run_in(workspace, "grep hello a.txt")["success"] is True
+
+
+def test_long_option_value_path_is_checked(workspace):  # 시나리오 9
+    assert _run_in(workspace, "grep --file=/etc/passwd x a.txt")["success"] is False
+
+
+def test_options_only_are_allowed(workspace):  # 시나리오 10
+    assert _run_in(workspace, "ls -la")["success"] is True
+
+
+def test_runs_inside_workspace(workspace):  # 시나리오 11
+    assert "a.txt" in _run_in(workspace, "ls")["stdout"]
+
+
+def test_pwd_is_the_resolved_workspace(workspace):  # 시나리오 12
+    assert _run_in(workspace, "pwd")["stdout"] == f"{workspace.resolve()}\n"
+
+
+def test_tilde_is_not_expanded_to_home(workspace):  # 시나리오 13
+    result = _run_in(workspace, "ls ~")
+    assert result["success"] is False
+    assert str(workspace.parent) not in result["stdout"]
+
+
+def test_pattern_that_looks_like_outside_path_is_rejected_known_limit(workspace):  # 시나리오 14
+    _assert_outside(_run_in(workspace, "grep / a.txt"))
+
+
+def test_default_workspace_is_current_directory(workspace, monkeypatch):  # 시나리오 15
+    monkeypatch.chdir(workspace)
+    result = json.loads(terminal_tool("cat a.txt"))
+    assert result["success"] is True
+
+
+def test_short_option_with_attached_outside_path_is_rejected(workspace):  # 시나리오 16
+    _assert_outside(_run_in(workspace, "grep -f/etc/passwd x a.txt"))
+
+
+def test_short_option_with_attached_inside_value_is_allowed(workspace):  # 시나리오 17
+    assert _run_in(workspace, "head -n5 a.txt")["success"] is True
+
+
+def test_workspace_argument_from_model_is_blocked_by_dispatcher(workspace, monkeypatch):  # 시나리오 18
+    from hermes_core.tools.dispatcher import create_default_dispatcher
+
+    calls = []
+    monkeypatch.setattr(terminal_module.subprocess, "run", lambda *a, **k: calls.append(1))
+    monkeypatch.chdir(workspace)
+    dispatcher = create_default_dispatcher()
+    result = json.loads(
+        dispatcher.handle_function_call("terminal", {"command": "cat a.txt", "workspace": "/"})
+    )
+    assert result["success"] is False
+    assert "workspace" in result["error"]
+    assert calls == []
