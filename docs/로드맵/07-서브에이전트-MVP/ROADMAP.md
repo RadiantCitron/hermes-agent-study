@@ -25,6 +25,7 @@ src/hermes_core/
   agent/
     agent.py                        [변경] 자식용 인자, 안내문 연동                    (020, 040)
     prompt_builder.py               [변경] SUBAGENT_GUIDANCE, 자식 포커스 프롬프트     (040)
+  cli.py                            [변경] --delegate 플래그로 위임 켜기(실제 모드 전용)  (045)
   tools/
     dispatcher.py                   [변경] create_default_dispatcher(include), create_child_dispatcher (010)
     delegate_tool.py                [신규] delegate_task 도구, 스키마, 결과 직렬화     (030)
@@ -33,11 +34,12 @@ tests/test_hermes_core/
   test_agent_child_args.py          [신규]                                           (020)
   test_delegate_tool.py             [신규]                                           (030)
   test_subagent_guidance.py         [신규]                                           (040)
+  test_cli_delegate.py              [신규]                                           (045)
   test_agent_e2e.py                 [변경] 위임 E2E 시나리오 추가 (기존 삭제 0줄)    (050)
 docs/작동원리/01-헤르메스코어-작동원리.md  [변경] 위임 영구 사실 동기화                (050)
 ```
 
-`session_db.py`, `llm_client.py`, `path_guard.py`, `file_tools.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 단, 자식 클라이언트 복제를 위해 `OpenRouterClient`에 복제 수단이 필요 없음을 030 지시서에서 확정했다(팩토리 주입).
+`session_db.py`, `llm_client.py`, `path_guard.py`, `file_tools.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 자식 클라이언트는 복제하지 않고 호출부가 팩토리를 넘기므로 `OpenRouterClient`에 복제 수단이 필요 없다(030 지시서에서 확정).
 
 ### 2-2. 구성요소 흐름 (As-Is → To-Be)
 
@@ -175,7 +177,7 @@ flowchart TD
 | 5 | 자식의 쓰기가 작업 폴더·보호 파일을 망침 | 샌드박스 오염 | 자식도 같은 `path_guard`·쓰기 금지 정책. `.env`·`.git`·지시문 파일 차단을 자식 경로에서 재시험 |
 | 6 | 자식 도구 인자 스키마 불일치·파싱 실패 | 비정형 출력 | 기존 `ToolDispatcher` 인자 검증·`_parse_tool_arguments` 복구가 자식에도 동일 적용 |
 | 7 | 자식이 예외로 부모를 죽임 | 안정성 | 생성·실행 예외를 결과 `status: failed`로 변환 |
-| 8 | 위임이 비용을 곱함 | 비용 | 자식 반복 상한 25, 부모 반복 상한 50. 060에서 호출 수 관찰 |
+| 8 | 위임이 비용을 곱함 | 비용 | 자식 반복 상한 25, 부모 반복 상한 50. CLI에서는 `--delegate` 플래그를 줄 때만 켠다(045). 060에서 호출 수 관찰 |
 | 9 | 자식 세션이 닫히지 않고 남음 | 정합성 | 성공·실패 모두 `end_session`(finally) |
 | 10 | 클라이언트 복제 방법이 없음 | 설계 불확실 | **해소(030 지시서)**: 복제 대신 팩토리 주입. `llm_client.py` 무변경 |
 
