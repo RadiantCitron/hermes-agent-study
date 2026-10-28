@@ -12,3 +12,12 @@ id = "openrouter-api-key"
 description = "OpenRouter API key (sk-or-v1-...)"
 regex = '''sk-or-v1-[A-Za-z0-9]{32,}'''
 keywords = ["sk-or-v1-"]
+
+# 시험용 가짜 키 상수 허용 (RULE-004). 04 구현 커밋의 시험 코드(`fake_key = "..."` 등)가 generic-api-key에 걸려
+# 푸시가 막혔다(2026-10-28). 허용 범위는 코어 시험 코드 한 곳과 이 규칙 하나로 좁힌다:
+# tests/test_hermes_core/ 아래 .py 파일의 generic-api-key만 제외하며, openrouter-api-key 규칙과
+# 그 밖의 모든 경로(src, docs, tests/test_scripts 등)는 그대로 검출한다.
+[[allowlists]]
+description = "코어 시험 코드의 가짜 키 상수"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/test_hermes_core/.*\.py$''']
