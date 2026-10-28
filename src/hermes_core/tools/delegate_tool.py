@@ -16,6 +16,7 @@ import json
 from typing import Any, Optional
 
 from hermes_core.agent.agent import HermesAgent
+from hermes_core.agent.prompt_builder import build_child_system_message
 from hermes_core.constants import (
     DELEGATE_CHILD_MAX_ITERATIONS,
     DELEGATE_SUMMARY_MAX_CHARS,
@@ -87,7 +88,7 @@ def register_delegate_tool(
             llm_client=child_client,
             max_iterations=max_iterations,
             quiet_mode=True,
-            system_message=context,
+            system_message=build_child_system_message(context),
             parent_session_id=parent_session_id,
             source=SUBAGENT_SOURCE,
             skip_memory=True,

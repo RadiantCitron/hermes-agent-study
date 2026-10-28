@@ -32,11 +32,9 @@ from hermes_core.agent.context_budget import (
 )
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
-    MEMORY_GUIDANCE,
-    SESSION_SEARCH_GUIDANCE,
-    SKILLS_GUIDANCE,
     build_context_files_prompt,
     build_system_prompt,
+    select_tools_guidance,
 )
 from hermes_core.constants import (
     COMPRESSION_HEAD_MESSAGES,
@@ -221,9 +219,18 @@ class HermesAgent:
 
         caller_prompt = system_message if system_message is not None else self.system_message
 
+        # 등록된 도구 이름 기반 가이던스 선택
+        tool_schemas = self.dispatcher.get_tools_schema()
+        tool_names = [
+            s.get("function", {}).get("name")
+            for s in tool_schemas
+            if s.get("function", {}).get("name")
+        ]
+        tools_guidance = select_tools_guidance(tool_names)
+
         assembled = build_system_prompt(
             agent_identity=DEFAULT_AGENT_IDENTITY,
-            tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE],
+            tools_guidance=tools_guidance,
             caller_prompt=caller_prompt,
             memory_block=memory_full_block,
             context_files_block=context_block if context_block else None,

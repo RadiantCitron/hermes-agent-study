@@ -10,6 +10,7 @@
   3. 컨텍스트 파일 헤드/테일(70/20) 안전 절단 가드(_truncate_content).
 """
 
+from collections.abc import Collection
 from datetime import datetime
 import os
 from pathlib import Path
@@ -50,6 +51,25 @@ SKILLS_GUIDANCE = (
     "You have access to reusable skills (procedural memories) stored as read-only reference files. "
     "Before starting a task, use skills_list to check available skill names and descriptions. "
     "If a relevant skill exists, use skill_view to read its full procedure or attached files and follow its instructions."
+)
+
+SUBAGENT_GUIDANCE = (
+    "## Subagent Delegation (`delegate_task`)\n"
+    "- When to delegate: Use `delegate_task` for independent, exploratory, or multi-step subtasks "
+    "(e.g. codebase exploration, deep investigation) whose intermediate tool calls would clutter your context.\n"
+    "- When NOT to delegate: Do not delegate tasks that require only a single tool call.\n"
+    "- Complete instructions: The subagent has no access to your conversation history. Provide all required details "
+    "and constraints in `goal` and `context`.\n"
+    "- Verify summary: The subagent returns only a summary. Directly verify critical results when needed."
+)
+
+CHILD_AGENT_PROMPT = (
+    "You are a focused subagent delegated to accomplish a single specific task.\n"
+    "You do not have access to the parent conversation history. Use your available tools "
+    "(terminal, file operations, skills) to thoroughly investigate, execute, and verify the task.\n"
+    "You cannot ask clarifying questions or delegate tasks further. Once your task is complete, "
+    "respond with a concise summary covering: (1) what you did, (2) what you discovered, "
+    "(3) files modified or inspected, and (4) any remaining issues or caveats."
 )
 
 PLATFORM_HINTS = {
@@ -200,3 +220,35 @@ def build_system_prompt(
         parts.append(PLATFORM_HINTS[platform_key])
 
     return "\n\n".join(parts)
+
+
+def select_tools_guidance(tool_names: Collection[str]) -> list[str]:
+    """등록된 도구 이름 목록에 대응하는 안내문만 순서대로 선택하여 반환.
+
+    선택 순서:
+    1. MEMORY_GUIDANCE: 'memory' 포함 시
+    2. SESSION_SEARCH_GUIDANCE: 'session_search' 포함 시
+    3. SKILLS_GUIDANCE: 'skills_list' 및 'skill_view' 모두 포함 시
+    4. SUBAGENT_GUIDANCE: 'delegate_task' 포함 시
+    """
+    names_set = set(tool_names) if tool_names else set()
+    guidance: list[str] = []
+
+    if "memory" in names_set:
+        guidance.append(MEMORY_GUIDANCE)
+    if "session_search" in names_set:
+        guidance.append(SESSION_SEARCH_GUIDANCE)
+    if "skills_list" in names_set and "skill_view" in names_set:
+        guidance.append(SKILLS_GUIDANCE)
+    if "delegate_task" in names_set:
+        guidance.append(SUBAGENT_GUIDANCE)
+
+    return guidance
+
+
+def build_child_system_message(context: Optional[str] = None) -> str:
+    """자식 서브에이전트용 시스템 메시지 조립."""
+    if context and context.strip():
+        return f"{CHILD_AGENT_PROMPT}\n\n## Context from the parent agent\n\n{context.strip()}"
+    return CHILD_AGENT_PROMPT
+
