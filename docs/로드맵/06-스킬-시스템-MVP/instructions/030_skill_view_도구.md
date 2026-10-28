@@ -14,8 +14,9 @@
    1. `name`이 비어 있거나 공백뿐이면 실패.
    2. `path_guard.check_path(name, 스킬 루트)` — 제어문자, 루트 이탈(심볼릭 링크 포함), 보호 이름(`.env*`, `.git`)을 거부한다. [`path_guard.py`](../../../../src/hermes_core/tools/path_guard.py)는 **수정하지 않고 재사용**한다.
    3. `discover_skills`로 스킬 목록을 얻어 이름을 해석한다: `path == name` 우선, 아니면 폴더 이름 또는 머리말 `name`이 `name`과 같은 스킬 전부. 0개면 `available_skills`(처음 20개 `path`)를 담은 실패, 2개 이상이면 `candidates`(그 `path`들)를 담은 실패. 조용히 하나를 고르지 않는다.
-   4. `file_path`가 없으면 **본문**: `SKILL.md`를 읽어(크기 `FILE_MAX_BYTES` 초과면 실패, UTF-8이 아니면 실패) `{"success": true, "name", "description", "category", "path", "content", "truncated", "linked_files"?}`. `content`는 파일 전문(머리말 포함)을 `SKILL_VIEW_MAX_CHARS`로 자른 것이며 자르면 `truncated: true`. `linked_files`는 [ROADMAP §6-3](../ROADMAP.md) 규칙(4개 폴더, 종류별 `SKILL_LINKED_FILES_MAX_PER_KIND`개, 정렬, 실제 경로가 스킬 폴더 밖이거나 보호 이름인 것 제외, 비면 키 없음).
-   5. `file_path`가 있으면 **부속 파일**: `check_path(file_path, 그 스킬 폴더)` 통과 → 존재·파일 여부 확인 → `FILE_MAX_BYTES` 초과 실패 → 바이트로 읽어 NUL 포함이면 이진 파일 실패, UTF-8 디코드 실패 시 실패 → `{"success": true, "name", "path", "file", "content", "truncated"}`. 파일이 없으면 `available_files`(폴더별, 종류별 상한 적용)를 담은 실패.
+   4. `file_path`가 없으면 **본문**: `SKILL.md`를 아래의 공통 읽기 절차로 읽어 `{"success": true, "name", "description", "category", "path", "content", "truncated", "total_chars", "linked_files"?}`. `content`는 파일 전문(머리말 포함)을 `SKILL_VIEW_MAX_CHARS`(문자 수 기준)로 자른 것이며 자르면 `truncated: true`, `total_chars`는 자르기 전 문자 수다(잘린 뒤 나머지를 읽는 방법은 06에 없으므로 모델이 잘렸음과 크기를 알 수 있게 한다). `linked_files`는 [ROADMAP §6-3](../ROADMAP.md) 규칙(4개 폴더, 종류별 `SKILL_LINKED_FILES_MAX_PER_KIND`개, 정렬, 실제 경로가 스킬 폴더 밖이거나 보호 이름인 것 제외, 비면 키 없음).
+   5. `file_path`가 있으면 **부속 파일**: `check_path(file_path, 그 스킬 폴더)` 통과 → 존재·파일 여부 확인 → 공통 읽기 절차 → `{"success": true, "name", "path", "file", "content", "truncated", "total_chars"}`. 스킬 폴더 **안의 어떤 파일이든**(보호 이름 제외) 읽을 수 있고, 목록(`linked_files`·`available_files`)은 발견 편의를 위해 4개 폴더만 보여 준다. 파일이 없으면 `available_files`(폴더별, 종류별 상한 적용)를 담은 실패.
+   - **공통 읽기 절차**(본문과 부속 파일이 같은 함수를 쓴다): 크기가 `FILE_MAX_BYTES`를 넘으면 실패 → 바이트로 읽어 NUL이 있으면 이진 파일 실패 → `utf-8-sig`로 디코드(BOM 제거, 실패하면 실패) → 문자 수 기준으로 자르기.
    6. 어떤 경우에도 파일을 쓰거나 만들거나 지우지 않는다. 예기치 못한 예외(`OSError` 등)는 실패 JSON으로 바꾼다.
 2. **`SKILL_VIEW_SCHEMA`**: 이름 `skill_view`, `parameters.properties`는 `name`(string), `file_path`(string), `required == ["name"]`. `skills_root`는 노출하지 않는다.
 3. **디스패처 등록**: `dispatcher.register_tool("skill_view", skill_view_tool, SKILL_VIEW_SCHEMA)`.
@@ -35,28 +36,30 @@
 
 ## 3. 인수 테스트 시나리오 (구현 전 작성, 임의 변경 금지)
 
-공통 준비(`tmp_path`): `<HERMES_HOME>/skills/hello/SKILL.md`, `skills/devops/deploy/SKILL.md`(머리말 `name: Deploy App`) + `references/api.md`, `templates/t.yaml`, `assets/logo.bin`(NUL 포함), `scripts/run.sh`, 스킬 폴더 안 `.env`(내용 `KEY=1`). 스킬 루트 **밖**에 `<HERMES_HOME>/state.db`(내용 `SECRET`)와 `<HERMES_HOME>/outside.txt`(내용 `OUTSIDE`).
+공통 준비(`tmp_path`): `<HERMES_HOME>/skills/hello/SKILL.md`, `skills/devops/deploy/SKILL.md`(머리말 `name: Deploy App`) + `references/api.md`, `templates/t.yaml`, `assets/logo.bin`(NUL 포함), `assets/bad.txt`(UTF-8 아닌 바이트), `scripts/run.sh`, 스킬 폴더 안 `.env`와 `references/.env`(내용 `KEY=1`), 스킬 폴더 바로 아래 `notes.md`(`linked_files` 4개 폴더 밖의 파일). 스킬 루트 **밖**에 `<HERMES_HOME>/state.db`(내용 `SECRET`)와 `<HERMES_HOME>/outside.txt`(내용 `OUTSIDE`).
 
 | # | 입력 | 기대 결과 |
 |---|---|---|
 | 1 | `name="hello"` | `success true`, `content`가 파일 전문과 같음, `truncated false`, `path "hello"` |
+| 1b | 맨 앞에 BOM이 붙은 `SKILL.md` | `content`가 `\ufeff`로 시작하지 않음 |
 | 2 | `name="devops/deploy"` (path) | 성공. `linked_files`에 `references`/`templates`/`assets`/`scripts` 키가 있고 값에 `references/api.md` 같은 스킬 폴더 기준 상대경로 |
 | 3 | `name="deploy"`(폴더 이름) / `name="Deploy App"`(머리말 이름) | 둘 다 같은 스킬(`path "devops/deploy"`)로 성공 |
 | 4 | `skills_list`가 돌려준 **모든 항목의 `path`**로 `skill_view` | 전부 성공 (목록 → 조회 왕복, 원본의 이름 불일치 재발 방지) |
 | 5 | 이름이 같은 스킬 둘(`a/dup`, `b/dup`)에서 `name="dup"` / `name="a/dup"` | 앞은 실패 + `candidates == ["a/dup", "b/dup"]`, 뒤는 성공 |
-| 6 | 없는 이름 `name="nope"` | 실패, `available_skills`에 `hello` 포함, 최대 20개 |
+| 5b | `foo/SKILL.md`(path `foo`)와 `x/foo/SKILL.md`(path `x/foo`, 폴더 이름 `foo`)가 함께 있을 때 `name="foo"` | `path` 일치가 우선하므로 `path "foo"` 스킬로 성공 (모호하지 않음) |
+| 6 | 없는 이름 `name="nope"` / 스킬이 25개일 때 | 실패, `available_skills`에 `hello` 포함 / 개수가 정확히 20 |
 | 7 | `name=""`, `name="   "` | 실패 |
 | 8 | 이탈 `name`: `"../state.db"`, `"../../etc/passwd"`, `"/etc/passwd"`, `"devops/../../state.db"` | 모두 실패. 응답 어디에도 `SECRET` 없음 |
 | 9 | 이탈 `file_path` (`name="deploy"`): `"../../../state.db"`, `"../../../outside.txt"`, `"../../hello/SKILL.md"`(다른 스킬 폴더), `"/etc/passwd"` | 모두 실패. 응답에 `SECRET`·`OUTSIDE` 없음. (원본 `skill_view`는 이 입력을 검사하지 않음) |
-| 10 | 보호 이름: `file_path=".env"`, `file_path=".git/config"` | 실패. 응답에 `KEY=1` 없음. `linked_files`에도 `.env` 없음 |
+| 10 | 보호 이름: `file_path=".env"`, `file_path="references/.env"`, `file_path=".git/config"` | 모두 실패. 응답에 `KEY=1` 없음. `linked_files["references"]`에 `references/.env`가 없음 |
 | 11 | 제어문자: `name="he\nllo"`, `file_path="refs\x00x"` | 실패 |
 | 12 | 심볼릭 링크: `references/leak.md` → `outside.txt`, `skills/evil` → 스킬 루트 밖 폴더(`SKILL.md` 포함) | `file_path="references/leak.md"` 실패(응답에 `OUTSIDE` 없음), `linked_files`에 `leak.md` 없음, `name="evil"` 실패 |
 | 13 | `file_path="references/api.md"` | 성공, `content`가 파일 전문, `file "references/api.md"`, `truncated false` |
-| 14 | `file_path="SKILL.md"` | 성공, 본문과 같은 내용 |
+| 14 | `file_path="SKILL.md"` / `file_path="notes.md"`(4개 폴더 밖) | 앞은 본문과 같은 내용, 뒤도 성공 (스킬 폴더 안이면 읽을 수 있음) |
 | 15 | 없는 `file_path="references/none.md"` | 실패 + `available_files`에 `references/api.md` 포함 |
 | 16 | 폴더를 가리킴 `file_path="references"` | 실패 (파일이 아님) |
-| 17 | `file_path="assets/logo.bin"`(NUL 포함) / UTF-8이 아닌 바이트 파일 | 둘 다 실패 (이진·디코드), 예외 없음 |
-| 18 | 본문 경계: `SKILL.md` 길이 25,000자 / 정확히 20,000자 / 19,999자 | `content` 길이 20,000이고 `truncated true` / 20,000이고 `truncated false` / 19,999이고 `truncated false`. 부속 파일도 같은 규칙 |
+| 17 | `file_path="assets/logo.bin"`(NUL 포함) / `file_path="assets/bad.txt"`(UTF-8 아님) | 둘 다 실패 (이진·디코드), 예외 없음 |
+| 18 | 본문 경계: `SKILL.md` 길이 25,000자 / 정확히 20,000자 / 19,999자 (한글 문자로도 확인: 문자 수 기준이며 바이트 수가 아님) | `content` 길이 20,000이고 `truncated true`, `total_chars 25000` / 20,000이고 `truncated false` / 19,999이고 `truncated false`. 부속 파일도 같은 규칙 |
 | 19 | 크기 1,000,001바이트 `SKILL.md`, 같은 크기 부속 파일 | 실패 (너무 큼) |
 | 20 | `references/`에 파일 101개 | `linked_files["references"]` 길이 100 (정렬된 앞부분) |
 | 21 | 위 모든 호출 전후 스킬 폴더(경로+내용 해시)와 `<HERMES_HOME>` 직하위 항목 목록 | 동일 (읽기 전용, 새 파일·폴더 없음) |

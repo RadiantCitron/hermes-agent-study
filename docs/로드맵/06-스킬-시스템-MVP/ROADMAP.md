@@ -131,8 +131,8 @@ flowchart TD
 ### 6-3. `skill_view` (030)
 - 인자: `name`(필수), `file_path`(선택). 스키마에 `skills_root` 비노출.
 - **이름 해석**: ① `check_path(name, root)` 통과 못 하면 오류(제어문자·이탈·보호 이름) ② 발견된 스킬 중 `path == name`이면 그것 ③ 아니면 폴더 이름 또는 머리말 `name`이 `name`과 같은 스킬 전부 ④ 0개면 오류 + `available_skills`(처음 20개의 `path`) ⑤ 2개 이상이면 오류 + `candidates`(그 `path`들).
-- **본문**(`file_path` 없음): `{"success": true, "name", "description", "category", "path", "content", "truncated", "linked_files"?}`. `content`는 `SKILL.md` 전문(머리말 포함, 원본과 같음)을 `SKILL_VIEW_MAX_CHARS`(20,000자)로 자른 것, 자르면 `truncated: true`. `linked_files`는 스킬 폴더 아래 `references/`·`templates/`·`assets/`·`scripts/`의 파일(상대경로, 정렬, 종류별 최대 `SKILL_LINKED_FILES_MAX_PER_KIND` = 100, 실제 경로가 스킬 폴더 밖이거나 보호 이름인 것 제외), 비면 키 없음. 크기가 `FILE_MAX_BYTES`를 넘는 `SKILL.md`는 오류.
-- **부속 파일**(`file_path` 있음): `check_path(file_path, 스킬 폴더)` 통과 → 존재·파일 여부 → `FILE_MAX_BYTES` 초과 오류 → 바이트로 읽어 NUL 포함이면 이진 파일 오류, UTF-8 디코드 실패 오류 → `{"success": true, "name", "path", "file", "content", "truncated"}`. 없으면 `available_files`(종류별, 상한 적용) 포함 오류.
+- **본문**(`file_path` 없음): `{"success": true, "name", "description", "category", "path", "content", "truncated", "total_chars", "linked_files"?}`. `content`는 `SKILL.md` 전문(머리말 포함, 원본과 같음)을 `SKILL_VIEW_MAX_CHARS`(20,000자)로 자른 것, 자르면 `truncated: true`. `linked_files`는 스킬 폴더 아래 `references/`·`templates/`·`assets/`·`scripts/`의 파일(상대경로, 정렬, 종류별 최대 `SKILL_LINKED_FILES_MAX_PER_KIND` = 100, 실제 경로가 스킬 폴더 밖이거나 보호 이름인 것 제외), 비면 키 없음. 크기가 `FILE_MAX_BYTES`를 넘는 `SKILL.md`는 오류.
+- **부속 파일**(`file_path` 있음): `check_path(file_path, 스킬 폴더)` 통과 → 존재·파일 여부 → 본문과 같은 공통 읽기 절차(`FILE_MAX_BYTES` 초과 오류, NUL 포함이면 이진 파일 오류, `utf-8-sig` 디코드 실패 오류, 문자 수 기준 자르기) → `{"success": true, "name", "path", "file", "content", "truncated", "total_chars"}`. 스킬 폴더 안의 어떤 파일이든 읽을 수 있고(보호 이름 제외), 목록만 4개 폴더로 한정한다. 없으면 `available_files`(종류별, 상한 적용) 포함 오류.
 - **읽기 전용**: 파일을 열 때 읽기만. 어떤 경우에도 쓰기·생성·삭제를 하지 않는다.
 - 오류 형식은 파일 도구와 같은 `{"success": false, "error": "…"}` (추가 키 허용).
 
