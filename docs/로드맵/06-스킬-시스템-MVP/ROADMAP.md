@@ -61,6 +61,113 @@ flowchart TD
     hello/SKILL.md
 ```
 
+이 로드맵이 새로 만들거나 바꾸는 파일 (§3의 목록을 트리로 옮긴 것):
+
+```text
+src/hermes_core/
+  constants.py              # 변경: 스킬 이름·본문·연결 파일 상한 상수, get_skills_dir()   (010·030)
+  tools/
+    skills_tool.py          # 신규: 파서·발견·skills_list·skill_view                       (010·020·030)
+    dispatcher.py           # 변경: 도구 2종 등록 (create_default_dispatcher)              (020·030)
+    path_guard.py           # 변경 없음: check_path를 재사용만 한다
+  agent/
+    prompt_builder.py       # 변경: SKILLS_GUIDANCE 상수                                  (040)
+    agent.py                # 변경: tools_guidance 목록에 한 항목                          (040)
+tests/test_hermes_core/
+  test_skills_*.py          # 신규                                                         (010~030)
+  test_agent_e2e.py         # 변경: 시나리오 추가                                          (050)
+```
+
+모듈과 함수의 관계 (이름은 기준 코드와 일치. 화살표는 호출·사용 방향):
+
+```mermaid
+classDiagram
+    class ToolDispatcher {
+        +register_tool(name, handler, schema)
+        +get_tools_schema()
+        +handle_function_call(name, args)
+    }
+    class skills_tool {
+        <<module>>
+        +parse_frontmatter(content)
+        +discover_skills(skills_root)
+        +skills_list_tool(category, skills_root)
+        +skill_view_tool(name, file_path, skills_root)
+        -_read_skill_text_file(target_file)
+        -_collect_linked_files(skill_dir)
+    }
+    class path_guard {
+        <<module>>
+        +check_path(path, root)
+        +is_protected_path(value, root)
+    }
+    class prompt_builder {
+        <<module>>
+        +SKILLS_GUIDANCE
+        +build_system_prompt(...)
+    }
+    class HermesAgent {
+        -_build_system_prompt()
+        -_execute_tool_calls()
+    }
+    HermesAgent --> ToolDispatcher : 단일 진입로로 호출
+    HermesAgent --> prompt_builder : tools_guidance에 SKILLS_GUIDANCE
+    ToolDispatcher --> skills_tool : skills_list·skill_view 등록
+    skills_tool --> path_guard : 이름·file_path 검사
+```
+
+`path_guard`는 이 로드맵이 수정하지 않는다(재사용만).
+
+모델이 스킬을 쓰는 한 번의 흐름 (대표 시나리오: 목록 → 본문 → 부속 파일):
+
+```mermaid
+sequenceDiagram
+    participant M as 모델
+    participant A as HermesAgent
+    participant D as ToolDispatcher
+    participant S as skills_tool
+    participant G as path_guard
+    participant F as 스킬 폴더(읽기 전용)
+
+    M->>A: tool_call skills_list()
+    A->>D: handle_function_call("skills_list", {})
+    D->>S: skills_list_tool()
+    S->>F: SKILL.md 탐색, 머리말 해석
+    S-->>M: JSON 이름·설명·분류·path (A가 tool 메시지로 전달)
+    M->>A: tool_call skill_view(name)
+    A->>D: handle_function_call("skill_view", {name})
+    D->>S: skill_view_tool(name)
+    S->>G: check_path(name, 스킬 루트)
+    G-->>S: 통과 또는 오류
+    S->>F: SKILL.md 읽기 (상한 20,000자)
+    S-->>M: JSON 본문 + linked_files
+    M->>A: tool_call skill_view(name, file_path)
+    A->>D: handle_function_call("skill_view", {name, file_path})
+    D->>S: skill_view_tool(name, file_path)
+    S->>G: check_path(file_path, 스킬 폴더)
+    S->>F: 부속 파일 1개 읽기
+    S-->>M: JSON 부속 파일 내용
+```
+
+`skill_view`의 이름 해석 분기 (§6-3의 ①~⑤를 흐름으로 그린 것):
+
+```mermaid
+flowchart TD
+    Start(["skill_view(name)"]) --> C1{"check_path(name, 루트) 통과?"}
+    C1 -- 아니오 --> E1["오류: 제어문자·이탈·보호 이름"]
+    C1 -- 예 --> C2{"발견된 스킬 중 path == name?"}
+    C2 -- 예 --> Found["그 스킬 하나로 확정"]
+    C2 -- 아니오 --> C3{"폴더 이름 또는 머리말 name이 일치하는 스킬 수"}
+    C3 -- 0개 --> E2["오류 + available_skills (최대 20개)"]
+    C3 -- 1개 --> Found
+    C3 -- 2개 이상 --> E3["오류 + candidates (path 목록)"]
+    Found --> C4{"file_path 있음?"}
+    C4 -- 아니오 --> Body["SKILL.md 본문 + linked_files"]
+    C4 -- 예 --> C5{"check_path(file_path, 스킬 폴더) 통과?"}
+    C5 -- 아니오 --> E4["오류: 이탈·보호 이름"]
+    C5 -- 예 --> File["부속 파일 1개 (상한·이진 검사)"]
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
