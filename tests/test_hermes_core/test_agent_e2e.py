@@ -1592,5 +1592,703 @@ def test_r06_050_scenario_08_zero_leakage_in_db(r05_e2e_env):
     db.close()
 
 
+# ==============================================================================
+# 로드맵 07 서브에이전트 MVP 통합 E2E 검증 (가짜 통신) 시나리오 1~12
+# ==============================================================================
+
+import httpx
+from hermes_core.tools.delegate_tool import register_delegate_tool
+from hermes_core.constants import DELEGATE_SUMMARY_MAX_CHARS
+from hermes_core.agent.prompt_builder import SUBAGENT_GUIDANCE
+from hermes_core.tools.dispatcher import CHILD_TOOL_NAMES
+
+
+def _setup_r07_env(env):
+    """로드맵 07 E2E 시나리오 공통 작업 폴더 환경 셋업."""
+    w = env["workspace"]
+    (w / "a.txt").write_text("ALPHA-CONTENT", encoding="utf-8")
+    (w / ".env").write_text("SECRET-MARK", encoding="utf-8")
+    (w / "AGENTS.md").write_text("CTX-MARK", encoding="utf-8")
+
+
+def test_r07_050_scenarios_01_02_03_06_07_full_delegation_cycle(r05_e2e_env):
+    """시나리오 1, 2, 3, 6, 7: 정상 위임 전체 사이클, 격리, 토큰 합산 분리, 검색 격리 및 시스템 프롬프트 불변성 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+    w = r05_e2e_env["workspace"]
+
+    fake_parent_key = "sk-or-v1-" + "r07-fake-parent-key-s01"
+    fake_child_key = "sk-or-v1-" + "r07-fake-child-key-s01"
+
+    # 부모 응답 준비 (2회 호출)
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "call_del_1",
+            "type": "function",
+            "function": {
+                "name": "delegate_task",
+                "arguments": json.dumps({"goal": "read a.txt and write new.txt", "context": "C1"}),
+            },
+        }],
+        prompt_tokens=10,
+        completion_tokens=5,
+    )
+    p2 = _make_mock_provider_payload(
+        content="parent done",
+        prompt_tokens=10,
+        completion_tokens=5,
+    )
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_parent_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    # 자식 응답 준비 (3회 호출)
+    c1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "c_call_1",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps({"path": "a.txt"}),
+            },
+        }],
+        prompt_tokens=100,
+        completion_tokens=10,
+    )
+    c2 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "c_call_2",
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps({"path": "new.txt", "content": "CHILD-NOTE"}),
+            },
+        }],
+        prompt_tokens=200,
+        completion_tokens=20,
+    )
+    c3 = _make_mock_provider_payload(
+        content="finished",
+        prompt_tokens=300,
+        completion_tokens=30,
+    )
+    child_transport = SequentialMockTransport([c1, c2, c3])
+    child_transports = [child_transport]
+
+    def child_llm_factory():
+        t = child_transports.pop(0)
+        return OpenRouterClient(api_key=fake_child_key, model=DEFAULT_REAL_MODEL, transport=t)
+
+    # 부모 에이전트 생성 및 위임 도구 등록
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    res = parent_agent.run_conversation("PARENTMARK: read a.txt and write new.txt")
+
+    # [시나리오 1 검증]
+    assert res["stopped_reason"] == "completed"
+    assert res["final_response"] == "parent done"
+    assert len(parent_transport.captured_requests) == 2
+    assert len(child_transport.captured_requests) == 3
+
+    # 부모 2번째 요청의 delegate_task tool 메시지
+    parent_req_2 = json.loads(parent_transport.captured_requests[1].content.decode("utf-8"))
+    parent_tool_msgs = [m for m in parent_req_2["messages"] if m.get("role") == "tool"]
+    assert len(parent_tool_msgs) == 1
+    tool_payload = json.loads(parent_tool_msgs[0]["content"])
+    assert tool_payload["status"] == "completed"
+    assert tool_payload["summary"] == "finished"
+    assert tool_payload["iterations"] == 3
+
+    # 자식 2번째 요청의 tool 메시지에 ALPHA-CONTENT가 있고 부모 요청 어디에도 없음
+    child_req_2 = json.loads(child_transport.captured_requests[1].content.decode("utf-8"))
+    child_tool_msg = next(m for m in child_req_2["messages"] if m.get("role") == "tool")
+    assert "ALPHA-CONTENT" in child_tool_msg["content"]
+    for preq in parent_transport.captured_requests:
+        assert "ALPHA-CONTENT" not in preq.content.decode("utf-8")
+
+    # 작업 폴더에 new.txt 생성 및 내용 검증
+    new_file = w / "new.txt"
+    assert new_file.exists()
+    assert new_file.read_text(encoding="utf-8") == "CHILD-NOTE"
+
+    # [시나리오 2 검증]
+    # 자식 요청 어디에도 PARENTMARK 없음
+    for creq in child_transport.captured_requests:
+        assert "PARENTMARK" not in creq.content.decode("utf-8")
+
+    # 자식의 모든 요청에서 tools 이름 집합이 정확히 CHILD_TOOL_NAMES (6종)
+    for creq in child_transport.captured_requests:
+        body = json.loads(creq.content.decode("utf-8"))
+        tools = body.get("tools", [])
+        tool_names = {t["function"]["name"] for t in tools}
+        assert tool_names == set(CHILD_TOOL_NAMES)
+
+    # 부모 요청의 tools는 8종 + delegate_task (9종)
+    expected_parent_tools = {"terminal", "read_file", "write_file", "patch", "memory", "session_search", "skills_list", "skill_view", "delegate_task"}
+    for preq in parent_transport.captured_requests:
+        body = json.loads(preq.content.decode("utf-8"))
+        tools = body.get("tools", [])
+        tool_names = {t["function"]["name"] for t in tools}
+        assert tool_names == expected_parent_tools
+
+    # 자식 첫 요청의 마지막 user 메시지가 정확히 goal
+    child_req_1 = json.loads(child_transport.captured_requests[0].content.decode("utf-8"))
+    user_msgs = [m for m in child_req_1["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "read a.txt and write new.txt"
+
+    # [시나리오 3 검증] DB 세션 및 원장
+    cursor = db._conn.execute("SELECT id, source, parent_session_id, ended_at, end_reason FROM sessions")
+    rows = cursor.fetchall()
+    assert len(rows) == 2
+    sessions_by_src = {r[1]: r for r in rows}
+    assert "cli" in sessions_by_src
+    assert "subagent" in sessions_by_src
+    parent_row = sessions_by_src["cli"]
+    child_row = sessions_by_src["subagent"]
+    assert parent_row[0] == parent_agent.session_id
+    assert child_row[2] == parent_agent.session_id
+    assert child_row[3] is not None
+    assert child_row[4] == "completed"
+
+    # llm_calls 격리 및 토큰 합산 분리
+    parent_calls = db.get_llm_calls(parent_agent.session_id)
+    assert len(parent_calls) == 2
+    child_session_id = child_row[0]
+    child_calls = db.get_llm_calls(child_session_id)
+    assert len(child_calls) == 3
+
+    child_input = sum(c["input_tokens"] for c in child_calls)
+    child_output = sum(c["output_tokens"] for c in child_calls)
+    assert child_input == 600
+    assert child_output == 60
+
+    parent_input = sum(c["input_tokens"] for c in parent_calls)
+    parent_output = sum(c["output_tokens"] for c in parent_calls)
+    assert parent_input == 20
+    assert parent_output == 10
+
+    # sessions 행 자체의 토큰 합계도 검증
+    parent_sess = db.get_session(parent_agent.session_id)
+    child_sess = db.get_session(child_session_id)
+    assert parent_sess["input_tokens"] == 20
+    assert parent_sess["output_tokens"] == 10
+    assert child_sess["input_tokens"] == 600
+    assert child_sess["output_tokens"] == 60
+
+    assert tool_payload["tokens"] == {"input": 600, "output": 60}
+
+    # [시나리오 6 검증] session_search 격리
+    search_out = parent_agent.dispatcher.handle_function_call("session_search", {"query": '"ALPHA-CONTENT"'})
+    search_data = json.loads(search_out)
+    assert search_data.get("success") is True
+    assert search_data.get("results") == []
+
+    parent_db_msgs = db.get_messages(parent_agent.session_id)
+    parent_texts = " ".join(str(dict(m)) for m in parent_db_msgs)
+    assert "ALPHA-CONTENT" not in parent_texts
+    assert "CHILD-NOTE" not in parent_texts
+
+    child_db_msgs = db.get_messages(child_session_id)
+    child_texts = " ".join(str(dict(m)) for m in child_db_msgs)
+    assert "ALPHA-CONTENT" in child_texts
+    assert "CHILD-NOTE" in child_texts
+
+    # [시나리오 7 검증] 시스템 메시지 격리
+    parent_req_1 = json.loads(parent_transport.captured_requests[0].content.decode("utf-8"))
+    sys1 = parent_req_1["messages"][0]["content"]
+    sys2 = parent_req_2["messages"][0]["content"]
+    assert sys1 == sys2
+    assert "Known Fact: Initial Memory Item" in sys1
+    assert "CTX-MARK" in sys1
+    assert "delegate_task" in sys1
+    assert db.get_session(parent_agent.session_id)["system_prompt"] == sys1
+
+    child_sys = child_req_1["messages"][0]["content"]
+    assert "Known Fact: Initial Memory Item" not in child_sys
+    assert "CTX-MARK" not in child_sys
+    assert "MEMORY" not in child_sys
+    assert "session_search" not in child_sys
+    assert "delegate_task" not in child_sys
+    assert "focused subagent" in child_sys
+    assert "C1" in child_sys
+
+    db.close()
+
+
+def test_r07_050_scenario_04_child_forbidden_tools(r05_e2e_env):
+    """시나리오 4: 자식이 delegate_task, memory, session_search 호출 시 거부, 원장 불변 및 손자 없음 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+    mem_file = r05_e2e_env["memories"] / "MEMORY.md"
+    mem_initial = mem_file.read_text(encoding="utf-8")
+
+    fake_parent_key = "sk-or-v1-" + "r07-fake-parent-key-s04"
+    fake_child_key = "sk-or-v1-" + "r07-fake-child-key-s04"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "p_del_1",
+            "type": "function",
+            "function": {
+                "name": "delegate_task",
+                "arguments": json.dumps({"goal": "try forbidden tools", "context": ""}),
+            },
+        }],
+    )
+    p2 = _make_mock_provider_payload(content="parent finished")
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_parent_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    c1 = _make_mock_provider_payload(
+        tool_calls=[
+            {"id": "c_forbid_1", "type": "function", "function": {"name": "delegate_task", "arguments": '{"goal": "x"}'}},
+            {"id": "c_forbid_2", "type": "function", "function": {"name": "memory", "arguments": '{"action": "add", "target": "memory", "content": "HIJACK"}'}},
+            {"id": "c_forbid_3", "type": "function", "function": {"name": "session_search", "arguments": '{"query": "PARENTMARK"}'}},
+        ],
+    )
+    c2 = _make_mock_provider_payload(content="done trying forbidden tools")
+    child_transport = SequentialMockTransport([c1, c2])
+    child_transports = [child_transport]
+    factory_calls = 0
+
+    def child_llm_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        t = child_transports.pop(0)
+        return OpenRouterClient(api_key=fake_child_key, model=DEFAULT_REAL_MODEL, transport=t)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    res = parent_agent.run_conversation("test forbidden tools")
+    assert res["stopped_reason"] == "completed"
+
+    # 자식 요청의 tool 메시지 3개가 모두 Unknown tool
+    child_req_2 = json.loads(child_transport.captured_requests[1].content.decode("utf-8"))
+    tool_msgs = [m for m in child_req_2["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 3
+    for tm in tool_msgs:
+        assert "Unknown tool" in tm["content"]
+
+    # MEMORY.md 불변
+    assert mem_file.read_text(encoding="utf-8") == mem_initial
+    assert "HIJACK" not in mem_file.read_text(encoding="utf-8")
+
+    # sessions 행은 2개뿐 (손자 세션 없음)
+    cursor = db._conn.execute("SELECT COUNT(*) FROM sessions")
+    assert cursor.fetchone()[0] == 2
+    assert factory_calls == 1
+
+    db.close()
+
+
+def test_r07_050_scenario_05_child_path_guard(r05_e2e_env):
+    """시나리오 5: 자식이 보호 파일 및 외부 경로 접근 시 차단, 비밀값 미노출 및 파일 불변 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+    w = r05_e2e_env["workspace"]
+    env_file = w / ".env"
+    agents_file = w / "AGENTS.md"
+
+    fake_parent_key = "sk-or-v1-" + "r07-fake-parent-key-s05"
+    fake_child_key = "sk-or-v1-" + "r07-fake-child-key-s05"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "p_del_path",
+            "type": "function",
+            "function": {
+                "name": "delegate_task",
+                "arguments": json.dumps({"goal": "try protected paths", "context": ""}),
+            },
+        }],
+    )
+    p2 = _make_mock_provider_payload(content="parent path done")
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_parent_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    c1 = _make_mock_provider_payload(
+        tool_calls=[
+            {"id": "c_path_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": ".env"}'}},
+            {"id": "c_path_2", "type": "function", "function": {"name": "write_file", "arguments": '{"path": ".env", "content": "X"}'}},
+            {"id": "c_path_3", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "../state.db"}'}},
+            {"id": "c_path_4", "type": "function", "function": {"name": "write_file", "arguments": '{"path": "AGENTS.md", "content": "X"}'}},
+        ],
+    )
+    c2 = _make_mock_provider_payload(content="done trying protected paths")
+    child_transport = SequentialMockTransport([c1, c2])
+
+    def child_llm_factory():
+        return OpenRouterClient(api_key=fake_child_key, model=DEFAULT_REAL_MODEL, transport=child_transport)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    res = parent_agent.run_conversation("test path guard")
+    assert res["stopped_reason"] == "completed"
+
+    # 네 tool 메시지 모두 success false
+    child_req_2 = json.loads(child_transport.captured_requests[1].content.decode("utf-8"))
+    tool_msgs = [m for m in child_req_2["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 4
+    for tm in tool_msgs:
+        assert '"success": false' in tm["content"].lower()
+
+    # 자식 이후 요청과 부모 요청 어디에도 SECRET-MARK, SQLite format 3 없음
+    for creq in child_transport.captured_requests:
+        text = creq.content.decode("utf-8")
+        assert "SECRET-MARK" not in text
+        assert "SQLite format 3" not in text
+
+    for preq in parent_transport.captured_requests:
+        text = preq.content.decode("utf-8")
+        assert "SECRET-MARK" not in text
+        assert "SQLite format 3" not in text
+
+    # 파일 내용 불변
+    assert env_file.read_text(encoding="utf-8") == "SECRET-MARK"
+    assert agents_file.read_text(encoding="utf-8") == "CTX-MARK"
+
+    db.close()
+
+
+def test_r07_050_scenario_08_child_http_500_failure(r05_e2e_env):
+    """시나리오 8: 자식 전송 계층의 HTTP 500 오류 시 부모 정상 종료 및 오류 도구 메시지 변환 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+
+    fake_parent_key = "sk-or-v1-" + "r07-fake-parent-key-s08"
+    fake_child_key = "sk-or-v1-" + "r07-fake-child-key-s08"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "p_del_err",
+            "type": "function",
+            "function": {
+                "name": "delegate_task",
+                "arguments": json.dumps({"goal": "trigger 500 error", "context": ""}),
+            },
+        }],
+    )
+    p2 = _make_mock_provider_payload(content="parent handled error")
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_parent_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    child_transport = SequentialMockTransport([500])
+
+    def child_llm_factory():
+        return OpenRouterClient(api_key=fake_child_key, model=DEFAULT_REAL_MODEL, transport=child_transport)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    res = parent_agent.run_conversation("test child failure")
+    assert res["stopped_reason"] == "completed"
+    assert res["final_response"] == "parent handled error"
+
+    # 부모 2번째 요청의 delegate_task tool 메시지 확인
+    parent_req_2 = json.loads(parent_transport.captured_requests[1].content.decode("utf-8"))
+    tool_msg = next(m for m in parent_req_2["messages"] if m.get("role") == "tool")
+    tool_payload = json.loads(tool_msg["content"])
+    assert tool_payload["success"] is False
+    assert tool_payload["status"] == "failed"
+    assert tool_payload["stopped_reason"] == "llm_error"
+
+    # 자식 세션 end_reason == "llm_error"
+    cursor = db._conn.execute("SELECT end_reason FROM sessions WHERE source = 'subagent'")
+    row = cursor.fetchone()
+    assert row is not None
+    assert row[0] == "llm_error"
+
+    db.close()
+
+
+def test_r07_050_scenario_09_child_summary_truncation(r05_e2e_env):
+    """시나리오 9: 자식의 9,000자 응답이 MAX_SUBAGENT_SUMMARY_CHARS(8,000자)로 절삭 전달됨을 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+
+    fake_parent_key = "sk-or-v1-" + "r07-fake-parent-key-s09"
+    fake_child_key = "sk-or-v1-" + "r07-fake-child-key-s09"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "p_del_trunc",
+            "type": "function",
+            "function": {
+                "name": "delegate_task",
+                "arguments": json.dumps({"goal": "generate huge text", "context": ""}),
+            },
+        }],
+    )
+    p2 = _make_mock_provider_payload(content="parent received truncated summary")
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_parent_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    child_huge_content = "x" * 9000
+    c1 = _make_mock_provider_payload(content=child_huge_content)
+    child_transport = SequentialMockTransport([c1])
+
+    def child_llm_factory():
+        return OpenRouterClient(api_key=fake_child_key, model=DEFAULT_REAL_MODEL, transport=child_transport)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    res = parent_agent.run_conversation("test truncation")
+    assert res["stopped_reason"] == "completed"
+
+    parent_req_2 = json.loads(parent_transport.captured_requests[1].content.decode("utf-8"))
+    tool_msg = next(m for m in parent_req_2["messages"] if m.get("role") == "tool")
+    tool_payload = json.loads(tool_msg["content"])
+    assert len(tool_payload["summary"]) == DELEGATE_SUMMARY_MAX_CHARS
+    assert len(tool_payload["summary"]) == 8000
+    assert tool_payload["truncated"] is True
+
+    # 부모 요청에 들어간 tool 메시지는 9,000자 전체가 아닌 8,000자 요약 + 메타데이터
+    assert child_huge_content not in tool_msg["content"]
+    assert len(tool_msg["content"]) < 8500
+
+    db.close()
+
+
+def test_r07_050_scenario_10_compression_prunes_delegate_tool_output(r05_e2e_env):
+    """시나리오 10: 헤드와 꼬리 사이의 delegate_task 결과(8,000자)가 컨텍스트 압축 시 가지치기됨을 검증."""
+    db = r05_e2e_env["db"]
+
+    fake_key = "sk-or-v1-" + "r07-fake-key-s10-compression"
+
+    # 턴 1: 일반 질의응답 (헤드)
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=50, completion_tokens=10)
+
+    # 턴 2: 위임 대화 (중간) -> 8,000자 요약 수신
+    p2_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_p2_del", "type": "function", "function": {"name": "delegate_task", "arguments": '{"goal": "huge"}'}}],
+        prompt_tokens=80,
+    )
+    p2_done = _make_mock_provider_payload(content="2턴 완료", prompt_tokens=2000, completion_tokens=10)
+
+    # 턴 3, 4, 5, 6, 7: 꼬리 구간 메시지 채우기 (7턴에서 prompt_tokens=350 보고하여 임계값 300 초과)
+    p3_done = _make_mock_provider_payload(content="3턴 완료", prompt_tokens=100)
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=120)
+    p5_done = _make_mock_provider_payload(content="5턴 완료", prompt_tokens=150)
+    p6_done = _make_mock_provider_payload(content="6턴 완료", prompt_tokens=200)
+    p7_done = _make_mock_provider_payload(content="7턴 완료", prompt_tokens=350)
+
+    # 턴 8: 토큰 수 임계값(600 * 0.5 = 300) 초과로 압축 파이프라인 트리거 -> 요약 모델 호출 -> 최종 응답
+    p8_sum = _make_mock_provider_payload(content="과거 위임 및 대화 내역 요약 완료", prompt_tokens=30, completion_tokens=20)
+    p8_done = _make_mock_provider_payload(content="8턴 완료", prompt_tokens=50, completion_tokens=10)
+
+    parent_transport = SequentialMockTransport([
+        p1_done,
+        p2_tool, p2_done,
+        p3_done,
+        p4_done,
+        p5_done,
+        p6_done,
+        p7_done,
+        p8_sum, p8_done,
+    ])
+    parent_client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    child_huge_summary = "y" * 9000
+    c1 = _make_mock_provider_payload(content=child_huge_summary)
+    child_transport = SequentialMockTransport([c1])
+
+    def child_llm_factory():
+        return OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=child_transport)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        context_window_tokens=600,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    history = None
+    for i in range(1, 8):
+        r = parent_agent.run_conversation(f"{i}단계", conversation_history=history)
+        history = r["messages"]
+
+    r8 = parent_agent.run_conversation("8단계", conversation_history=history)
+    assert "compression" in r8
+    assert r8["compression"]["count"] >= 1
+
+    # 압축 뒤 부모 요청(마지막 p8_done 요청) 본문에서 어떤 tool 메시지도 8,000자 요약을 그대로 갖지 않음
+    last_req = json.loads(parent_transport.captured_requests[-1].content.decode("utf-8"))
+    for msg in last_req["messages"]:
+        if msg.get("role") == "tool":
+            assert ("y" * 8000) not in msg.get("content", "")
+            assert "[Old tool output cleared: delegate_task]" in msg.get("content", "") or len(msg.get("content", "")) < 1000
+
+    # 첫 시스템 메시지 바이트 동일성 검증
+    first_req = json.loads(parent_transport.captured_requests[0].content.decode("utf-8"))
+    assert last_req["messages"][0]["role"] == "system"
+    assert last_req["messages"][0]["content"] == first_req["messages"][0]["content"]
+    assert SUBAGENT_GUIDANCE in last_req["messages"][0]["content"]
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r07_050_scenario_11_unenabled_parent_keeps_eight_tools(r05_e2e_env):
+    """시나리오 11: 위임 도구를 켜지 않은 기본 부모는 8종 도구만 보유하고 지시문에 위임 안내문이 없음을 검증."""
+    db = r05_e2e_env["db"]
+    fake_key = "sk-or-v1-" + "r07-fake-key-s11-unenabled"
+
+    p1 = _make_mock_provider_payload(content="hello from parent")
+    transport = SequentialMockTransport([p1])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    factory_calls = 0
+    def dummy_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return client
+
+    # register_delegate_tool을 호출하지 않음
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("hello")
+    assert res["stopped_reason"] == "completed"
+    assert factory_calls == 0
+
+    req = json.loads(transport.captured_requests[0].content.decode("utf-8"))
+    tools = req.get("tools", [])
+    tool_names = {t["function"]["name"] for t in tools}
+    assert len(tool_names) == 8
+    assert "delegate_task" not in tool_names
+
+    sys_msg = req["messages"][0]["content"]
+    assert "delegate_task" not in sys_msg
+    assert SUBAGENT_GUIDANCE not in sys_msg
+
+    db.close()
+
+
+def test_r07_050_scenario_12_zero_leakage_in_db_and_requests(r05_e2e_env):
+    """시나리오 12: 위임 대화 실행 후 DB 전체(messages, llm_calls, sessions)와 요청 본문에 키 미노출, 헤더 전송 검증."""
+    _setup_r07_env(r05_e2e_env)
+    db = r05_e2e_env["db"]
+
+    fake_key = "sk-or-v1-" + "r07-strictly-zero-leakage-in-db-and-requests-key"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_leak_1", "type": "function", "function": {"name": "delegate_task", "arguments": '{"goal": "check zero leak"}'}}],
+    )
+    p2 = _make_mock_provider_payload(content="parent finished zero leak check")
+    parent_transport = SequentialMockTransport([p1, p2])
+    parent_client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=parent_transport)
+
+    c1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "c_leak_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'}}],
+    )
+    c2 = _make_mock_provider_payload(content="child finished zero leak check")
+    child_transport = SequentialMockTransport([c1, c2])
+
+    def child_llm_factory():
+        return OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=child_transport)
+
+    parent_agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=parent_client,
+        quiet_mode=True,
+    )
+    register_delegate_tool(
+        parent_agent.dispatcher,
+        session_db=parent_agent.session_db,
+        parent_session_id=parent_agent.session_id,
+        llm_client_factory=child_llm_factory,
+    )
+
+    _ = parent_agent.run_conversation("run zero leakage test")
+
+    # DB 전체에 키 미노출 검증
+    _assert_no_key_in_db(db, fake_key)
+
+    # 요청 본문 검증 및 Authorization 헤더 검증
+    all_transports = [parent_transport, child_transport]
+    for trans in all_transports:
+        for req in trans.captured_requests:
+            # 헤더에는 키가 실제로 실려 있었음
+            assert req.headers["authorization"] == f"Bearer {fake_key}"
+            # 요청 본문에는 키가 없음
+            assert fake_key not in req.content.decode("utf-8")
+
+    db.close()
+
+
+
 
 
