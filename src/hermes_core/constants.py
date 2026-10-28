@@ -24,6 +24,14 @@ DEFAULT_LOCAL_HERMES_HOME = PROJECT_ROOT / ".hermes"
 # 기본 작업 디렉터리 폴더명
 WORKSPACE_DIR_NAME = "workspace"
 
+# 스킬 디렉터리 폴더명 및 파일명 (06 로드맵)
+SKILLS_DIR_NAME = "skills"
+SKILL_FILE_NAME = "SKILL.md"
+
+# 스킬 메타데이터 글자수 상한
+SKILL_NAME_MAX_CHARS = 64
+SKILL_DESCRIPTION_MAX_CHARS = 1024
+
 
 def get_hermes_home() -> Path:
     """Hermes 상태 데이터(메모리, 세션 DB)가 저장되는 홈 디렉터리 반환.
@@ -49,6 +57,14 @@ def get_default_workspace() -> Path:
     path = get_hermes_home() / WORKSPACE_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path.resolve()
+
+
+def get_skills_dir() -> Path:
+    """Hermes 스킬 디렉터리 경로 반환 (<HERMES_HOME>/skills).
+
+    폴더를 생성하지 않고 경로 객체만 반환한다 (디렉터리 불변 원칙).
+    """
+    return get_hermes_home() / SKILLS_DIR_NAME
 
 
 # =============================================================================
