@@ -13,6 +13,7 @@ import sys
 
 from hermes_core.agent import HermesAgent, MockLLMClient
 from hermes_core.constants import (
+    CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
     OPENROUTER_API_KEY_ENV,
     get_default_workspace,
@@ -30,7 +31,20 @@ def main() -> None:
         default=None,
         help=f"Model name (default: {DEFAULT_REAL_MODEL} in real mode)",
     )
+    parser.add_argument(
+        "--context-window",
+        type=int,
+        default=CONTEXT_WINDOW_TOKENS,
+        help=f"Context window token limit (default: {CONTEXT_WINDOW_TOKENS})",
+    )
     args = parser.parse_args()
+
+    if args.context_window < 1:
+        print(
+            f"Error: --context-window must be a positive integer (got {args.context_window}).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     model = args.model
     llm_client = None
@@ -79,6 +93,7 @@ def main() -> None:
     agent = HermesAgent(
         model=model,
         llm_client=llm_client,
+        context_window_tokens=args.context_window,
     )
 
     print("=" * 60)

@@ -18,12 +18,33 @@ import logging
 from typing import Any, Optional
 import uuid
 
+from hermes_core.agent.compression import (
+    compress_messages,
+    find_previous_summary,
+    split_for_compression,
+)
+from hermes_core.agent.context_budget import (
+    compression_tail_budget,
+    compression_threshold,
+    estimate_current_tokens,
+    may_retry_after_reject,
+    should_compress,
+)
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     build_context_files_prompt,
     build_system_prompt,
+)
+from hermes_core.constants import (
+    COMPRESSION_HEAD_MESSAGES,
+    COMPRESSION_MAX_PER_RUN,
+    COMPRESSION_MIN_TAIL_MESSAGES,
+    COMPRESSION_THRESHOLD_RATIO,
+    CONTEXT_WINDOW_TOKENS,
+    SUMMARY_END_MARKER,
+    SUMMARY_PREFIX,
 )
 from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
@@ -103,11 +124,22 @@ class HermesAgent:
         llm_client: Optional[Any] = None,
         max_iterations: int = 50,
         quiet_mode: bool = False,
+        context_window_tokens: int = CONTEXT_WINDOW_TOKENS,
+        compression_threshold_ratio: float = COMPRESSION_THRESHOLD_RATIO,
+        compression_enabled: bool = True,
     ):
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
         self.max_iterations = max_iterations
         self.quiet_mode = quiet_mode
+        self.context_window_tokens = context_window_tokens
+        self.compression_threshold_ratio = compression_threshold_ratio
+        self.compression_enabled = compression_enabled
+
+        # 토큰 추정 및 압축 거부 추적 상태 (세션 간 미보존)
+        self._last_input_tokens: Optional[int] = None
+        self._last_message_count: Optional[int] = None
+        self._rejected_at_tokens: Optional[int] = None
 
         # 의존성 주입 및 격리
         self.session_db = session_db or SessionDB()
@@ -258,15 +290,117 @@ class HermesAgent:
         iterations = 0
         error_info: Optional[dict[str, str]] = None
 
+        # 컨텍스트 압축 추적 카운터
+        compression_attempts = 0
+        compression_count = 0
+        compression_fallback_count = 0
+
         while iterations < self.max_iterations:
             iterations += 1
 
-            # LLM 호출
             tools_schema = self.dispatcher.get_tools_schema()
+            schema_list = tools_schema if tools_schema else None
+
+            # LLM 호출 직전 컨텍스트 압축 판정 및 실행
+            if self.compression_enabled and compression_attempts < COMPRESSION_MAX_PER_RUN:
+                threshold = compression_threshold(
+                    self.context_window_tokens,
+                    self.compression_threshold_ratio,
+                )
+                current_tokens = estimate_current_tokens(
+                    messages=messages,
+                    last_input_tokens=self._last_input_tokens,
+                    last_message_count=self._last_message_count,
+                    tools=schema_list,
+                )
+                if should_compress(current_tokens, threshold) and may_retry_after_reject(
+                    current_tokens, self._rejected_at_tokens
+                ):
+                    compression_attempts += 1
+                    tail_budget = compression_tail_budget(threshold)
+
+                    prev_sum = find_previous_summary(messages)
+                    eff_head = 0 if prev_sum is not None else COMPRESSION_HEAD_MESSAGES
+                    can_split = (
+                        split_for_compression(
+                            messages,
+                            head_messages=eff_head,
+                            tail_tokens=tail_budget,
+                            min_tail_messages=COMPRESSION_MIN_TAIL_MESSAGES,
+                        )
+                        is not None
+                    )
+
+                    comp_res = compress_messages(
+                        messages,
+                        self.llm_client,
+                        head_messages=COMPRESSION_HEAD_MESSAGES,
+                        tail_tokens=tail_budget,
+                        min_tail_messages=COMPRESSION_MIN_TAIL_MESSAGES,
+                        tools=schema_list,
+                    )
+                    if comp_res is not None:
+                        # DB 저장용 새 메시지 목록 (system 제외)
+                        sys_offset = 1 if (comp_res.messages and comp_res.messages[0].get("role") == "system") else 0
+                        db_new_msgs = comp_res.messages[sys_offset:]
+
+                        summary_idx = None
+                        for i, m in enumerate(db_new_msgs):
+                            content = m.get("content") or ""
+                            # 독립 요약 행인지 판별 (PREFIX로 시작하고 END_MARKER로 끝남)
+                            if (
+                                content.startswith(SUMMARY_PREFIX)
+                                and content.endswith(SUMMARY_END_MARKER)
+                                and m.get("role") in ("user", "assistant")
+                            ):
+                                summary_idx = i
+                                break
+
+                        try:
+                            self.session_db.archive_and_compact(
+                                self.session_id,
+                                db_new_msgs,
+                                summary_index=summary_idx,
+                            )
+                            # DB 기록 성공 시에만 메모리 목록 원자적 교체
+                            messages[:] = comp_res.messages
+                            self._last_input_tokens = None
+                            self._last_message_count = None
+                            self._rejected_at_tokens = None
+                            compression_count += 1
+                            if comp_res.used_fallback:
+                                compression_fallback_count += 1
+                            if comp_res.usage:
+                                in_tok = comp_res.usage.get("prompt_tokens") or comp_res.usage.get("input_tokens") or 0
+                                out_tok = comp_res.usage.get("completion_tokens") or comp_res.usage.get("output_tokens") or 0
+                                if in_tok or out_tok:
+                                    self.session_db.update_token_counts(
+                                        self.session_id, input_tokens=in_tok, output_tokens=out_tok
+                                    )
+                            logger.info(
+                                "[Compression] Session %s compressed: %d -> %d tokens (fallback=%s)",
+                                self.session_id,
+                                comp_res.tokens_before,
+                                comp_res.tokens_after,
+                                comp_res.used_fallback,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "[Compression] archive_and_compact failed: %s. Keeping original messages.",
+                                e,
+                            )
+                    else:
+                        if can_split:
+                            self._rejected_at_tokens = current_tokens
+
+            # LLM 호출 직전 메시지 수 기록
+            msgs_len_before_call = len(messages)
+
+            # LLM 호출
             try:
                 resp = self.llm_client.chat_completion(
                     messages=messages,
-                    tools=tools_schema if tools_schema else None,
+                    tools=schema_list,
                 )
             except LLMError as e:
                 logger.warning("LLM call failed with error: %s", e)
@@ -275,7 +409,7 @@ class HermesAgent:
                 error_info = {"kind": e.kind, "message": str(e)}
                 break
 
-            # 응답에 usage가 있으면 update_token_counts로 누적
+            # 응답에 usage가 있으면 update_token_counts로 누적 및 추정 상태 보관
             usage = getattr(resp, "usage", None)
             if usage and isinstance(usage, dict):
                 in_tok = usage.get("input_tokens") or 0
@@ -284,6 +418,9 @@ class HermesAgent:
                     self.session_db.update_token_counts(
                         self.session_id, input_tokens=in_tok, output_tokens=out_tok
                     )
+                if in_tok:
+                    self._last_input_tokens = in_tok
+                    self._last_message_count = msgs_len_before_call
 
             assistant_msg: dict[str, Any] = {"role": "assistant"}
             if resp.content:
@@ -320,6 +457,11 @@ class HermesAgent:
             "session_id": self.session_id,
             "stopped_reason": stopped_reason,
         }
+        if compression_count > 0:
+            result["compression"] = {
+                "count": compression_count,
+                "fallback": compression_fallback_count,
+            }
         if error_info is not None:
             result["error"] = error_info
 

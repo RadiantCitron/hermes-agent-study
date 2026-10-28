@@ -506,3 +506,32 @@ def test_010_scenario_07_mock_non_interactive_clean_exit(hermes_home, monkeypatc
     captured = capsys.readouterr()
     assert "Mock session finished cleanly." in captured.out
     assert "MOCK mode" in captured.out
+
+
+def test_050_scenario_24_context_window_option(hermes_home, monkeypatch):
+    """시나리오 24: CLI --context-window 2000 -> 에이전트가 해당 창 크기로 생성되고 임계값 1000 계산."""
+    created_agents = []
+    orig_agent_init = cli.HermesAgent.__init__
+
+    def tracked_agent_init(self, *args, **kwargs):
+        orig_agent_init(self, *args, **kwargs)
+        created_agents.append(self)
+
+    monkeypatch.setattr(cli.HermesAgent, "__init__", tracked_agent_init)
+    _run(monkeypatch, "--mock", "--context-window", "2000")
+
+    assert len(created_agents) == 1
+    agent = created_agents[0]
+    assert agent.context_window_tokens == 2000
+    from hermes_core.agent.context_budget import compression_threshold
+    threshold = compression_threshold(agent.context_window_tokens, agent.compression_threshold_ratio)
+    assert threshold == 1000
+
+
+@pytest.mark.parametrize("invalid_arg", ["0", "abc", "-5"])
+def test_050_scenario_25_invalid_context_window(hermes_home, monkeypatch, invalid_arg):
+    """시나리오 25: CLI --context-window 0, abc, -5 -> 안내 후 종료 코드 2, 세션 DB 생성 없음."""
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--mock", "--context-window", invalid_arg)
+    assert exc.value.code == 2
+    assert not (hermes_home / "state.db").exists()

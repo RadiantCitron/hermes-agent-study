@@ -22,7 +22,7 @@ from typing import Any, Optional, Union
 
 from hermes_core.constants import get_hermes_home
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_name TEXT,
     timestamp REAL NOT NULL,
     token_count INTEGER,
-    finish_reason TEXT
+    finish_reason TEXT,
+    active INTEGER DEFAULT 1,
+    compacted INTEGER DEFAULT 0,
+    is_copy INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS llm_calls (
@@ -156,6 +159,13 @@ class SessionDB:
                 except sqlite3.OperationalError:
                     pass
                 cursor.execute("UPDATE schema_version SET version = 3")
+            if current_version < 4:
+                for col in ("active INTEGER DEFAULT 1", "compacted INTEGER DEFAULT 0", "is_copy INTEGER DEFAULT 0"):
+                    try:
+                        cursor.execute(f"ALTER TABLE messages ADD COLUMN {col}")
+                    except sqlite3.OperationalError:
+                        pass
+                cursor.execute("UPDATE schema_version SET version = 4")
 
         # FTS5 가상 테이블 초기화
         try:
@@ -266,8 +276,20 @@ class SessionDB:
         tool_call_id: Optional[str] = None,
         token_count: Optional[int] = None,
         finish_reason: Optional[str] = None,
+        timestamp: Optional[float] = None,
     ) -> int:
         """메시지를 추가하고 FTS5 동기화 및 세션 카운터 갱신. 생성된 row ID 반환."""
+        if timestamp is None:
+            c = self._conn.execute(
+                "SELECT MAX(timestamp) FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            row = c.fetchone()
+            last_t = row[0] if (row and row[0] is not None) else 0.0
+            msg_timestamp = max(time.time(), last_t + 0.0001)
+        else:
+            msg_timestamp = timestamp
+
         cursor = self._conn.execute(
             """INSERT INTO messages (session_id, role, content, tool_call_id,
                tool_calls, tool_name, timestamp, token_count, finish_reason)
@@ -279,7 +301,7 @@ class SessionDB:
                 tool_call_id,
                 json.dumps(tool_calls) if tool_calls else None,
                 tool_name,
-                time.time(),
+                msg_timestamp,
                 token_count,
                 finish_reason,
             ),
@@ -320,10 +342,10 @@ class SessionDB:
         return result
 
     def get_messages_as_conversation(self, session_id: str) -> list[dict[str, Any]]:
-        """LLM API에 즉시 전달 가능한 OpenAI 규격 대화 메시지 포맷으로 반환."""
+        """LLM API에 즉시 전달 가능한 OpenAI 규격 대화 메시지 포맷으로 반환 (활성 행 active=1만 대상)."""
         cursor = self._conn.execute(
             "SELECT role, content, tool_call_id, tool_calls, tool_name "
-            "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
+            "FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp, id",
             (session_id,),
         )
         messages = []
@@ -340,6 +362,87 @@ class SessionDB:
                     pass
             messages.append(msg)
         return messages
+
+    def archive_and_compact(
+        self,
+        session_id: str,
+        new_messages: list[dict[str, Any]],
+        summary_index: Optional[int] = None,
+    ) -> None:
+        """현재 활성 행을 보관(active=0, compacted=1)하고 압축본을 삽입(단일 트랜잭션).
+
+        - new_messages 중 system 메시지는 DB에 저장하지 않음.
+        - summary_index가 가리키는 행만 is_copy=0, 나머지는 is_copy=1.
+        - tool_name은 짝이 되는 assistant tool_calls에서 복원.
+        - 단조 증가 타임스탬프 적용.
+        """
+        # assistant tool_calls에서 tool_name 맵핑 수집 (tool 메시지의 tool_name 복원용)
+        tool_name_map: dict[str, str] = {}
+        for m in new_messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    tc_id = tc.get("id")
+                    fn = tc.get("function", {})
+                    fn_name = fn.get("name") or tc.get("name")
+                    if tc_id and fn_name:
+                        tool_name_map[tc_id] = fn_name
+
+        with self._conn:
+            cursor = self._conn.cursor()
+
+            # 기존 행들의 최신 타임스탬프보다 항상 크도록 단조 증가 보장
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            last_t = row[0] if (row and row[0] is not None) else 0.0
+            base_time = max(time.time(), last_t + 0.0001)
+
+            # 1. 기존 활성 행 보관 처리
+            cursor.execute(
+                "UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ? AND active = 1",
+                (session_id,),
+            )
+
+            # 2. 새 메시지 삽입
+            for idx, m in enumerate(new_messages):
+                role = m.get("role")
+                if role == "system":
+                    continue
+
+                is_copy = 0 if (summary_index is not None and idx == summary_index) else 1
+
+                content = m.get("content")
+                tool_call_id = m.get("tool_call_id")
+                tool_calls = m.get("tool_calls")
+                tool_name = m.get("tool_name")
+                if role == "tool" and not tool_name and tool_call_id:
+                    tool_name = tool_name_map.get(tool_call_id)
+
+                tool_calls_json = (
+                    json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
+                )
+                msg_time = base_time + (idx * 0.0001)
+
+                cursor.execute(
+                    """
+                    INSERT INTO messages (
+                        session_id, role, content, tool_call_id, tool_calls, tool_name,
+                        timestamp, token_count, finish_reason, active, compacted, is_copy
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1, 0, ?)
+                    """,
+                    (
+                        session_id,
+                        role,
+                        content,
+                        tool_call_id,
+                        tool_calls_json,
+                        tool_name,
+                        msg_time,
+                        is_copy,
+                    ),
+                )
 
     # =========================================================================
     # FTS5 전문 검색 메서드
@@ -360,7 +463,7 @@ class SessionDB:
         if source_filter is None:
             source_filter = ["cli", "telegram", "discord", "whatsapp", "slack"]
 
-        where_clauses = ["messages_fts MATCH ?"]
+        where_clauses = ["messages_fts MATCH ?", "m.is_copy = 0"]
         params: list[Any] = [query]
 
         source_placeholders = ",".join("?" for _ in source_filter)

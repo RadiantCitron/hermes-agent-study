@@ -117,6 +117,9 @@ COMPRESSION_TAIL_RATIO = 0.25
 # 압축 거부 후 재시도 필요 성장 배율 (25% 증가)
 COMPRESSION_RETRY_GROWTH = 1.25
 
+# 단일 run_conversation 루프 내 최대 압축 시도 횟수
+COMPRESSION_MAX_PER_RUN = 3
+
 # 분할 시 시스템 프롬프트 뒤에 보존할 초기 대화 메시지 수 (헤드)
 COMPRESSION_HEAD_MESSAGES = 3
 

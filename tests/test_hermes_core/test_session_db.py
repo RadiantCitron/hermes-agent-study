@@ -162,7 +162,7 @@ def test_030_scenario_13_schema_v2_to_v3_migration(tmp_path):
 
     # SessionDB로 열어 마이그레이션 검증
     db = SessionDB(db_path)
-    assert db.schema_version == 3
+    assert db.schema_version >= 3
 
     # 기존 데이터 보존 확인
     s = db.get_session("s1")
@@ -183,9 +183,9 @@ def test_030_scenario_13_schema_v2_to_v3_migration(tmp_path):
 
 
 def test_030_scenario_14_new_database_schema_v3():
-    """시나리오 14: 새 DB 생성 시 schema_version == 3, sessions.mode와 llm_calls 존재."""
+    """시나리오 14: 새 DB 생성 시 schema_version >= 3, sessions.mode와 llm_calls 존재."""
     db = SessionDB(":memory:")
-    assert db.schema_version == 3
+    assert db.schema_version >= 3
 
     sid = "s_new"
     db.create_session(sid, source="cli", mode="real")
@@ -195,4 +195,267 @@ def test_030_scenario_14_new_database_schema_v3():
 
     # llm_calls 존재 확인
     assert db.get_llm_calls(sid) == []
+    db.close()
+
+
+# =============================================================================
+# 로드맵 05: 구현지시서 050 인수 테스트 시나리오 (시나리오 1~6)
+# =============================================================================
+
+
+def test_050_scenario_01_schema_v3_to_v4_migration(tmp_path):
+    """시나리오 1: v3 DB를 SessionDB(path)로 열면 schema_version == 4, active/compacted/is_copy 컬럼 추가 및 기존 행 기본값 설정."""
+    import sqlite3
+
+    db_path = tmp_path / "v3_legacy.db"
+    conn = sqlite3.connect(str(db_path))
+
+    # v3 형태 스키마 구성 (active/compacted/is_copy 없음)
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            mode TEXT
+        );
+
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT
+        );
+
+        INSERT INTO sessions (id, source, started_at) VALUES ('s1', 'cli', 1000.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'hello', 1001.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'assistant', 'world', 1002.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # SessionDB로 열어 마이그레이션 검증
+    db = SessionDB(db_path)
+    assert db.schema_version == 4
+
+    # 기존 메시지 컬럼 값 확인
+    raw_msgs = db.get_messages("s1")
+    assert len(raw_msgs) == 2
+    for m in raw_msgs:
+        assert m["active"] == 1
+        assert m["compacted"] == 0
+        assert m["is_copy"] == 0
+
+    # 조회 결과 불변 확인
+    conv = db.get_messages_as_conversation("s1")
+    assert len(conv) == 2
+    assert conv[0]["content"] == "hello"
+    assert conv[1]["content"] == "world"
+
+    db.close()
+
+
+def test_050_scenario_02_new_db_schema_v4_column_match(tmp_path):
+    """시나리오 2: 새 DB의 schema_version == 4 및 v3 마이그레이션 DB와 messages 테이블 열 구성 일치."""
+    import sqlite3
+
+    db_new = SessionDB(":memory:")
+    assert db_new.schema_version == 4
+
+    # 새 DB의 messages 열 조회
+    cursor_new = db_new._conn.execute("PRAGMA table_info(messages)")
+    cols_new = [row["name"] for row in cursor_new.fetchall()]
+    assert "active" in cols_new
+    assert "compacted" in cols_new
+    assert "is_copy" in cols_new
+
+    # 마이그레이션 DB 준비
+    mig_path = tmp_path / "v3_mig.db"
+    conn = sqlite3.connect(str(mig_path))
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            mode TEXT
+        );
+
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db_mig = SessionDB(mig_path)
+    cursor_mig = db_mig._conn.execute("PRAGMA table_info(messages)")
+    cols_mig = [row["name"] for row in cursor_mig.fetchall()]
+
+    for c in ["active", "compacted", "is_copy"]:
+        assert c in cols_mig
+
+    db_new.close()
+    db_mig.close()
+
+
+def test_050_scenario_03_migration_idempotent(tmp_path):
+    """시나리오 3: 마이그레이션 두 번 실행(멱등성) 시 오류 없이 버전 4 유지."""
+    db_path = tmp_path / "idempotent.db"
+    db1 = SessionDB(db_path)
+    assert db1.schema_version == 4
+    db1.close()
+
+    # 다시 열기
+    db2 = SessionDB(db_path)
+    assert db2.schema_version == 4
+    db2.close()
+
+
+def test_050_scenario_04_archive_and_compact_normal():
+    """시나리오 4: archive_and_compact 정상 호출 시 기존 활성 행 보관 및 새 행 삽입."""
+    db = SessionDB(":memory:")
+    sid = "sess_04"
+    db.create_session(sid, source="cli")
+
+    db.append_message(sid, role="user", content="turn 1")
+    db.append_message(sid, role="assistant", content="turn 2")
+
+    new_messages = [
+        {"role": "system", "content": "시스템 프롬프트 (DB 미저장)"},
+        {"role": "user", "content": "[대화 요약: ...]\n요약 본문\n[대화 요약 끝]"},
+        {"role": "assistant", "content": "새 최근 답변"},
+    ]
+
+    # summary_index는 new_messages 중 요약 행인 index 1
+    db.archive_and_compact(sid, new_messages, summary_index=1)
+
+    raw_msgs = db.get_messages(sid)
+    # 기존 2개 + 새 2개(system 제외) = 총 4개
+    assert len(raw_msgs) == 4
+
+    # 1. 기존 행: active=0, compacted=1
+    old_msgs = raw_msgs[:2]
+    for om in old_msgs:
+        assert om["active"] == 0
+        assert om["compacted"] == 1
+        assert om["is_copy"] == 0
+
+    # 2. 새 행: active=1, compacted=0
+    new_rows = raw_msgs[2:]
+    # 요약 행 (index 1 -> new_rows[0])
+    summary_row = new_rows[0]
+    assert summary_row["active"] == 1
+    assert summary_row["compacted"] == 0
+    assert summary_row["is_copy"] == 0
+    assert "요약 본문" in summary_row["content"]
+
+    # 복제/새 응답 행 (index 2 -> new_rows[1])
+    copied_row = new_rows[1]
+    assert copied_row["active"] == 1
+    assert copied_row["compacted"] == 0
+    assert copied_row["is_copy"] == 1
+    assert copied_row["content"] == "새 최근 답변"
+
+    db.close()
+
+
+def test_050_scenario_05_get_messages_as_conversation_filters_active():
+    """시나리오 5: get_messages_as_conversation은 활성 행(active=1)만 시간순 반환, 보관 행 제외."""
+    db = SessionDB(":memory:")
+    sid = "sess_05"
+    db.create_session(sid, source="cli")
+
+    db.append_message(sid, role="user", content="과거 요청")
+    db.append_message(sid, role="assistant", content="과거 답변")
+
+    new_messages = [
+        {"role": "user", "content": "압축 요약"},
+        {"role": "assistant", "content": "최근 답변"},
+    ]
+    db.archive_and_compact(sid, new_messages, summary_index=0)
+
+    conv = db.get_messages_as_conversation(sid)
+    # 과거 요청/답변(active=0)은 제외되고 활성 2개만 반환
+    assert len(conv) == 2
+    assert conv[0]["content"] == "압축 요약"
+    assert conv[1]["content"] == "최근 답변"
+
+    db.close()
+
+
+def test_050_scenario_06_archive_and_compact_rollback_on_error():
+    """시나리오 6: archive_and_compact 중간 예외 시 롤백되어 호출 전 상태 완전히 보존."""
+    db = SessionDB(":memory:")
+    sid = "sess_06"
+    db.create_session(sid, source="cli")
+
+    db.append_message(sid, role="user", content="원래 요청")
+    db.append_message(sid, role="assistant", content="원래 답변")
+
+    # 잘못된 데이터로 예외 유도 (예: role이 None이면 NOT NULL 제약 위반)
+    invalid_messages = [
+        {"role": None, "content": "잘못된 행"},
+    ]
+
+    import pytest
+    with pytest.raises(Exception):
+        db.archive_and_compact(sid, invalid_messages, summary_index=0)
+
+    # 롤백 확인: 원래 활성 행이 그대로 active=1로 유지됨
+    conv = db.get_messages_as_conversation(sid)
+    assert len(conv) == 2
+    assert conv[0]["content"] == "원래 요청"
+    assert conv[1]["content"] == "원래 답변"
+
+    raw = db.get_messages(sid)
+    assert len(raw) == 2
+    assert raw[0]["active"] == 1
+    assert raw[0]["compacted"] == 0
+
     db.close()
