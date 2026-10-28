@@ -15,7 +15,12 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from hermes_core.constants import CONTEXT_FILE_MAX_CHARS
+from hermes_core.constants import (
+    AGENTS_FILE_NAMES,
+    CONTEXT_FILE_MAX_CHARS,
+    CURSORRULES_FILE_NAME,
+    SOUL_FILE_NAME,
+)
 
 # =============================================================================
 # 정적 프롬프트 상수
@@ -96,7 +101,7 @@ def build_context_files_prompt(cwd: Optional[str] = None) -> str:
     sections: list[str] = []
 
     # 1. AGENTS.md 탐색
-    for name in ["AGENTS.md", "agents.md"]:
+    for name in AGENTS_FILE_NAMES:
         candidate = cwd_path / name
         if candidate.exists() and candidate.is_file():
             try:
@@ -108,22 +113,22 @@ def build_context_files_prompt(cwd: Optional[str] = None) -> str:
             break
 
     # 2. SOUL.md 탐색 (작업 디렉터리 우선)
-    soul_candidate = cwd_path / "SOUL.md"
+    soul_candidate = cwd_path / SOUL_FILE_NAME
     if soul_candidate.exists() and soul_candidate.is_file():
         try:
             raw_text = soul_candidate.read_text(encoding="utf-8")
-            truncated = _truncate_content(raw_text, "SOUL.md")
-            sections.append(f"## SOUL.md\n\n{truncated}")
+            truncated = _truncate_content(raw_text, SOUL_FILE_NAME)
+            sections.append(f"## {SOUL_FILE_NAME}\n\n{truncated}")
         except Exception:
             pass
 
     # 3. .cursorrules 탐색
-    cursor_candidate = cwd_path / ".cursorrules"
+    cursor_candidate = cwd_path / CURSORRULES_FILE_NAME
     if cursor_candidate.exists() and cursor_candidate.is_file():
         try:
             raw_text = cursor_candidate.read_text(encoding="utf-8")
-            truncated = _truncate_content(raw_text, ".cursorrules")
-            sections.append(f"## .cursorrules\n\n{truncated}")
+            truncated = _truncate_content(raw_text, CURSORRULES_FILE_NAME)
+            sections.append(f"## {CURSORRULES_FILE_NAME}\n\n{truncated}")
         except Exception:
             pass
 

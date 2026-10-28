@@ -267,3 +267,27 @@ def test_scenario_22_dispatcher_schema_properties():
     read_file_def = next((s["function"] for s in schemas if s["function"]["name"] == "read_file"), None)
     assert read_file_def is not None
     assert "workspace" not in read_file_def["parameters"]["properties"]
+
+
+def test_030_scenario_13_read_allowed_for_instruction_and_state_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """030 시나리오 13: read_file_tool은 AGENTS.md 및 .hermes/memories/MEMORY.md 읽기를 허용함."""
+    w = (tmp_path / "w_read_allowed").resolve()
+    w.mkdir()
+    hermes_home = w / ".hermes"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    (w / "AGENTS.md").write_text("standing instructions\n", encoding="utf-8")
+    mem_dir = hermes_home / "memories"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "MEMORY.md").write_text("memory content\n", encoding="utf-8")
+
+    raw1 = read_file_tool("AGENTS.md", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is True
+    assert "1|standing instructions" in res1["content"]
+
+    raw2 = read_file_tool(".hermes/memories/MEMORY.md", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is True
+    assert "1|memory content" in res2["content"]

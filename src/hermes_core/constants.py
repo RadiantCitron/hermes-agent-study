@@ -54,6 +54,12 @@ USER_MAX_CHARS = 1375
 # 프로젝트 컨텍스트 파일(AGENTS.md 등) 1개당 최대 주입 글자수 상한
 CONTEXT_FILE_MAX_CHARS = 20_000
 
+# 지시문 파일 이름 상수 (시스템 프롬프트 주입 및 쓰기 금지 대상)
+AGENTS_FILE_NAMES = ("AGENTS.md", "agents.md")
+SOUL_FILE_NAME = "SOUL.md"
+CURSORRULES_FILE_NAME = ".cursorrules"
+INSTRUCTION_FILE_NAMES = (*AGENTS_FILE_NAMES, SOUL_FILE_NAME, CURSORRULES_FILE_NAME)
+
 
 # =============================================================================
 # 파일 도구 제한 상수

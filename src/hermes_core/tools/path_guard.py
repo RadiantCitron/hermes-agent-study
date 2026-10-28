@@ -12,6 +12,8 @@
 from pathlib import Path
 from typing import Optional
 
+from hermes_core.constants import INSTRUCTION_FILE_NAMES, get_hermes_home
+
 
 def resolve_workspace(workspace: Optional[Path] = None) -> Path:
     """작업 폴더 경로를 확인하고 절대 경로로 변환한다.
@@ -63,3 +65,40 @@ def check_path(path: str, workspace: Path) -> tuple[Optional[Path], Optional[str
         return None, f"Path '{path}' is outside the workspace."
 
     return (workspace / path).resolve(), None
+
+
+def check_write_path(path: str, workspace: Path) -> tuple[Optional[Path], Optional[str]]:
+    """파일 쓰기·수정용 경로 안전성 검증.
+
+    1. check_path로 제어문자 및 작업 폴더 이탈을 먼저 검증한다.
+    2. 파일 이름(대소문자 무시)이 지시문 파일(INSTRUCTION_FILE_NAMES)과 일치하면 거부한다.
+    3. 작업 폴더 바로 아래의 지시문 파일 링크가 가리키는 실제 파일인 경우 거부한다.
+    4. Hermes 상태 폴더(get_hermes_home().resolve()) 내부 경로인 경우 거부한다.
+    5. 모두 통과하면 (풀린 절대 경로, None)을 반환한다.
+    """
+    target_path, err = check_path(path, workspace)
+    if err or target_path is None:
+        return None, err
+
+    # 2. 파일 이름 대소문자 무시 검사
+    lower_instr_names = {name.casefold() for name in INSTRUCTION_FILE_NAMES}
+    if target_path.name.casefold() in lower_instr_names:
+        return None, f"Writing to instruction file '{target_path.name}' is not allowed."
+
+    # 3. 작업 폴더 바로 아래 지시문 파일 링크가 가리키는 대상과 동일한지 검사
+    for name in INSTRUCTION_FILE_NAMES:
+        instr_path = workspace / name
+        if instr_path.is_symlink() or instr_path.exists():
+            try:
+                resolved_instr = instr_path.resolve()
+                if resolved_instr == target_path:
+                    return None, f"Writing to instruction file '{target_path.name}' is not allowed."
+            except (OSError, ValueError, RuntimeError):
+                pass
+
+    # 4. Hermes 상태 폴더 내부 검사
+    hermes_home = get_hermes_home().resolve()
+    if target_path.is_relative_to(hermes_home):
+        return None, "Writing inside the Hermes state folder is not allowed."
+
+    return target_path, None
