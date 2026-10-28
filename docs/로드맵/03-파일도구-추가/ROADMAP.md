@@ -44,6 +44,74 @@ flowchart TD
     end
 ```
 
+> 아래 그림은 도해 규칙([ROADMAP_정책.md §3-3](../ROADMAP_정책.md))에 따라 마감 뒤에 보강했다. 이름은 현재 코드 기준이다.
+
+이 로드맵이 만들거나 바꾼 파일:
+
+```text
+src/hermes_core/
+  constants.py              # 변경: 파일 도구 상한 상수, 지시문 파일 이름 상수
+  agent/prompt_builder.py   # 변경 (030): 지시문 파일 이름 리터럴을 상수로 (동작 동일)
+  tools/
+    path_guard.py           # 신규 (010·020·030): 작업 폴더 판정 공용 모듈
+    file_tools.py           # 신규 (020·040·050): read_file · write_file · patch
+    terminal_tool.py        # 변경 (010): 비공개 함수 2개를 path_guard 호출로 교체
+    dispatcher.py           # 변경: 기본 디스패처에 파일 도구 3종 등록
+tests/test_hermes_core/
+  test_path_guard.py        # 신규
+  test_file_tools.py        # 신규
+```
+
+모듈과 함수의 관계:
+
+```mermaid
+classDiagram
+    class ToolDispatcher {
+        +handle_function_call(name, args)
+    }
+    class file_tools {
+        <<module>>
+        +read_file_tool(path, ...)
+        +write_file_tool(path, content)
+        +patch_tool(path, old_string, new_string)
+    }
+    class terminal_tool {
+        <<module>>
+        +terminal_tool(command, timeout)
+    }
+    class path_guard {
+        <<module>>
+        +resolve_workspace(workspace)
+        +path_values(arg)
+        +is_inside(value, workspace)
+        +is_protected_path(value, workspace)
+        +check_path(path, workspace)
+        +check_write_path(path, workspace)
+    }
+    ToolDispatcher --> file_tools : read_file·write_file·patch 등록
+    ToolDispatcher --> terminal_tool : terminal 등록
+    file_tools --> path_guard : 읽기는 check_path, 쓰기는 check_write_path
+    terminal_tool --> path_guard : path_values · is_inside · is_protected_path
+```
+
+`write_file`의 처리 순서 (작업 폴더 안에서 새 파일만 만들고, 어디서 막히든 파일은 생기지 않는다):
+
+```mermaid
+flowchart TD
+    Start(["write_file(path, content)"]) --> W["resolve_workspace"]
+    W --> C{"check_write_path 통과?<br/>(제어문자·작업 폴더 이탈·보호 이름·지시문 파일·상태 폴더)"}
+    C -- 아니오 --> E1["오류 JSON: 거부 사유"]
+    C -- 예 --> S{"내용이 FILE_WRITE_MAX_CHARS 이하인가?"}
+    S -- 아니오 --> E2["오류 JSON: too large"]
+    S -- 예 --> X{"이미 있는 파일(링크 포함)인가?"}
+    X -- 예 --> E3["오류 JSON: 수정은 patch로"]
+    X -- 아니오 --> M["부모 폴더 생성 후 임시 파일에 쓰고 fsync"]
+    M --> X2{"그 사이 대상이 생겼나?"}
+    X2 -- 예 --> E3
+    X2 -- 아니오 --> R["os.replace로 제자리에 교체 (원자적)"]
+    R --> Ok(["성공 JSON"])
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
