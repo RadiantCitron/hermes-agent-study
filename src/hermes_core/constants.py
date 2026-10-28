@@ -40,6 +40,11 @@ SKILL_LINKED_DIRS = ("references", "templates", "assets", "scripts")
 # 서브에이전트(자식) 허용 도구 목록 (07 로드맵)
 CHILD_TOOL_NAMES = ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view")
 
+# 서브에이전트(자식) 실행 및 반환 제한 상수 (07 로드맵)
+DELEGATE_CHILD_MAX_ITERATIONS = 25
+DELEGATE_SUMMARY_MAX_CHARS = 8000
+SUBAGENT_SOURCE = "subagent"
+
 
 def get_hermes_home() -> Path:
     """Hermes 상태 데이터(메모리, 세션 DB)가 저장되는 홈 디렉터리 반환.
