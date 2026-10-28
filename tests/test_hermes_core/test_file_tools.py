@@ -9,8 +9,10 @@ import pytest
 
 from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.file_tools import (
+    PATCH_SCHEMA,
     READ_FILE_SCHEMA,
     WRITE_FILE_SCHEMA,
+    patch_tool,
     read_file_tool,
     write_file_tool,
 )
@@ -534,3 +536,358 @@ def test_040_scenario_18_dispatcher_write_success(write_test_env, monkeypatch: p
     res = json.loads(raw)
     assert res["success"] is True
     assert (w / "n.txt").read_text(encoding="utf-8") == "x"
+
+
+# ---------------------------------------------------------
+# [050 단계 인수 테스트 시나리오: 050_patch_도구.md §3]
+# ---------------------------------------------------------
+
+
+@pytest.fixture
+def patch_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """050 patch_tool 인수 테스트용 환경 구성.
+
+    작업 폴더 W 구성:
+    - p.txt: alpha\nbeta\nalpha\n
+    - q.txt: one two three\n
+    - crlf.txt: a\r\nb\r\nc\r\n
+    - sub/ (폴더)
+    - binary.bin: \x00\x01
+    - latin.txt: \xff\xfe
+    - AGENTS.md: rules\n
+    - W 밖에 outside.txt (OUTSIDE-SECRET)
+    - W/link -> outside.txt
+    - W/agents_link -> AGENTS.md
+    - HERMES_HOME: W 밖 임시 폴더
+    """
+    hermes_home = (tmp_path / "hermes_home").resolve()
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+
+    outside = (tmp_path / "outside.txt").resolve()
+    outside.write_text("OUTSIDE-SECRET", encoding="utf-8")
+
+    (workspace / "p.txt").write_text("alpha\nbeta\nalpha\n", encoding="utf-8")
+    (workspace / "q.txt").write_text("one two three\n", encoding="utf-8")
+    (workspace / "crlf.txt").write_bytes(b"a\r\nb\r\nc\r\n")
+
+    sub = workspace / "sub"
+    sub.mkdir()
+    (sub / "inside.txt").write_text("sub-inside", encoding="utf-8")
+
+    (workspace / "binary.bin").write_bytes(b"\x00\x01")
+    (workspace / "latin.txt").write_bytes(b"\xff\xfe")
+    (workspace / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+
+    (workspace / "link").symlink_to(outside)
+    (workspace / "agents_link").symlink_to(workspace / "AGENTS.md")
+
+    return workspace, outside, hermes_home
+
+
+def test_050_scenario_01_single_replacement(patch_test_env):
+    """시나리오 1: q.txt, two -> 2 => success true, replacements == 1, 파일 내용 one 2 three\\n."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("q.txt", "two", "2", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 1
+    assert res["chars_before"] == len("one two three\n")
+    assert res["chars_after"] == len("one 2 three\n")
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one 2 three\n"
+
+
+def test_050_scenario_02_multiple_occurrences_without_replace_all(patch_test_env):
+    """시나리오 2: p.txt, alpha -> X (replace_all 없음) => success false, 오류에 2 times 포함, 파일 그대로."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("p.txt", "alpha", "X", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "2 times" in res["error"]
+    assert (w / "p.txt").read_text(encoding="utf-8") == "alpha\nbeta\nalpha\n"
+
+
+def test_050_scenario_03_multiple_occurrences_with_replace_all(patch_test_env):
+    """시나리오 3: p.txt, alpha -> X, replace_all=True => replacements == 2, 파일 X\\nbeta\\nX\\n."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("p.txt", "alpha", "X", replace_all=True, workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 2
+    assert (w / "p.txt").read_text(encoding="utf-8") == "X\nbeta\nX\n"
+
+
+def test_050_scenario_04_missing_string(patch_test_env):
+    """시나리오 4: q.txt, missing -> x => success false, 오류에 not found 포함, 파일 그대로."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("q.txt", "missing", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "not found" in res["error"]
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"
+
+
+def test_050_scenario_05_invalid_strings(patch_test_env):
+    """시나리오 5: q.txt, two -> two / q.txt, '' -> x => 각각 success false, differ / empty 포함."""
+    w, _, _ = patch_test_env
+    raw1 = patch_tool("q.txt", "two", "two", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "differ" in res1["error"]
+
+    raw2 = patch_tool("q.txt", "", "x", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "empty" in res2["error"]
+
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"
+
+
+def test_050_scenario_06_deletion(patch_test_env):
+    """시나리오 6: q.txt, ' two' -> '' (삭제) => 파일 one three\\n."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("q.txt", " two", "", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 1
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one three\n"
+
+
+def test_050_scenario_07_multiline_replacement(patch_test_env):
+    """시나리오 7: p.txt, alpha\\nbeta -> Z (여러 줄, 유일) => 파일 Z\\nalpha\\n."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("p.txt", "alpha\nbeta", "Z", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 1
+    assert (w / "p.txt").read_text(encoding="utf-8") == "Z\nalpha\n"
+
+
+def test_050_scenario_08_crlf_preservation(patch_test_env):
+    """시나리오 8: crlf.txt, b -> B => 파일 바이트 b'a\\r\\nB\\r\\nc\\r\\n' (\\r\\n 유지)."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("crlf.txt", "b", "B", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "crlf.txt").read_bytes() == b"a\r\nB\r\nc\r\n"
+
+
+def test_050_scenario_09_crlf_exact_matching(patch_test_env):
+    """시나리오 9: crlf.txt, a\\nb -> x (LF로 적음) => success false, 오류에 not found 포함, 파일 그대로."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("crlf.txt", "a\nb", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "not found" in res["error"]
+    assert (w / "crlf.txt").read_bytes() == b"a\r\nb\r\nc\r\n"
+
+
+def test_050_scenario_10_permission_preservation(patch_test_env):
+    """시나리오 10: 권한 0o755인 exec.sh(old\\n), old -> new => success true, 권한 여전히 0o755."""
+    import stat
+    w, _, _ = patch_test_env
+    exec_sh = w / "exec.sh"
+    exec_sh.write_text("old\n", encoding="utf-8")
+    exec_sh.chmod(0o755)
+
+    raw = patch_tool("exec.sh", "old", "new", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (exec_sh.stat().st_mode & 0o777) == 0o755
+    assert exec_sh.read_text(encoding="utf-8") == "new\n"
+
+
+def test_050_scenario_11_not_found_and_not_regular_file(patch_test_env):
+    """시나리오 11: nofile.txt / sub => 각각 success false, not found / regular file 포함."""
+    w, _, _ = patch_test_env
+    raw1 = patch_tool("nofile.txt", "x", "y", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "not found" in res1["error"].lower()
+
+    raw2 = patch_tool("sub", "x", "y", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "regular file" in res2["error"]
+
+
+def test_050_scenario_12_binary_and_invalid_utf8(patch_test_env):
+    """시나리오 12: binary.bin / latin.txt => 각각 success false, binary / UTF-8 포함."""
+    w, _, _ = patch_test_env
+    raw1 = patch_tool("binary.bin", "x", "y", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "binary" in res1["error"]
+
+    raw2 = patch_tool("latin.txt", "x", "y", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "UTF-8" in res2["error"]
+
+
+def test_050_scenario_13_file_and_result_too_large(patch_test_env):
+    """시나리오 13: (a) 1,000,001바이트 big.txt, (b) 999,990바이트 near.txt에서 교체 결과 1,000,009바이트 => too large, 파일 불변."""
+    w, _, _ = patch_test_env
+    big_path = w / "big.txt"
+    big_path.write_bytes(b"x" * 1_000_001)
+
+    near_path = w / "near.txt"
+    near_content = "y" * 999_989 + "Z"
+    near_path.write_text(near_content, encoding="utf-8")
+
+    raw1 = patch_tool("big.txt", "x", "y", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "too large" in res1["error"]
+    assert big_path.stat().st_size == 1_000_001
+
+    raw2 = patch_tool("near.txt", "Z", "Z" * 20, workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "too large" in res2["error"]
+    assert near_path.read_text(encoding="utf-8") == near_content
+
+
+def test_050_scenario_14_protected_files(patch_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 14: AGENTS.md / agents_link / HERMES_HOME=W/.hermes 일 때 .hermes/memories/MEMORY.md => success false, 내용 불변."""
+    w, _, _ = patch_test_env
+    raw1 = patch_tool("AGENTS.md", "rules", "new_rules", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "instruction" in res1["error"]
+    assert (w / "AGENTS.md").read_text(encoding="utf-8") == "rules\n"
+
+    raw2 = patch_tool("agents_link", "rules", "new_rules", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "instruction" in res2["error"]
+    assert (w / "AGENTS.md").read_text(encoding="utf-8") == "rules\n"
+
+    # HERMES_HOME=W/.hermes 설정
+    hermes_dir = w / ".hermes"
+    mem_dir = hermes_dir / "memories"
+    mem_dir.mkdir(parents=True)
+    mem_file = mem_dir / "MEMORY.md"
+    mem_file.write_text("memory content\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
+
+    raw3 = patch_tool(".hermes/memories/MEMORY.md", "memory", "new_mem", workspace=w)
+    res3 = json.loads(raw3)
+    assert res3["success"] is False
+    assert "state folder" in res3["error"]
+    assert mem_file.read_text(encoding="utf-8") == "memory content\n"
+
+
+def test_050_scenario_15_outside_and_symlink_escape(patch_test_env):
+    """시나리오 15: ../outside.txt / link => success false, outside 포함, outside.txt 내용 불변."""
+    w, outside, _ = patch_test_env
+    raw1 = patch_tool("../outside.txt", "OUTSIDE", "INSIDE", workspace=w)
+    res1 = json.loads(raw1)
+    assert res1["success"] is False
+    assert "outside" in res1["error"]
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE-SECRET"
+
+    raw2 = patch_tool("link", "OUTSIDE", "INSIDE", workspace=w)
+    res2 = json.loads(raw2)
+    assert res2["success"] is False
+    assert "outside" in res2["error"]
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE-SECRET"
+
+
+def test_050_scenario_16_control_characters_in_path(patch_test_env):
+    """시나리오 16: 경로 a\\nb => success false, 오류에 control 포함."""
+    w, _, _ = patch_test_env
+    raw = patch_tool("a\nb", "x", "y", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "control" in res["error"]
+
+
+def test_050_scenario_17_atomic_failure_cleanup(patch_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 17: os.replace가 OSError 던질 때 => Failed to write 포함, q.txt 원본 그대로, 임시 파일 없음."""
+    w, _, _ = patch_test_env
+
+    def _broken_replace(src, dst):
+        raise OSError("Disk full error simulation")
+
+    monkeypatch.setattr("os.replace", _broken_replace)
+
+    raw = patch_tool("q.txt", "two", "2", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "Failed to write" in res["error"]
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"
+
+    # 임시 파일이 남아 있지 않은지 확인
+    tmp_files = [f for f in w.iterdir() if f.name.startswith(".tmp_patch_")]
+    assert len(tmp_files) == 0
+
+
+def test_050_scenario_18_overlapping_match(patch_test_env):
+    """시나리오 18: 겹치는 일치: aaa, aa -> b, replace_all=True => replacements == 1, 파일 ba."""
+    w, _, _ = patch_test_env
+    (w / "overlap.txt").write_text("aaa", encoding="utf-8")
+
+    raw = patch_tool("overlap.txt", "aa", "b", replace_all=True, workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 1
+    assert (w / "overlap.txt").read_text(encoding="utf-8") == "ba"
+
+
+def test_050_scenario_19_korean_utf8(patch_test_env):
+    """시나리오 19: 한글 파일 kr.txt (안녕 세계\\n), 세계 -> 우주 => 파일 안녕 우주\\n."""
+    w, _, _ = patch_test_env
+    (w / "kr.txt").write_text("안녕 세계\n", encoding="utf-8")
+
+    raw = patch_tool("kr.txt", "세계", "우주", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert res["replacements"] == 1
+    assert (w / "kr.txt").read_text(encoding="utf-8") == "안녕 우주\n"
+
+
+def test_050_scenario_20_dispatcher_schema_patch():
+    """시나리오 20: 기본 디스패처의 get_tools_schema()에 patch가 있고 properties에 workspace가 없음."""
+    dispatcher = create_default_dispatcher()
+    schemas = dispatcher.get_tools_schema()
+    patch_def = next((s["function"] for s in schemas if s["function"]["name"] == "patch"), None)
+    assert patch_def is not None
+    assert "workspace" not in patch_def["parameters"]["properties"]
+    assert "path" in patch_def["parameters"]["properties"]
+    assert "old_string" in patch_def["parameters"]["properties"]
+    assert "new_string" in patch_def["parameters"]["properties"]
+    assert "replace_all" in patch_def["parameters"]["properties"]
+
+
+def test_050_scenario_21_dispatcher_blocks_workspace(patch_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 21: 디스패처로 workspace 넘기면 거부, q.txt 원본 유지."""
+    w, _, _ = patch_test_env
+    monkeypatch.chdir(w)
+    dispatcher = create_default_dispatcher()
+    raw = dispatcher.handle_function_call(
+        "patch",
+        {"path": "q.txt", "old_string": "two", "new_string": "2", "workspace": "/"},
+    )
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "workspace" in res["error"]
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"
+
+
+def test_050_scenario_22_dispatcher_type_check_replace_all(patch_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 22: 디스패처로 replace_all에 문자열 'yes' => 거부 (타입 검사), q.txt 원본 유지."""
+    w, _, _ = patch_test_env
+    monkeypatch.chdir(w)
+    dispatcher = create_default_dispatcher()
+    raw = dispatcher.handle_function_call(
+        "patch",
+        {"path": "q.txt", "old_string": "two", "new_string": "2", "replace_all": "yes"},
+    )
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "replace_all" in res["error"]
+    assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"

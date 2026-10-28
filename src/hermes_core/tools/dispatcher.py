@@ -14,8 +14,10 @@ from typing import Any, Optional
 
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.file_tools import (
+    PATCH_SCHEMA,
     READ_FILE_SCHEMA,
     WRITE_FILE_SCHEMA,
+    patch_tool,
     read_file_tool,
     write_file_tool,
 )
@@ -146,5 +148,8 @@ def create_default_dispatcher(
 
     # 5. Write File 도구 등록
     dispatcher.register_tool("write_file", write_file_tool, WRITE_FILE_SCHEMA)
+
+    # 6. Patch 도구 등록
+    dispatcher.register_tool("patch", patch_tool, PATCH_SCHEMA)
 
     return dispatcher

@@ -11,6 +11,7 @@
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Optional
 
@@ -77,6 +78,42 @@ WRITE_FILE_SCHEMA = {
                 },
             },
             "required": ["path", "content"],
+        },
+    },
+}
+
+PATCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "patch",
+        "description": (
+            "Replace an exact string in a text file. "
+            "Replaces exactly one occurrence by default; if old_string occurs multiple times, "
+            "provide more surrounding context to make it unique or set replace_all=True. "
+            "Modifying instruction files or the state folder is not allowed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path of the file to modify.",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "The exact string to find and replace.",
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "The replacement string.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "If true, replace all occurrences. If false (default), replace exactly one occurrence.",
+                    "default": False,
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
         },
     },
 }
@@ -274,5 +311,113 @@ def write_file_tool(
         "path": rel_path,
         "chars_written": len(content),
         "bytes_written": len(content.encode("utf-8")),
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+def patch_tool(
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+    workspace: Optional[Path] = None,
+) -> str:
+    """작업 폴더 안의 텍스트 파일의 일치하는 문자열을 교체한다.
+
+    순서: resolve_workspace -> check_write_path -> 대상 검사 -> 문자열 검사 -> 교체 -> 결과 크기 검사 -> 원자적 쓰기.
+    """
+    base = resolve_workspace(workspace)
+    target_path, err = check_write_path(path, base)
+    if err or target_path is None:
+        return _failure(err or "Invalid path.")
+
+    if not target_path.exists():
+        return _failure(f"File not found: '{path}'")
+
+    if not target_path.is_file():
+        return _failure(f"Path '{path}' is not a regular file.")
+
+    file_size = target_path.stat().st_size
+    if file_size > FILE_MAX_BYTES:
+        return _failure(f"File '{path}' is too large ({file_size} bytes > {FILE_MAX_BYTES} bytes limit).")
+
+    try:
+        raw_bytes = target_path.read_bytes()
+    except OSError as e:
+        return _failure(f"Failed to read file '{path}': {e}")
+
+    if b"\x00" in raw_bytes:
+        return _failure(f"Cannot patch binary file (contains NUL byte): '{path}'")
+
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return _failure(f"File '{path}' is not valid UTF-8: {e}")
+
+    if not old_string:
+        return _failure("old_string must not be empty.")
+
+    if old_string == new_string:
+        return _failure("old_string and new_string must differ.")
+
+    count = text.count(old_string)
+    if count == 0:
+        return _failure(f"old_string not found in file: '{path}'")
+
+    if count > 1 and not replace_all:
+        return _failure(
+            f"old_string found {count} times; make it unique or set replace_all=True: '{path}'"
+        )
+
+    if replace_all:
+        new_text = text.replace(old_string, new_string)
+        replacements = count
+    else:
+        new_text = text.replace(old_string, new_string, 1)
+        replacements = 1
+
+    encoded_new = new_text.encode("utf-8")
+    if len(encoded_new) > FILE_MAX_BYTES:
+        return _failure(
+            f"Patch result too large ({len(encoded_new)} bytes > {FILE_MAX_BYTES} bytes limit): '{path}'"
+        )
+
+    # 원본 파일 권한 보존
+    original_mode = stat.S_IMODE(target_path.stat().st_mode)
+
+    tmp_fd = None
+    tmp_path_str = None
+    try:
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            prefix=".tmp_patch_",
+            dir=str(target_path.parent),
+        )
+        os.chmod(tmp_path_str, original_mode)
+        os.write(tmp_fd, encoded_new)
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = None
+
+        os.replace(tmp_path_str, target_path)
+    except OSError as e:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_path_str and os.path.exists(tmp_path_str):
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+        return _failure(f"Failed to write file '{path}': {e}")
+
+    rel_path = target_path.relative_to(base).as_posix()
+    result = {
+        "success": True,
+        "path": rel_path,
+        "replacements": replacements,
+        "chars_before": len(text),
+        "chars_after": len(new_text),
     }
     return json.dumps(result, ensure_ascii=False)
