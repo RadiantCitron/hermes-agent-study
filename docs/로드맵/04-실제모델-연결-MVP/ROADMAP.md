@@ -44,6 +44,91 @@ flowchart TD
     end
 ```
 
+> 아래 그림은 도해 규칙([ROADMAP_정책.md §3-3](../ROADMAP_정책.md))에 따라 마감 뒤에 보강했다. 이름은 현재 코드 기준이다.
+
+이 로드맵이 만들거나 바꾼 파일:
+
+```text
+src/hermes_core/
+  llm_client.py             # 신규 (020): OpenRouterClient, LLMResponse, LLMError, 키 마스킹
+  constants.py              # 변경: 작업 폴더 이름, 보호 이름, 모델·통신 상수
+  session_db.py             # 변경 (030): llm_calls 표, sessions.mode, 스키마 v3
+  cli.py                    # 변경 (040): 실제 모드 (키 확인 → 작업 폴더 이동 → OpenRouterClient)
+  agent/agent.py            # 변경 (030): LLMError 처리, 토큰 누적, 호출 기록 콜백 연결
+  tools/
+    path_guard.py           # 변경 (010): .env*·.git 거부, 상태 폴더 규칙 예외
+    terminal_tool.py        # 변경 (010): 경로 인자에 보호 이름 판정
+tests/test_hermes_core/
+  conftest.py               # 신규 (020): 키 환경변수 제거, 실제 통신 차단
+  test_llm_client.py, test_llm_call_ledger.py   # 신규
+```
+
+클래스 관계:
+
+```mermaid
+classDiagram
+    class HermesAgent {
+        +run_conversation(user_message)
+    }
+    class OpenRouterClient {
+        +model
+        +chat_completion(messages, tools)
+        +set_call_recorder(fn)
+    }
+    class LLMResponse {
+        +content
+        +tool_calls
+        +usage
+    }
+    class LLMError {
+        +kind
+    }
+    class SessionDB {
+        +record_llm_call(session_id, ...)
+        +get_llm_calls(session_id)
+        +update_token_counts(...)
+    }
+    class MockLLMClient {
+        +chat_completion(messages, tools)
+    }
+    HermesAgent --> OpenRouterClient : 실제 모드
+    HermesAgent --> MockLLMClient : --mock
+    OpenRouterClient ..> LLMResponse : 반환
+    OpenRouterClient ..> LLMError : 실패를 변환해 던짐
+    HermesAgent ..> LLMError : 잡아서 llm_error 종료 사유로
+    HermesAgent --> SessionDB : 토큰 누적 · 호출 기록
+    OpenRouterClient ..> SessionDB : 호출마다 콜백(set_call_recorder)
+```
+
+실제 모드에서 모델을 한 번 부를 때의 순서 (성공과 실패):
+
+```mermaid
+sequenceDiagram
+    participant C as cli.main
+    participant A as HermesAgent
+    participant L as OpenRouterClient
+    participant O as OpenRouter(HTTP)
+    participant DB as SessionDB
+
+    C->>C: 환경변수에서 키 읽기 (없으면 안내 후 종료 코드 2)
+    C->>C: 작업 폴더를 .hermes/workspace로 이동
+    C->>L: OpenRouterClient(api_key, model)
+    C->>A: HermesAgent(llm_client=L) 후 run_conversation
+    A->>L: set_call_recorder(콜백) (생성 시 1회)
+    A->>L: chat_completion(messages, tools)
+    L->>O: POST (키는 헤더에만)
+    alt 성공
+        O-->>L: 응답 JSON
+        L->>DB: 콜백: 요청·응답·토큰·소요 시간 기록 (키 문자열은 ***)
+        L-->>A: LLMResponse
+        A->>DB: update_token_counts
+    else 통신 실패 · 429 · 이상한 응답
+        L->>DB: 콜백: 오류 기록
+        L-->>A: LLMError
+        A-->>C: stopped_reason = llm_error
+    end
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
