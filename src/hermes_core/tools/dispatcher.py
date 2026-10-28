@@ -4,6 +4,7 @@
 - 대응 원본: hermes-agent/model_tools.py (handle_function_call)
 - 핵심 원리:
   - O(1) 단일 진입로: LLM의 tool_calls가 들어오면 if-elif 체인 대신 레지스트리 맵을 통해 일관된 방식으로 도구 실행.
+  - 호출 전 인자 검증: 등록된 스키마로 필수·미정의·타입·enum을 검사하고, 위반이면 도구를 부르지 않고 실패 메시지를 반환.
   - 전역 의존성 해소: MemoryStore와 SessionDB를 명시적으로 주입받아 격리된 인스턴스를 유지.
 """
 
@@ -15,6 +16,50 @@ from hermes_core.session_db import SessionDB
 from hermes_core.tools.memory_tool import MEMORY_SCHEMA, MemoryStore, memory_tool
 from hermes_core.tools.session_search_tool import SESSION_SEARCH_SCHEMA, session_search_tool
 from hermes_core.tools.terminal_tool import TERMINAL_SCHEMA, terminal_tool
+
+
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _validate_arguments(schema: dict[str, Any], args: Any) -> Optional[str]:
+    """등록된 스키마(function.parameters) 기준으로 인자를 검사. 위반 사유를 반환하고, 통과하면 None.
+
+    검사: 필수 인자, 정의되지 않은 인자, 타입(integer/number에 bool 불인정), enum.
+    스키마나 parameters가 비어 있으면 검증하지 않는다(기존 호환). 알 수 없는 타입 이름은 타입 검사를 건너뛴다.
+    """
+    params = (schema or {}).get("function", {}).get("parameters")
+    if not params:
+        return None
+    if not isinstance(args, dict):
+        return "arguments must be an object"
+
+    properties = params.get("properties")
+    for name in params.get("required", []):
+        if name not in args:
+            return f"missing required argument '{name}'"
+    if properties is not None:
+        for name in args:
+            if name not in properties:
+                return f"unexpected argument '{name}'"
+
+    for name, value in args.items():
+        spec = (properties or {}).get(name, {})
+        expected = spec.get("type")
+        allowed_types = _JSON_TYPES.get(expected)
+        if allowed_types:
+            is_bool_for_number = isinstance(value, bool) and expected in ("integer", "number")
+            if is_bool_for_number or not isinstance(value, allowed_types):
+                return f"argument '{name}' must be of type {expected}"
+        if "enum" in spec and value not in spec["enum"]:
+            return f"argument '{name}' must be one of {spec['enum']}"
+    return None
 
 
 class ToolDispatcher:
@@ -44,6 +89,13 @@ class ToolDispatcher:
         if not handler:
             return json.dumps(
                 {"success": False, "error": f"Unknown tool '{function_name}'."},
+                ensure_ascii=False,
+            )
+
+        reason = _validate_arguments(self._schemas.get(function_name, {}), function_args)
+        if reason:
+            return json.dumps(
+                {"success": False, "error": f"Invalid arguments for tool '{function_name}': {reason}"},
                 ensure_ascii=False,
             )
 
