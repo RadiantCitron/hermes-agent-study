@@ -23,6 +23,7 @@ from hermes_core.tools.file_tools import (
 )
 from hermes_core.tools.memory_tool import MEMORY_SCHEMA, MemoryStore, memory_tool
 from hermes_core.tools.session_search_tool import SESSION_SEARCH_SCHEMA, session_search_tool
+from hermes_core.tools.skills_tool import SKILLS_LIST_SCHEMA, skills_list_tool
 from hermes_core.tools.terminal_tool import TERMINAL_SCHEMA, terminal_tool
 
 
@@ -151,5 +152,8 @@ def create_default_dispatcher(
 
     # 6. Patch 도구 등록
     dispatcher.register_tool("patch", patch_tool, PATCH_SCHEMA)
+
+    # 7. Skills List 도구 등록
+    dispatcher.register_tool("skills_list", skills_list_tool, SKILLS_LIST_SCHEMA)
 
     return dispatcher

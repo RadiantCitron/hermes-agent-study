@@ -8,6 +8,7 @@
   - 스킬 디렉터리 내 읽기 전용 스캔 및 경로 격리 안전 보장.
 """
 
+import json
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +16,7 @@ from hermes_core.constants import (
     SKILL_DESCRIPTION_MAX_CHARS,
     SKILL_FILE_NAME,
     SKILL_NAME_MAX_CHARS,
+    get_skills_dir,
 )
 from hermes_core.tools.path_guard import is_inside, is_protected_path
 
@@ -198,3 +200,77 @@ def discover_skills(skills_root: Path) -> list[dict[str, Optional[str]]]:
     # 7. 정렬: (category or "", name or "", path or "")
     skills.sort(key=lambda s: (s["category"] or "", s["name"] or "", s["path"] or ""))
     return skills
+
+
+def skills_list_tool(
+    category: Optional[str] = None,
+    skills_root: Optional[Path] = None,
+) -> str:
+    """사용 가능한 스킬 목록을 JSON 문자열로 반환한다.
+
+    - skills_root가 None이면 호출 시점의 get_skills_dir()를 사용한다.
+    - 스킬 폴더를 생성하지 않는다 (읽기 전용).
+    - category 필터가 주어지면(공백 제외) 해당 분류의 스킬만 반환한다.
+    - 본문은 포함하지 않고 메타데이터(name, description, category, path)만 반환한다.
+    """
+    if skills_root is None:
+        target_root = get_skills_dir().resolve()
+    else:
+        target_root = Path(skills_root).resolve()
+
+    all_skills = discover_skills(target_root)
+
+    # category 필터링 (빈 문자열·공백뿐이면 필터 없음)
+    filter_cat = category.strip() if isinstance(category, str) and category.strip() else None
+    if filter_cat:
+        filtered_skills = [s for s in all_skills if s.get("category") == filter_cat]
+    else:
+        filtered_skills = all_skills
+
+    # categories는 필터링 결과 기준 고유 분류 목록 정렬
+    categories = sorted(
+        list({s["category"] for s in filtered_skills if s.get("category") is not None})
+    )
+
+    if not filtered_skills:
+        res: dict[str, Any] = {
+            "success": True,
+            "skills": [],
+            "categories": [],
+            "count": 0,
+            "message": "No skills found.",
+        }
+    else:
+        res = {
+            "success": True,
+            "skills": filtered_skills,
+            "categories": categories,
+            "count": len(filtered_skills),
+        }
+
+    return json.dumps(res, ensure_ascii=False)
+
+
+# =============================================================================
+# OpenAI 규격 함수 호출 스키마
+# =============================================================================
+
+SKILLS_LIST_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "skills_list",
+        "description": (
+            "List available skills (procedural memories). Returns metadata only (name, description, category, path). "
+            "To read the full skill content or linked files, use skill_view."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Optional category to filter skills by. If omitted or empty, lists all skills.",
+                },
+            },
+        },
+    },
+}
