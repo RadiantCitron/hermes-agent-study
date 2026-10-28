@@ -5,8 +5,8 @@
 - 핵심 원리:
   1. 세션별 프롬프트 캐싱(Prompt Caching):
      - `_build_system_prompt()`는 세션당 1회만 조립되고 캐싱되어, 대화가 진행되는 동안 Prefix Cache를 보존.
-  2. 엄격한 메시지 역할 교대(Strict Role Alternation):
-     - user -> assistant(tool_calls) -> tool -> assistant 의 순서를 철저히 유지.
+  2. 메시지 역할 순서:
+     - user -> assistant(tool_calls) -> tool -> assistant 의 순서대로 쌓는다. 순서를 검사하거나 강제하지는 않는다.
   3. 도구 실행 및 세션 원장 동기화:
      - 도구 실행 결과가 발생하는 즉시 SQLite SessionDB에 영구 기록.
   4. 테스트 격리를 위한 MockLLMClient 내장.
@@ -30,6 +30,22 @@ from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatch
 from hermes_core.tools.memory_tool import MemoryStore
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_tool_arguments(raw: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """모델이 보낸 도구 인자를 사전으로 읽는다. 실패하면 (None, 사유)를 반환.
+
+    빈 문자열(공백 포함)과 None은 「인자 없음」({})으로 본다.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}, None
+    try:
+        args = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as e:
+        return None, str(e)
+    if not isinstance(args, dict):
+        return None, "arguments must be a JSON object"
+    return args, None
 
 
 # =============================================================================
@@ -117,7 +133,7 @@ class HermesAgent:
         self._cached_system_prompt: Optional[str] = None
 
     def _build_system_prompt(self, system_message: Optional[str] = None) -> str:
-        """세션 시작 시 단 1회 시스템 프롬프트를 조립하고 캐싱."""
+        """시스템 프롬프트를 조립하고 캐싱. `system_message`를 넘기지 않으면 캐시를 재사용하고, 넘기면 다시 조립한다."""
         if self._cached_system_prompt is not None and system_message is None:
             return self._cached_system_prompt
 
@@ -164,13 +180,17 @@ class HermesAgent:
             if not self.quiet_mode:
                 print(f"  [Tool Call] {func_name}({args_str})")
 
-            try:
-                args = json.loads(args_str) if isinstance(args_str, str) else args_str
-            except Exception:
-                args = {}
-
-            # 디스패처 단일 진입로 실행
-            result_str = self.dispatcher.handle_function_call(func_name, args)
+            args, parse_error = _parse_tool_arguments(args_str)
+            if parse_error is None:
+                # 디스패처 단일 진입로 실행
+                result_str = self.dispatcher.handle_function_call(func_name, args)
+            else:
+                # 읽지 못한 인자로는 도구를 부르지 않고, 사유를 모델에게 돌려줘 스스로 고치게 한다.
+                logger.warning("Invalid JSON arguments for tool '%s': %s", func_name, parse_error)
+                result_str = json.dumps(
+                    {"success": False, "error": f"Invalid JSON arguments for tool '{func_name}': {parse_error}"},
+                    ensure_ascii=False,
+                )
 
             # messages에 추가 (Strict Role Alternation)
             tool_msg = {
@@ -214,6 +234,7 @@ class HermesAgent:
         )
 
         final_response: str = ""
+        stopped_reason = "max_iterations"
         iterations = 0
 
         while iterations < self.max_iterations:
@@ -248,13 +269,18 @@ class HermesAgent:
             else:
                 # 도구 호출이 없으면 최종 텍스트 응답으로 루프 종료
                 final_response = resp.content or ""
+                stopped_reason = "completed"
                 break
+
+        if stopped_reason == "max_iterations":
+            logger.warning("Agent loop stopped at max_iterations=%d without a final response.", self.max_iterations)
 
         return {
             "final_response": final_response,
             "messages": messages,
             "iterations": iterations,
             "session_id": self.session_id,
+            "stopped_reason": stopped_reason,
         }
 
 
