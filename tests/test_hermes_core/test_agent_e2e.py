@@ -103,3 +103,60 @@ def test_agent_e2e_terminal_tool_execution(tmp_path):
     assert "Hermes Core Activated" in tool_output_msg["content"]
 
     session_db.close()
+
+
+def test_agent_e2e_blocked_invalid_unreadable_and_valid_calls_in_one_conversation(tmp_path, monkeypatch):
+    """로드맵 02 / 060: 차단된 명령, 잘못된 인자, 읽을 수 없는 인자, 정상 명령이 한 대화에 섞여도 루프가 정상 종료한다."""
+    work = tmp_path / "work"
+    work.mkdir()
+    victim = work / "x"
+    victim.write_text("keep", encoding="utf-8")
+    monkeypatch.chdir(work)
+
+    def call(call_id, name, arguments):
+        return [{"id": call_id, "function": {"name": name, "arguments": arguments}}]
+
+    mock_client = MockLLMClient()
+    mock_client.queue_response(tool_calls=call("c1", "terminal", '{"command": "rm -rf x"}'))
+    mock_client.queue_response(tool_calls=call("c2", "memory", "{}"))
+    mock_client.queue_response(tool_calls=call("c3", "terminal", "{bad"))
+    mock_client.queue_response(tool_calls=call("c4", "terminal", '{"command": "echo ok"}'))
+    mock_client.queue_response(content="done")
+
+    session_db = SessionDB(":memory:")
+    agent = HermesAgent(
+        session_db=session_db,
+        memory_store=MemoryStore(memory_dir=tmp_path / "memories"),
+        llm_client=mock_client,
+        quiet_mode=True,
+    )
+
+    result = agent.run_conversation("섞어서 시험해줘.")
+
+    # 1. 정상 종료
+    assert result["final_response"] == "done"
+    assert result["stopped_reason"] == "completed"
+    assert result["iterations"] == 5
+
+    # 2. 차단된 명령은 실행되지 않았다
+    assert victim.exists()
+
+    # 3. 도구 메시지 4개가 순서대로: 거부, 인자 오류, 인자 읽기 실패, 성공
+    tool_msgs = [m for m in result["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 4
+    assert "rm" in tool_msgs[0]["content"]
+    assert "action" in tool_msgs[1]["content"]
+    assert "JSON" in tool_msgs[2]["content"]
+    assert "ok" in tool_msgs[3]["content"]
+
+    # 4. 세션 원장: 사용자 1 + 모델 5 + 도구 4 = 10
+    assert len(session_db.get_messages(agent.session_id)) == 10
+
+    # 5. 모델 요청마다 대응하는 도구 메시지가 있다
+    requested_ids = [
+        tc["id"] for m in result["messages"] if m["role"] == "assistant" for tc in m.get("tool_calls", [])
+    ]
+    assert requested_ids == ["c1", "c2", "c3", "c4"]
+    assert [m["tool_call_id"] for m in tool_msgs] == requested_ids
+
+    session_db.close()
