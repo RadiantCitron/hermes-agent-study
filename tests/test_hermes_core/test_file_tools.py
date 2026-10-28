@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from hermes_core.tools.dispatcher import create_default_dispatcher
-from hermes_core.tools.file_tools import READ_FILE_SCHEMA, read_file_tool
+from hermes_core.tools.file_tools import (
+    READ_FILE_SCHEMA,
+    WRITE_FILE_SCHEMA,
+    read_file_tool,
+    write_file_tool,
+)
 
 
 @pytest.fixture
@@ -291,3 +296,241 @@ def test_030_scenario_13_read_allowed_for_instruction_and_state_files(tmp_path: 
     res2 = json.loads(raw2)
     assert res2["success"] is True
     assert "1|memory content" in res2["content"]
+
+
+# =============================================================================
+# 로드맵 040 write_file 인수 테스트 시나리오 (§3)
+# =============================================================================
+
+
+@pytest.fixture
+def write_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """040 write_file 테스트용 작업 폴더 W 구성."""
+    w = (tmp_path / "workspace").resolve()
+    w.mkdir(exist_ok=True)
+
+    outside = (tmp_path / "outside.txt").resolve()
+    outside.write_text("OUTSIDE-SECRET", encoding="utf-8")
+
+    (w / "a.txt").write_text("line1\n", encoding="utf-8")
+    (w / "sub").mkdir(exist_ok=True)
+    (w / "link").symlink_to(outside)
+    (w / "dang").symlink_to(w / "ghost.txt")
+
+    hermes_home = (tmp_path / "hermes_home").resolve()
+    hermes_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    out_dir = (tmp_path / "OUT").resolve()
+    out_dir.mkdir(exist_ok=True)
+
+    return w, outside, out_dir
+
+
+def test_040_scenario_01_create_new_file(write_test_env):
+    """시나리오 1: new.txt, hello\\n -> success true, 바이트 일치, path, chars_written."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("new.txt", "hello\n", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "new.txt").read_bytes() == b"hello\n"
+    assert res["path"] == "new.txt"
+    assert res["chars_written"] == 6
+    assert res["bytes_written"] == 6
+
+
+def test_040_scenario_02_create_with_parent_dirs(write_test_env):
+    """시나리오 2: d1/d2/new.txt, x (부모 폴더 없음) -> 부모 생성 및 파일 생성."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("d1/d2/new.txt", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "d1/d2/new.txt").read_text(encoding="utf-8") == "x"
+    assert res["path"] == "d1/d2/new.txt"
+
+
+def test_040_scenario_03_existing_file_rejection(write_test_env):
+    """시나리오 3: a.txt, NEW -> already exists와 patch 포함, a.txt 내용 불변."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("a.txt", "NEW", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "already exists" in res["error"]
+    assert "patch" in res["error"]
+    assert (w / "a.txt").read_text(encoding="utf-8") == "line1\n"
+
+
+def test_040_scenario_04_existing_dir_rejection(write_test_env):
+    """시나리오 4: sub (기존 폴더), x -> already exists 포함."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("sub", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "already exists" in res["error"]
+
+
+def test_040_scenario_05_crlf_and_korean(write_test_env):
+    """시나리오 5: kr.txt, 한글\\r\\n -> 바이트 정확 일치 (줄바꿈 변환 없음)."""
+    w, _, _ = write_test_env
+    content = "한글\r\n"
+    raw = write_file_tool("kr.txt", content, workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "kr.txt").read_bytes() == content.encode("utf-8")
+
+
+def test_040_scenario_06_max_chars_limit(write_test_env):
+    """시나리오 6: 길이 100,000 성공, 100,001 실패(too large, 파일 미생성)."""
+    w, _, _ = write_test_env
+    res1 = json.loads(write_file_tool("exact100k.txt", "x" * 100_000, workspace=w))
+    assert res1["success"] is True
+    assert (w / "exact100k.txt").exists()
+
+    res2 = json.loads(write_file_tool("over100k.txt", "x" * 100_001, workspace=w))
+    assert res2["success"] is False
+    assert "too large" in res2["error"]
+    assert not (w / "over100k.txt").exists()
+
+
+def test_040_scenario_07_empty_content(write_test_env):
+    """시나리오 7: empty.txt, '' -> success true, 크기 0."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("empty_created.txt", "", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "empty_created.txt").stat().st_size == 0
+
+
+def test_040_scenario_08_outside_paths_no_creation(write_test_env):
+    """시나리오 8: ../x.txt, OUT/x.txt, ../newdir/x.txt -> outside 포함, 어떤 파일/폴더도 미생성."""
+    w, _, out_dir = write_test_env
+    parent_before = set(w.parent.iterdir())
+    out_before = set(out_dir.iterdir())
+
+    for target in ["../x.txt", str(out_dir / "x.txt"), "../newdir/x.txt"]:
+        raw = write_file_tool(target, "content", workspace=w)
+        res = json.loads(raw)
+        assert res["success"] is False
+        assert "outside" in res["error"]
+
+    assert set(w.parent.iterdir()) == parent_before
+    assert set(out_dir.iterdir()) == out_before
+
+
+def test_040_scenario_09_instruction_and_state_folder_rejection(write_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 9: AGENTS.md, .hermes/x.txt, newdir/SOUL.md -> false, newdir 폴더도 미생성."""
+    w, _, _ = write_test_env
+    hermes_home = w / ".hermes"
+    hermes_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    res1 = json.loads(write_file_tool("AGENTS.md", "c", workspace=w))
+    assert res1["success"] is False
+    assert not (w / "AGENTS.md").exists()
+
+    res2 = json.loads(write_file_tool(".hermes/x.txt", "c", workspace=w))
+    assert res2["success"] is False
+    assert not (hermes_home / "x.txt").exists()
+
+    res3 = json.loads(write_file_tool("newdir/SOUL.md", "c", workspace=w))
+    assert res3["success"] is False
+    assert not (w / "newdir").exists()
+
+
+def test_040_scenario_10_dangling_symlink_rejection(write_test_env):
+    """시나리오 10: dang (끊어진 링크), x -> already exists 포함, ghost.txt 미생성."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("dang", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "already exists" in res["error"]
+    assert not (w / "ghost.txt").exists()
+
+
+def test_040_scenario_11_outside_symlink_rejection(write_test_env):
+    """시나리오 11: link, OVERWRITE -> outside 포함, outside.txt 내용 유지."""
+    w, outside, _ = write_test_env
+    raw = write_file_tool("link", "OVERWRITE", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "outside" in res["error"]
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE-SECRET"
+
+
+def test_040_scenario_12_control_chars_in_path(write_test_env):
+    """시나리오 12: 경로 a\\nb -> control 포함."""
+    w, _, _ = write_test_env
+    raw = write_file_tool("a\nb", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "control" in res["error"]
+
+
+def test_040_scenario_13_atomic_replace_failure_cleanup(write_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 13: os.replace가 OSError를 던지면 Failed to write 포함, fail.txt 미생성, 임시 파일 미잔존."""
+    w, _, _ = write_test_env
+
+    def _broken_replace(src, dst):
+        raise OSError("disk failure simulation")
+
+    monkeypatch.setattr("os.replace", _broken_replace)
+
+    raw = write_file_tool("fail.txt", "x", workspace=w)
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "Failed to write" in res["error"]
+    assert not (w / "fail.txt").exists()
+
+    # 임시 파일이 남아 있지 않은지 확인
+    tmp_files = [f for f in w.iterdir() if f.name.startswith(".tmp_write_")]
+    assert len(tmp_files) == 0
+
+
+def test_040_scenario_14_no_leftover_temp_files(write_test_env):
+    """시나리오 14: 성공한 쓰기 직후 W 폴더 목록에 임시 파일이 남아 있지 않음."""
+    w, _, _ = write_test_env
+    write_file_tool("success.txt", "content", workspace=w)
+    tmp_files = [f for f in w.iterdir() if f.name.startswith(".tmp_write_")]
+    assert len(tmp_files) == 0
+
+
+def test_040_scenario_15_file_permissions(write_test_env):
+    """시나리오 15: 새로 만든 파일의 권한 0o644."""
+    w, _, _ = write_test_env
+    write_file_tool("perm.txt", "hello", workspace=w)
+    mode = (w / "perm.txt").stat().st_mode & 0o777
+    assert mode == 0o644
+
+
+def test_040_scenario_16_dispatcher_schema_write_file():
+    """시나리오 16: get_tools_schema()에 write_file이 있고 properties에 workspace가 없음."""
+    dispatcher = create_default_dispatcher()
+    schemas = dispatcher.get_tools_schema()
+    wf_def = next((s["function"] for s in schemas if s["function"]["name"] == "write_file"), None)
+    assert wf_def is not None
+    assert "workspace" not in wf_def["parameters"]["properties"]
+    assert "path" in wf_def["parameters"]["properties"]
+    assert "content" in wf_def["parameters"]["properties"]
+
+
+def test_040_scenario_17_dispatcher_blocks_workspace(write_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 17: 기본 디스패처로 workspace 넘기면 거부, n.txt 미생성."""
+    w, _, _ = write_test_env
+    monkeypatch.chdir(w)
+    dispatcher = create_default_dispatcher()
+    raw = dispatcher.handle_function_call("write_file", {"path": "n.txt", "content": "x", "workspace": "/"})
+    res = json.loads(raw)
+    assert res["success"] is False
+    assert "workspace" in res["error"]
+    assert not (w / "n.txt").exists()
+
+
+def test_040_scenario_18_dispatcher_write_success(write_test_env, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 18: 기본 디스패처로 {'path': 'n.txt', 'content': 'x'} -> W/n.txt 생성."""
+    w, _, _ = write_test_env
+    monkeypatch.chdir(w)
+    dispatcher = create_default_dispatcher()
+    raw = dispatcher.handle_function_call("write_file", {"path": "n.txt", "content": "x"})
+    res = json.loads(raw)
+    assert res["success"] is True
+    assert (w / "n.txt").read_text(encoding="utf-8") == "x"

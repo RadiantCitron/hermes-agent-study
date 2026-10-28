@@ -9,15 +9,18 @@
 """
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Optional
 
 from hermes_core.constants import (
     FILE_MAX_BYTES,
     FILE_READ_MAX_CHARS,
     FILE_READ_MAX_LINES,
+    FILE_WRITE_MAX_CHARS,
 )
-from hermes_core.tools.path_guard import check_path, resolve_workspace
+from hermes_core.tools.path_guard import check_path, check_write_path, resolve_workspace
 
 READ_FILE_SCHEMA = {
     "type": "function",
@@ -48,6 +51,32 @@ READ_FILE_SCHEMA = {
                 },
             },
             "required": ["path"],
+        },
+    },
+}
+
+WRITE_FILE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": (
+            "Create a new file with the specified content. "
+            "Only new files can be created; to modify existing files, use patch. "
+            "Writing to instruction files or the state folder is not allowed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path of the new file to create.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to write to the file.",
+                },
+            },
+            "required": ["path", "content"],
         },
     },
 }
@@ -177,5 +206,73 @@ def read_file_tool(
         "lines_returned": len(selected),
         "truncated": truncated,
         "next_offset": next_offset,
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
+def write_file_tool(
+    path: str,
+    content: str,
+    workspace: Optional[Path] = None,
+) -> str:
+    """새 파일을 생성하고 내용을 원자적으로 기록한다.
+
+    순서: resolve_workspace -> check_write_path -> 내용 크기 검사 -> 이미 있는지 검사 -> 부모 폴더 생성 -> 원자적 쓰기.
+    """
+    base = resolve_workspace(workspace)
+    target_path, err = check_write_path(path, base)
+    if err or target_path is None:
+        return _failure(err or "Invalid path.")
+
+    if len(content) > FILE_WRITE_MAX_CHARS:
+        return _failure(f"content is too large ({len(content)} chars > {FILE_WRITE_MAX_CHARS} limit).")
+
+    raw_target = base / path
+    if target_path.exists() or raw_target.is_symlink() or raw_target.exists():
+        return _failure(f"File '{path}' already exists. To modify it, use patch.")
+
+    # 부모 폴더 생성 (작업 폴더 안임이 판정된 상태)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 같은 폴더에 임시 파일 생성 후 원자적 교체
+    tmp_fd = None
+    tmp_path_str = None
+    try:
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            prefix=".tmp_write_",
+            dir=str(target_path.parent),
+        )
+        content_bytes = content.encode("utf-8")
+        os.write(tmp_fd, content_bytes)
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = None
+
+        os.chmod(tmp_path_str, 0o644)
+
+        if target_path.exists():
+            os.unlink(tmp_path_str)
+            return _failure(f"File '{path}' already exists. To modify it, use patch.")
+
+        os.replace(tmp_path_str, target_path)
+    except OSError as e:
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_path_str and os.path.exists(tmp_path_str):
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+        return _failure(f"Failed to write file '{path}': {e}")
+
+    rel_path = target_path.relative_to(base).as_posix()
+    result = {
+        "success": True,
+        "path": rel_path,
+        "chars_written": len(content),
+        "bytes_written": len(content.encode("utf-8")),
     }
     return json.dumps(result, ensure_ascii=False)

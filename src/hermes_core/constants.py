@@ -71,6 +71,9 @@ FILE_READ_MAX_LINES = 2000
 # 줄 번호가 붙은 출력 합계 상한 글자수
 FILE_READ_MAX_CHARS = 100_000
 
+# 파일 쓰기 내용 상한 글자수
+FILE_WRITE_MAX_CHARS = 100_000
+
 # 읽기·수정 대상 파일 크기 상한 (바이트)
 FILE_MAX_BYTES = 1_000_000
 

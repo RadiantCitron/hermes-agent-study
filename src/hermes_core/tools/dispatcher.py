@@ -13,7 +13,12 @@ import json
 from typing import Any, Optional
 
 from hermes_core.session_db import SessionDB
-from hermes_core.tools.file_tools import READ_FILE_SCHEMA, read_file_tool
+from hermes_core.tools.file_tools import (
+    READ_FILE_SCHEMA,
+    WRITE_FILE_SCHEMA,
+    read_file_tool,
+    write_file_tool,
+)
 from hermes_core.tools.memory_tool import MEMORY_SCHEMA, MemoryStore, memory_tool
 from hermes_core.tools.session_search_tool import SESSION_SEARCH_SCHEMA, session_search_tool
 from hermes_core.tools.terminal_tool import TERMINAL_SCHEMA, terminal_tool
@@ -138,5 +143,8 @@ def create_default_dispatcher(
 
     # 4. Read File 도구 등록
     dispatcher.register_tool("read_file", read_file_tool, READ_FILE_SCHEMA)
+
+    # 5. Write File 도구 등록
+    dispatcher.register_tool("write_file", write_file_tool, WRITE_FILE_SCHEMA)
 
     return dispatcher
