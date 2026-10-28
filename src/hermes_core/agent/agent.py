@@ -25,6 +25,7 @@ from hermes_core.agent.prompt_builder import (
     build_context_files_prompt,
     build_system_prompt,
 )
+from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
@@ -93,7 +94,7 @@ class HermesAgent:
 
     def __init__(
         self,
-        model: str = "gpt-4o",
+        model: Optional[str] = None,
         system_message: Optional[str] = None,
         session_id: Optional[str] = None,
         session_db: Optional[SessionDB] = None,
@@ -103,7 +104,6 @@ class HermesAgent:
         max_iterations: int = 50,
         quiet_mode: bool = False,
     ):
-        self.model = model
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
         self.max_iterations = max_iterations
@@ -118,6 +118,25 @@ class HermesAgent:
         )
         self.llm_client = llm_client or MockLLMClient()
 
+        # 효과 모델명 및 모드 판정
+        if model is not None:
+            self.model = model
+        elif isinstance(self.llm_client, MockLLMClient):
+            self.model = "mock"
+        else:
+            self.model = getattr(self.llm_client, "model", "unknown")
+
+        if isinstance(self.llm_client, MockLLMClient):
+            self.mode = "mock"
+        else:
+            self.mode = "real"
+
+        # 콜백 레코더 등록
+        if hasattr(self.llm_client, "set_call_recorder") and callable(getattr(self.llm_client, "set_call_recorder")):
+            self.llm_client.set_call_recorder(
+                lambda record: self.session_db.record_llm_call(session_id=self.session_id, **record)
+            )
+
         # 메모리 디스크 로드 및 동결 스냅샷 캡처
         self.memory_store.load_from_disk()
 
@@ -126,6 +145,7 @@ class HermesAgent:
             session_id=self.session_id,
             source="cli",
             model=self.model,
+            mode=self.mode,
             system_prompt=None,
         )
 
@@ -236,16 +256,34 @@ class HermesAgent:
         final_response: str = ""
         stopped_reason = "max_iterations"
         iterations = 0
+        error_info: Optional[dict[str, str]] = None
 
         while iterations < self.max_iterations:
             iterations += 1
 
             # LLM 호출
             tools_schema = self.dispatcher.get_tools_schema()
-            resp = self.llm_client.chat_completion(
-                messages=messages,
-                tools=tools_schema if tools_schema else None,
-            )
+            try:
+                resp = self.llm_client.chat_completion(
+                    messages=messages,
+                    tools=tools_schema if tools_schema else None,
+                )
+            except LLMError as e:
+                logger.warning("LLM call failed with error: %s", e)
+                stopped_reason = "llm_error"
+                final_response = ""
+                error_info = {"kind": e.kind, "message": str(e)}
+                break
+
+            # 응답에 usage가 있으면 update_token_counts로 누적
+            usage = getattr(resp, "usage", None)
+            if usage and isinstance(usage, dict):
+                in_tok = usage.get("input_tokens") or 0
+                out_tok = usage.get("output_tokens") or 0
+                if in_tok or out_tok:
+                    self.session_db.update_token_counts(
+                        self.session_id, input_tokens=in_tok, output_tokens=out_tok
+                    )
 
             assistant_msg: dict[str, Any] = {"role": "assistant"}
             if resp.content:
@@ -275,13 +313,17 @@ class HermesAgent:
         if stopped_reason == "max_iterations":
             logger.warning("Agent loop stopped at max_iterations=%d without a final response.", self.max_iterations)
 
-        return {
+        result: dict[str, Any] = {
             "final_response": final_response,
             "messages": messages,
             "iterations": iterations,
             "session_id": self.session_id,
             "stopped_reason": stopped_reason,
         }
+        if error_info is not None:
+            result["error"] = error_info
+
+        return result
 
 
 # 원본 인터페이스 호환을 위한 클래스 별칭

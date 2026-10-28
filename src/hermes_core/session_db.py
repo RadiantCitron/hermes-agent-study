@@ -22,7 +22,7 @@ from typing import Any, Optional, Union
 
 from hermes_core.constants import get_hermes_home
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     tool_call_count INTEGER DEFAULT 0,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
+    mode TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -60,10 +61,26 @@ CREATE TABLE IF NOT EXISTS messages (
     finish_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    created_at REAL NOT NULL,
+    model TEXT,
+    request_json TEXT,
+    response_json TEXT,
+    status_code INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    latency_ms INTEGER,
+    error_kind TEXT,
+    error_message TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls(session_id);
 """
 
 FTS_SQL = """
@@ -121,7 +138,7 @@ class SessionDB:
         cursor = self._conn.cursor()
         cursor.executescript(SCHEMA_SQL)
 
-        # 스키마 버전 초기화
+        # 스키마 버전 초기화 및 마이그레이션
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
@@ -133,7 +150,12 @@ class SessionDB:
                     cursor.execute("ALTER TABLE messages ADD COLUMN finish_reason TEXT")
                 except sqlite3.OperationalError:
                     pass
-                cursor.execute("UPDATE schema_version SET version = 2")
+            if current_version < 3:
+                try:
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN mode TEXT")
+                except sqlite3.OperationalError:
+                    pass
+                cursor.execute("UPDATE schema_version SET version = 3")
 
         # FTS5 가상 테이블 초기화
         try:
@@ -149,6 +171,15 @@ class SessionDB:
             self._conn.close()
             self._conn = None
 
+    @property
+    def schema_version(self) -> int:
+        """현재 데이터베이스의 스키마 버전 반환."""
+        cursor = self._conn.execute("SELECT version FROM schema_version LIMIT 1")
+        row = cursor.fetchone()
+        if row is None:
+            return 0
+        return row["version"] if isinstance(row, sqlite3.Row) else row[0]
+
     # =========================================================================
     # 세션 수명주기 메서드
     # =========================================================================
@@ -162,12 +193,13 @@ class SessionDB:
         system_prompt: Optional[str] = None,
         user_id: Optional[str] = None,
         parent_session_id: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> str:
         """새 세션 레코드 생성 및 session_id 반환."""
         self._conn.execute(
             """INSERT INTO sessions (id, source, user_id, model, model_config,
-               system_prompt, parent_session_id, started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               system_prompt, parent_session_id, started_at, mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 source,
@@ -177,6 +209,7 @@ class SessionDB:
                 system_prompt,
                 parent_session_id,
                 time.time(),
+                mode,
             ),
         )
         self._conn.commit()
@@ -368,3 +401,63 @@ class SessionDB:
     def search_sessions(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         """간편 세션 검색 인터페이스."""
         return self.search_messages(query=query, limit=limit)
+
+    # =========================================================================
+    # LLM 호출 원장(llm_calls) 기록 및 조회 메서드
+    # =========================================================================
+
+    def record_llm_call(
+        self,
+        session_id: str,
+        model: Optional[str] = None,
+        request: Optional[Union[dict[str, Any], str]] = None,
+        response: Optional[Union[dict[str, Any], str]] = None,
+        status_code: Optional[int] = None,
+        input_tokens: Optional[int] = None,
+        output_tokens: Optional[int] = None,
+        latency_ms: Optional[int] = None,
+        error_kind: Optional[str] = None,
+        error_message: Optional[str] = None,
+        **kwargs: Any,
+    ) -> int:
+        """단일 LLM 호출 기록을 llm_calls 원장에 저장하고 생성된 ID를 반환한다."""
+        req_json = (
+            json.dumps(request, ensure_ascii=False)
+            if isinstance(request, dict)
+            else request
+        )
+        resp_json = (
+            json.dumps(response, ensure_ascii=False)
+            if isinstance(response, dict)
+            else response
+        )
+        cursor = self._conn.execute(
+            """INSERT INTO llm_calls (
+                session_id, created_at, model, request_json, response_json,
+                status_code, input_tokens, output_tokens, latency_ms,
+                error_kind, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                time.time(),
+                model,
+                req_json,
+                resp_json,
+                status_code,
+                input_tokens,
+                output_tokens,
+                latency_ms,
+                error_kind,
+                error_message,
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def get_llm_calls(self, session_id: str) -> list[dict[str, Any]]:
+        """특정 세션의 LLM 호출 기록 목록을 id 오름차순으로 반환한다."""
+        cursor = self._conn.execute(
+            "SELECT * FROM llm_calls WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]

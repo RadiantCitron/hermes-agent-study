@@ -102,3 +102,97 @@ def test_fts5_full_text_search(tmp_path):
     assert len(db.search_messages("Kubernetes")) == 0
 
     db.close()
+
+
+# =============================================================================
+# 로드맵 04: 구현지시서 030 인수 테스트 시나리오 (시나리오 13, 14)
+# =============================================================================
+
+
+def test_030_scenario_13_schema_v2_to_v3_migration(tmp_path):
+    """시나리오 13: 스키마 v2 DB를 SessionDB(path)로 열면 schema_version == 3, llm_calls 생성, 기존 데이터 보존."""
+    import sqlite3
+
+    db_path = tmp_path / "v2_legacy.db"
+    conn = sqlite3.connect(str(db_path))
+
+    # v2 형태 스키마 구성 (mode 없음, llm_calls 없음)
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (2);
+
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT
+        );
+
+        INSERT INTO sessions (id, source, started_at) VALUES ('s1', 'cli', 1000.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'hello', 1001.0);
+        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'assistant', 'world', 1002.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # SessionDB로 열어 마이그레이션 검증
+    db = SessionDB(db_path)
+    assert db.schema_version == 3
+
+    # 기존 데이터 보존 확인
+    s = db.get_session("s1")
+    assert s is not None
+    assert s["id"] == "s1"
+    assert "mode" in s  # mode 컬럼 추가됨
+
+    msgs = db.get_messages_as_conversation("s1")
+    assert len(msgs) == 2
+    assert msgs[0]["content"] == "hello"
+    assert msgs[1]["content"] == "world"
+
+    # llm_calls 테이블 생성 확인
+    calls = db.get_llm_calls("s1")
+    assert calls == []
+
+    db.close()
+
+
+def test_030_scenario_14_new_database_schema_v3():
+    """시나리오 14: 새 DB 생성 시 schema_version == 3, sessions.mode와 llm_calls 존재."""
+    db = SessionDB(":memory:")
+    assert db.schema_version == 3
+
+    sid = "s_new"
+    db.create_session(sid, source="cli", mode="real")
+    s = db.get_session(sid)
+    assert s is not None
+    assert s["mode"] == "real"
+
+    # llm_calls 존재 확인
+    assert db.get_llm_calls(sid) == []
+    db.close()
