@@ -160,3 +160,100 @@ def test_agent_e2e_blocked_invalid_unreadable_and_valid_calls_in_one_conversatio
     assert [m["tool_call_id"] for m in tool_msgs] == requested_ids
 
     session_db.close()
+
+
+def test_agent_e2e_file_tools_full_cycle(tmp_path, monkeypatch):
+    """로드맵 03 / 060: 파일 생성·읽기·수정, 금지 경로 거부, 덮어쓰기 거부, 폴더 밖 거부, 읽을 수 없는 인자가 한 대화에 섞여도 정상 종료한다."""
+    w = tmp_path / "workspace"
+    w.mkdir()
+    monkeypatch.chdir(w)
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE-SECRET", encoding="utf-8")
+
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    def call(call_id, name, arguments):
+        return [{"id": call_id, "function": {"name": name, "arguments": arguments}}]
+
+    mock_client = MockLLMClient()
+    # 턴 1: write_file {"path": "notes.txt", "content": "hello\n"}
+    mock_client.queue_response(tool_calls=call("c1", "write_file", '{"path": "notes.txt", "content": "hello\\n"}'))
+    # 턴 2: read_file {"path": "notes.txt"}
+    mock_client.queue_response(tool_calls=call("c2", "read_file", '{"path": "notes.txt"}'))
+    # 턴 3: patch {"path": "notes.txt", "old_string": "hello", "new_string": "world"}
+    mock_client.queue_response(tool_calls=call("c3", "patch", '{"path": "notes.txt", "old_string": "hello", "new_string": "world"}'))
+    # 턴 4: write_file {"path": "AGENTS.md", "content": "x"}
+    mock_client.queue_response(tool_calls=call("c4", "write_file", '{"path": "AGENTS.md", "content": "x"}'))
+    # 턴 5: write_file {"path": "notes.txt", "content": "again"}
+    mock_client.queue_response(tool_calls=call("c5", "write_file", '{"path": "notes.txt", "content": "again"}'))
+    # 턴 6: read_file {"path": "../outside.txt"}
+    mock_client.queue_response(tool_calls=call("c6", "read_file", '{"path": "../outside.txt"}'))
+    # 턴 7: patch "{bad"
+    mock_client.queue_response(tool_calls=call("c7", "patch", '{bad'))
+    # 턴 8: read_file {"path": "notes.txt"}
+    mock_client.queue_response(tool_calls=call("c8", "read_file", '{"path": "notes.txt"}'))
+    # 턴 9: 텍스트 "done"
+    mock_client.queue_response(content="done")
+
+    session_db = SessionDB(":memory:")
+    memory_store = MemoryStore(memory_dir=hermes_home / "memories")
+    agent = HermesAgent(
+        session_db=session_db,
+        memory_store=memory_store,
+        llm_client=mock_client,
+        quiet_mode=True,
+    )
+
+    result = agent.run_conversation("파일 도구를 섞어서 시험해줘.")
+
+    # 1. final_response == "done", stopped_reason == "completed", iterations == 9
+    assert result["final_response"] == "done"
+    assert result["stopped_reason"] == "completed"
+    assert result["iterations"] == 9
+
+    # 2. 파일 W/notes.txt의 내용이 world\n
+    assert (w / "notes.txt").read_text(encoding="utf-8") == "world\n"
+
+    # 3. W/AGENTS.md가 존재하지 않음, outside.txt 내용이 OUTSIDE-SECRET 그대로
+    assert not (w / "AGENTS.md").exists()
+    assert outside.read_text(encoding="utf-8") == "OUTSIDE-SECRET"
+
+    # 4. 도구 메시지 8개가 순서대로
+    tool_msgs = [m for m in result["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 8
+    # 0: 생성 성공(notes.txt)
+    assert "notes.txt" in tool_msgs[0]["content"] and '"success": true' in tool_msgs[0]["content"].lower()
+    # 1: 읽기 성공(1|hello 포함)
+    assert "1|hello" in tool_msgs[1]["content"]
+    # 2: 수정 성공(replacements 포함)
+    assert "replacements" in tool_msgs[2]["content"] and '"success": true' in tool_msgs[2]["content"].lower()
+    # 3: 지시문 파일 거부(instruction 포함)
+    assert "instruction" in tool_msgs[3]["content"] and '"success": false' in tool_msgs[3]["content"].lower()
+    # 4: 덮어쓰기 거부(already exists 포함)
+    assert "already exists" in tool_msgs[4]["content"] and '"success": false' in tool_msgs[4]["content"].lower()
+    # 5: 폴더 밖 거부(outside 포함)
+    assert "outside" in tool_msgs[5]["content"] and '"success": false' in tool_msgs[5]["content"].lower()
+    # 6: 인자 읽기 실패(JSON 포함)
+    assert "JSON" in tool_msgs[6]["content"] and '"success": false' in tool_msgs[6]["content"].lower()
+    # 7: 읽기 성공(1|world 포함)
+    assert "1|world" in tool_msgs[7]["content"]
+
+    # 5. 세션 원장의 메시지 수 = 사용자 1 + 모델 9 + 도구 8 = 18
+    db_messages = session_db.get_messages(agent.session_id)
+    assert len(db_messages) == 18
+
+    # 6. 모델 요청마다 대응하는 도구 메시지가 있음 (tool_call_id 일치)
+    requested_ids = [
+        tc["id"] for m in result["messages"] if m["role"] == "assistant" for tc in m.get("tool_calls", [])
+    ]
+    assert requested_ids == ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]
+    assert [m["tool_call_id"] for m in tool_msgs] == requested_ids
+
+    # 7. 어떤 도구 메시지에도 OUTSIDE-SECRET이 없음
+    for m in tool_msgs:
+        assert "OUTSIDE-SECRET" not in m["content"]
+
+    session_db.close()
