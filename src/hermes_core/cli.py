@@ -20,6 +20,7 @@ from hermes_core.constants import (
     get_hermes_home,
 )
 from hermes_core.llm_client import OpenRouterClient
+from hermes_core.tools.delegate_tool import register_delegate_tool
 
 
 def main() -> None:
@@ -37,7 +38,19 @@ def main() -> None:
         default=CONTEXT_WINDOW_TOKENS,
         help=f"Context window token limit (default: {CONTEXT_WINDOW_TOKENS})",
     )
+    parser.add_argument(
+        "--delegate",
+        action="store_true",
+        help="Enable subagent delegation (delegate_task) in real model mode",
+    )
     args = parser.parse_args()
+
+    if args.delegate and args.mock:
+        print(
+            "Error: --delegate cannot be used with --mock (delegation needs a real model).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.context_window < 1:
         print(
@@ -96,6 +109,14 @@ def main() -> None:
         context_window_tokens=args.context_window,
     )
 
+    if not args.mock and args.delegate:
+        register_delegate_tool(
+            agent.dispatcher,
+            session_db=agent.session_db,
+            parent_session_id=agent.session_id,
+            llm_client_factory=lambda: OpenRouterClient(api_key=api_key, model=model),
+        )
+
     print("=" * 60)
     print(f"🤖 Hermes Core CLI Started (Session: {agent.session_id[:8]}...)")
     if args.mock:
@@ -103,6 +124,8 @@ def main() -> None:
     else:
         print(f"🚀 Running in REAL mode (Model: {agent.model}).")
         print(f"📁 Working directory: {os.getcwd()}")
+    if not args.mock and args.delegate:
+        print("Delegation enabled (delegate_task).")
     print("Type 'exit' or 'quit' to terminate.")
     print("=" * 60)
 
