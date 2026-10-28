@@ -255,3 +255,254 @@ def test_040_scenario_10_relative_hermes_home_stays_consistent(tmp_path, monkeyp
     # 실행 후에도 get_hermes_home()이 처음에 resolve된 절대경로와 일치
     assert get_hermes_home() == expected_abs_home
     assert (expected_abs_home / "state.db").exists()
+
+
+# =============================================================================
+# 로드맵 05: 구현지시서 010 인수 테스트 시나리오 (시나리오 1 ~ 7)
+# =============================================================================
+
+
+class QueueingMockClient:
+    """호출별 messages를 복사하여 기록하고 큐잉된 응답을 순서대로 돌려주는 가짜 클라이언트."""
+
+    def __init__(self, api_key: str = "mock-key", model: str = DEFAULT_REAL_MODEL):
+        self.api_key = api_key
+        self.model = model
+        self.responses: list[Any] = []
+        self.call_history: list[list[dict[str, Any]]] = []
+
+    def queue_response(
+        self,
+        content: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.responses.append(LLMResponse(content=content, tool_calls=tool_calls, finish_reason="stop"))
+
+    def queue_error(self, kind: str, message: str) -> None:
+        self.responses.append(LLMError(kind=kind, message=message))
+
+    def chat_completion(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        self.call_history.append([dict(m) for m in messages])
+        if not self.responses:
+            return LLMResponse(content="[Mock] default response", finish_reason="stop")
+        resp = self.responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+
+
+def test_010_scenario_01_02_repl_multi_turn_history_and_single_system(hermes_home, monkeypatch):
+    """시나리오 1 & 2: 2턴 입력 후 두 번째 모델 호출 messages에 1턴 user/assistant 포함 및 system 정확히 1개."""
+    fake_key = "test-key-010-sc12"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    mock_client = QueueingMockClient()
+    mock_client.queue_response(content="안녕 철수야")
+    mock_client.queue_response(content="철수야")
+
+    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("내 이름은 철수야\n내 이름이 뭐지?\nexit\n"))
+    monkeypatch.setattr(sys, "argv", ["hermes-core"])
+
+    orig_cwd = Path.cwd()
+    try:
+        cli.main()
+    finally:
+        monkeypatch.chdir(orig_cwd)
+
+    assert len(mock_client.call_history) == 2
+
+    # 시나리오 1: 두 번째 모델 호출 messages 검증
+    second_call_messages = mock_client.call_history[1]
+
+    # 첫 턴의 user 메시지 포함
+    assert any(m.get("role") == "user" and m.get("content") == "내 이름은 철수야" for m in second_call_messages)
+    # 첫 턴의 assistant 응답 포함
+    assert any(m.get("role") == "assistant" and m.get("content") == "안녕 철수야" for m in second_call_messages)
+    # 두 번째 턴의 user 메시지 포함
+    assert any(m.get("role") == "user" and m.get("content") == "내 이름이 뭐지?" for m in second_call_messages)
+
+    # 시나리오 2: system 메시지는 정확히 1개이고 첫 번째 요소여야 함
+    system_messages = [m for m in second_call_messages if m.get("role") == "system"]
+    assert len(system_messages) == 1
+    assert second_call_messages[0]["role"] == "system"
+
+
+def test_010_scenario_03_three_turns_order_preserved(hermes_home, monkeypatch):
+    """시나리오 3: 세 턴 입력 시 세 번째 호출 messages에 앞선 두 턴이 순서대로 있고 system은 정확히 1개."""
+    fake_key = "test-key-010-sc3"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    mock_client = QueueingMockClient()
+    mock_client.queue_response(content="응답1")
+    mock_client.queue_response(content="응답2")
+    mock_client.queue_response(content="응답3")
+
+    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("하나\n둘\n셋\nexit\n"))
+    monkeypatch.setattr(sys, "argv", ["hermes-core"])
+
+    orig_cwd = Path.cwd()
+    try:
+        cli.main()
+    finally:
+        monkeypatch.chdir(orig_cwd)
+
+    assert len(mock_client.call_history) == 3
+
+    third_call_messages = mock_client.call_history[2]
+
+    # system 메시지 1개
+    system_messages = [m for m in third_call_messages if m.get("role") == "system"]
+    assert len(system_messages) == 1
+    assert third_call_messages[0]["role"] == "system"
+
+    # 순서 검증 (user '하나' -> assistant '응답1' -> user '둘' -> assistant '응답2' -> user '셋')
+    contents = [
+        (m.get("role"), m.get("content"))
+        for m in third_call_messages
+        if m.get("role") in ("user", "assistant")
+    ]
+    expected_order = [
+        ("user", "하나"),
+        ("assistant", "응답1"),
+        ("user", "둘"),
+        ("assistant", "응답2"),
+        ("user", "셋"),
+    ]
+    assert contents == expected_order
+
+
+def test_010_scenario_04_tool_call_pairs_preserved_across_turns(hermes_home, monkeypatch):
+    """시나리오 4: 첫 턴의 도구 호출(assistant tool_calls -> tool)이 두 번째 턴의 messages에 온전히 짝지어 보존됨."""
+    fake_key = "test-key-010-sc4"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    mock_client = QueueingMockClient()
+    # 1턴: 도구 호출 -> 최종 응답
+    mock_client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_mem_1",
+            "function": {
+                "name": "memory",
+                "arguments": '{"action": "add", "target": "user", "content": "key fact"}',
+            },
+        }],
+    )
+    mock_client.queue_response(content="메모리에 저장 완료했습니다.")
+    # 2턴: 일반 응답
+    mock_client.queue_response(content="다음 질문에 대한 답입니다.")
+
+    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("기억해줘\n확인해줘\nexit\n"))
+    monkeypatch.setattr(sys, "argv", ["hermes-core"])
+
+    orig_cwd = Path.cwd()
+    try:
+        cli.main()
+    finally:
+        monkeypatch.chdir(orig_cwd)
+
+    # 1턴에서 2번 호출 + 2턴에서 1번 호출 = 총 3번 LLM 호출
+    assert len(mock_client.call_history) == 3
+
+    second_turn_first_call = mock_client.call_history[2]
+
+    # 도구 호출 assistant 메시지 확인
+    tc_msgs = [m for m in second_turn_first_call if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert len(tc_msgs) == 1
+    assert tc_msgs[0]["tool_calls"][0]["id"] == "call_mem_1"
+
+    # 도구 실행 결과 tool 메시지 확인
+    tool_msgs = [m for m in second_turn_first_call if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "call_mem_1"
+    assert "key fact" in tool_msgs[0]["content"]
+
+
+def test_010_scenario_05_llm_error_in_first_turn_preserves_user_in_history_and_db(hermes_home, monkeypatch, capsys):
+    """시나리오 5: 첫 턴 LLMError 종료 후 프로세스 지속, 두 번째 턴 messages에 첫 user 포함 및 세션 DB 행 수 일치."""
+    fake_key = "test-key-010-sc5"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    mock_client = QueueingMockClient()
+    mock_client.queue_error("timeout", "Request timed out")
+    mock_client.queue_response(content="성공적으로 처리되었습니다.")
+
+    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("첫번째시도\n두번째시도\nexit\n"))
+    monkeypatch.setattr(sys, "argv", ["hermes-core"])
+
+    orig_cwd = Path.cwd()
+    try:
+        cli.main()
+    finally:
+        monkeypatch.chdir(orig_cwd)
+
+    # 에러 출력 및 정상 종료 메시지 확인
+    captured = capsys.readouterr()
+    assert "Model call failed (timeout): Request timed out" in captured.out
+    assert "Session saved and closed. Goodbye!" in captured.out
+
+    # 2번의 모델 호출 (1턴 실패 시 1회, 2턴 1회)
+    assert len(mock_client.call_history) == 2
+    second_call_messages = mock_client.call_history[1]
+
+    # 두 번째 호출 messages에 첫 턴의 user 메시지 '첫번째시도' 포함
+    user_msgs_in_call = [m for m in second_call_messages if m.get("role") == "user"]
+    assert len(user_msgs_in_call) == 2
+    assert user_msgs_in_call[0]["content"] == "첫번째시도"
+    assert user_msgs_in_call[1]["content"] == "두번째시도"
+
+    # 세션 DB의 messages 테이블에서 role == 'user'인 행 수 검증
+    db = SessionDB(hermes_home / "state.db")
+    cursor = db._conn.execute("SELECT COUNT(*) as cnt FROM messages WHERE role = 'user'")
+    db_user_count = cursor.fetchone()["cnt"]
+    db.close()
+
+    assert db_user_count == 2
+    assert db_user_count == len(user_msgs_in_call)
+
+
+def test_010_scenario_06_blank_input_no_effect_on_history(hermes_home, monkeypatch):
+    """시나리오 6: 공백 입력(엔터 등)은 이력에 영향 없고 모델 호출 횟수도 변하지 않음."""
+    fake_key = "test-key-010-sc6"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    mock_client = QueueingMockClient()
+    mock_client.queue_response(content="정상 응답")
+
+    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
+
+    # 공백 입력들 사이에 정상 입력 1회
+    monkeypatch.setattr(sys, "stdin", io.StringIO("   \n\n\t\n정상입력\n   \nexit\n"))
+    monkeypatch.setattr(sys, "argv", ["hermes-core"])
+
+    orig_cwd = Path.cwd()
+    try:
+        cli.main()
+    finally:
+        monkeypatch.chdir(orig_cwd)
+
+    assert len(mock_client.call_history) == 1
+    call_messages = mock_client.call_history[0]
+    user_msgs = [m for m in call_messages if m.get("role") == "user"]
+    assert len(user_msgs) == 1
+    assert user_msgs[0]["content"] == "정상입력"
+
+
+def test_010_scenario_07_mock_non_interactive_clean_exit(hermes_home, monkeypatch, capsys):
+    """시나리오 7: Mock 비대화형 단발 실행(기존 경로)이 1턴 실행 후 정상 종료되고 출력 문구 불변."""
+    _run(monkeypatch, "--mock")
+    captured = capsys.readouterr()
+    assert "Mock session finished cleanly." in captured.out
+    assert "MOCK mode" in captured.out

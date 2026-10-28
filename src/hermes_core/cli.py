@@ -100,6 +100,7 @@ def main() -> None:
         return
 
     try:
+        history = None
         while True:
             try:
                 user_input = input("\nUser > ").strip()
@@ -115,7 +116,8 @@ def main() -> None:
                 print("Session saved and closed. Goodbye!")
                 break
 
-            result = agent.run_conversation(user_input)
+            result = agent.run_conversation(user_input, conversation_history=history)
+            history = result["messages"]
             if result.get("stopped_reason") == "llm_error":
                 err = result.get("error", {})
                 kind = err.get("kind", "unknown")
