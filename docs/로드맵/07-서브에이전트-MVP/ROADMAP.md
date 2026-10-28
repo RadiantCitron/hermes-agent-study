@@ -21,12 +21,12 @@
 
 ```text
 src/hermes_core/
-  constants.py                      [변경] DELEGATE_* 상수, SUBAGENT_SOURCE            (010)
+  constants.py                      [변경] CHILD_TOOL_NAMES(010), DELEGATE_* 상수·SUBAGENT_SOURCE(이후)
   agent/
     agent.py                        [변경] 자식용 인자, 위임 도구 등록, 안내문 연동    (020, 030, 040)
     prompt_builder.py               [변경] SUBAGENT_GUIDANCE, 자식 포커스 프롬프트     (040)
   tools/
-    dispatcher.py                   [변경] create_child_dispatcher                    (010)
+    dispatcher.py                   [변경] create_default_dispatcher(include), create_child_dispatcher (010)
     delegate_tool.py                [신규] delegate_task 도구, 스키마, 결과 직렬화     (030)
 tests/test_hermes_core/
   test_child_dispatcher.py          [신규]                                           (010)
@@ -85,7 +85,8 @@ classDiagram
   }
   class ChildDispatcherFactory {
     <<dispatcher.py>>
-    +create_child_dispatcher(session_db) ToolDispatcher
+    +create_default_dispatcher(memory_store, session_db, include) ToolDispatcher
+    +create_child_dispatcher() ToolDispatcher
   }
   class SessionDB {
     +create_session(..., parent_session_id)
@@ -151,7 +152,8 @@ flowchart TD
 |---|---|---|
 | `HermesAgent` 생성자 | 인자 4개 추가(모두 기본값) | 기존 호출부는 바뀌지 않는다. 가정 C를 020 시험으로 확인한다. |
 | `ToolDispatcher` 클래스 | 무변경 | 자식 통로는 조립 함수가 새 인스턴스를 만들 뿐이다. |
-| `create_default_dispatcher` | 무변경 목표 | 부모의 위임 도구는 에이전트 생성 시 `register_tool`로 추가한다(030에서 확정). 기존 도구 목록 시험은 06에서 8종을 단언한다 → 9종 변경이 불가피하면 030에서 해당 시험의 의도를 확인하고 사용자에게 보고한다. |
+| `create_default_dispatcher` | `include` 인자 추가(010). 기본값(`None`)은 현재와 동일 | 도구 정의를 한 곳에서만 관리하면서 자식용 부분집합을 만들기 위함. 호출부는 이름 인자라 영향 없음. |
+| 부모의 위임 도구 등록 | 기본 생성자가 **자동 등록하지 않는다** | 기존 시험이 기본 에이전트의 도구를 8종으로 단언한다(`test_skills_guidance.py`의 `len(names) == 8`). 시험을 고치지 않으려면 위임 도구는 명시적으로 켜는 방식이어야 한다. 켜는 방식(생성 인자 vs 별도 함수)은 030에서 확정한다. |
 | `SessionDB` 스키마 | 무변경 | `parent_session_id`와 `source`는 기존 컬럼이다. |
 | 압축 | 무영향 | 위임 결과는 일반 tool 메시지다. 05의 가지치기 대상이 된다(050에서 확인). |
 | 시스템 프롬프트 | 안내문 한 덩어리 추가(040) | 06의 `SKILLS_GUIDANCE`와 같은 방식. 세션 중 불변. |
@@ -195,7 +197,7 @@ flowchart TD
 ## 6. 설계 결정 상세
 
 ### 6-1. 자식 도구 통로 (010)
-`create_child_dispatcher`가 새 `ToolDispatcher`를 만들어 6종을 등록한다. 제외 목록은 상수 `DELEGATE_BLOCKED_TOOLS = {"delegate_task", "memory", "session_search"}`로 두어 시험이 이 상수와 실제 등록 결과를 대조하게 한다. 자식의 `skills_*`는 읽기 전용이라 허용한다.
+`create_child_dispatcher()`는 `create_default_dispatcher(include=CHILD_TOOL_NAMES)`를 돌려준다. **허용 목록** 방식이라 이후 기본 도구가 늘어도 자식에게 자동으로 열리지 않는다(안전한 쪽이 기본). 제외되는 `delegate_task`·`memory`·`session_search`는 코드 상수로 두지 않고, 시험이 기대 집합을 문자열로 직접 적어 대조한다(구현을 기대값으로 삼는 동어반복 방지). 자식의 `skills_*`는 읽기 전용이라 허용한다. 알 수 없는 이름이 `include`에 들어오면 `ValueError`로 오타가 조용히 통과하지 않게 한다.
 
 ### 6-2. 에이전트 자식용 인자 (020)
 `parent_session_id`와 `source`는 `create_session`에 전달한다. `skip_memory`가 참이면 메모리 블록을 시스템 프롬프트에 넣지 않고 `memory_store`를 읽지 않는다. `skip_context_files`가 참이면 지시문 파일 블록을 넣지 않는다. 기본값은 모두 현재 동작과 같다.
