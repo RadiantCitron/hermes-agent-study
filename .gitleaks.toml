@@ -1,0 +1,14 @@
+# gitleaks 설정: 푸시 전 훅(scripts/githooks/pre-push)과 대화록 검사(scripts/archive_conversation.py)가
+# 레포 루트의 이 파일을 쓴다. 기본 규칙에 더해 아래 규칙을 추가한다.
+# 근거: 기본 규칙은 `OPENROUTER_API_KEY=...` 대입 형태만 잡고 문장 속의 키 문자열은 잡지 못했다
+# (2026-10-28 가짜 값으로 확인). 다른 제공자의 키를 쓰게 되면 같은 방식으로 규칙을 한 개 추가한다.
+title = "hermes-agent-study gitleaks"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key (sk-or-v1-...)"
+regex = '''sk-or-v1-[A-Za-z0-9]{32,}'''
+keywords = ["sk-or-v1-"]
