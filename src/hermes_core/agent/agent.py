@@ -128,6 +128,10 @@ class HermesAgent:
         context_window_tokens: int = CONTEXT_WINDOW_TOKENS,
         compression_threshold_ratio: float = COMPRESSION_THRESHOLD_RATIO,
         compression_enabled: bool = True,
+        parent_session_id: Optional[str] = None,
+        source: str = "cli",
+        skip_memory: bool = False,
+        skip_context_files: bool = False,
     ):
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
@@ -136,6 +140,10 @@ class HermesAgent:
         self.context_window_tokens = context_window_tokens
         self.compression_threshold_ratio = compression_threshold_ratio
         self.compression_enabled = compression_enabled
+        self.parent_session_id = parent_session_id
+        self.source = source
+        self.skip_memory = skip_memory
+        self.skip_context_files = skip_context_files
 
         # 토큰 추정 및 압축 거부 추적 상태 (세션 간 미보존)
         self._last_input_tokens: Optional[int] = None
@@ -170,16 +178,18 @@ class HermesAgent:
                 lambda record: self.session_db.record_llm_call(session_id=self.session_id, **record)
             )
 
-        # 메모리 디스크 로드 및 동결 스냅샷 캡처
-        self.memory_store.load_from_disk()
+        # 메모리 디스크 로드 및 동결 스냅샷 캡처 (skip_memory=True면 생략)
+        if not self.skip_memory:
+            self.memory_store.load_from_disk()
 
         # 세션 DB 레코드 생성
         self.session_db.create_session(
             session_id=self.session_id,
-            source="cli",
+            source=self.source,
             model=self.model,
             mode=self.mode,
             system_prompt=None,
+            parent_session_id=self.parent_session_id,
         )
 
         # 시스템 프롬프트 캐시 변수 (Prompt Caching 보존)
@@ -190,18 +200,24 @@ class HermesAgent:
         if self._cached_system_prompt is not None and system_message is None:
             return self._cached_system_prompt
 
-        # 메모리 블록 렌더링
-        mem_parts = []
-        mem_block = self.memory_store.format_for_system_prompt("memory")
-        user_block = self.memory_store.format_for_system_prompt("user")
-        if mem_block:
-            mem_parts.append(mem_block)
-        if user_block:
-            mem_parts.append(user_block)
-        memory_full_block = "\n\n".join(mem_parts) if mem_parts else None
+        # 메모리 블록 렌더링 (skip_memory=True면 생략)
+        if self.skip_memory:
+            memory_full_block = None
+        else:
+            mem_parts = []
+            mem_block = self.memory_store.format_for_system_prompt("memory")
+            user_block = self.memory_store.format_for_system_prompt("user")
+            if mem_block:
+                mem_parts.append(mem_block)
+            if user_block:
+                mem_parts.append(user_block)
+            memory_full_block = "\n\n".join(mem_parts) if mem_parts else None
 
-        # 작업 디렉터리 컨텍스트 파일
-        context_block = build_context_files_prompt()
+        # 작업 디렉터리 컨텍스트 파일 (skip_context_files=True면 생략)
+        if self.skip_context_files:
+            context_block = None
+        else:
+            context_block = build_context_files_prompt()
 
         caller_prompt = system_message if system_message is not None else self.system_message
 
