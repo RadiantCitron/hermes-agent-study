@@ -295,3 +295,137 @@ def test_030_scenario_15_non_instruction_file_not_injected(tmp_path: Path):
 def test_030_scenario_16_instruction_file_names_tuple():
     """시나리오 16: INSTRUCTION_FILE_NAMES == ('AGENTS.md', 'agents.md', 'SOUL.md', '.cursorrules')"""
     assert INSTRUCTION_FILE_NAMES == ("AGENTS.md", "agents.md", "SOUL.md", ".cursorrules")
+
+
+# =============================================================================
+# 로드맵 04: 구현지시서 010 인수 테스트 시나리오 (시나리오 1 ~ 10)
+# =============================================================================
+
+
+@pytest.fixture
+def r04_guard_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """상태 폴더 H(tmp_path/'home'), 작업 폴더 W(H/'workspace')."""
+    home = (tmp_path / "home").resolve()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    workspace = (home / "workspace").resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # memories/MEMORY.md 및 state.db 파일 생성
+    mem_dir = home / "memories"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "MEMORY.md").write_text("memory content", encoding="utf-8")
+    (home / "state.db").write_text("sqlite db placeholder", encoding="utf-8")
+
+    return home, workspace
+
+
+def test_010_scenario_01_get_default_workspace(r04_guard_env):
+    """시나리오 1: get_default_workspace() -> H/'workspace'와 같고 폴더가 만들어져 있음"""
+    from hermes_core.constants import get_default_workspace
+
+    home, workspace = r04_guard_env
+    default_ws = get_default_workspace()
+    assert default_ws == workspace
+    assert default_ws.is_dir()
+
+
+def test_010_scenario_02_write_inside_nested_workspace_allowed(r04_guard_env):
+    """시나리오 2: check_write_path('notes.txt', W), check_write_path('sub/new.txt', W) -> error None, W 아래"""
+    _, w = r04_guard_env
+    t1, err1 = check_write_path("notes.txt", w)
+    assert err1 is None
+    assert t1 == (w / "notes.txt").resolve()
+
+    t2, err2 = check_write_path("sub/new.txt", w)
+    assert err2 is None
+    assert t2 == (w / "sub" / "new.txt").resolve()
+
+
+def test_010_scenario_03_memory_and_db_outside_workspace_rejected(r04_guard_env):
+    """시나리오 3: check_path('../memories/MEMORY.md', W), check_path('../state.db', W) -> error에 outside 포함"""
+    _, w = r04_guard_env
+    t1, err1 = check_path("../memories/MEMORY.md", w)
+    assert t1 is None
+    assert err1 is not None and "outside" in err1
+
+    t2, err2 = check_path("../state.db", w)
+    assert t2 is None
+    assert err2 is not None and "outside" in err2
+
+
+def test_010_scenario_04_write_state_db_outside_rejected(r04_guard_env):
+    """시나리오 4: check_write_path('../state.db', W) -> error에 outside 포함"""
+    _, w = r04_guard_env
+    t, err = check_write_path("../state.db", w)
+    assert t is None
+    assert err is not None and "outside" in err
+
+
+def test_010_scenario_05_workspace_equals_hermes_home_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """시나리오 5: HERMES_HOME을 W로 지정(작업 폴더 == 상태 폴더), check_write_path('MEMORY.md', W) -> error에 state folder 포함"""
+    w = (tmp_path / "same_home_ws").resolve()
+    w.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(w))
+
+    t, err = check_write_path("MEMORY.md", w)
+    assert t is None
+    assert err is not None and "state folder" in err
+
+
+def test_010_scenario_06_env_files_rejected(r04_guard_env):
+    """시나리오 6: check_path('.env', W), check_path('.env.local', W), check_path('sub/.env', W), check_path('.ENV', W) -> error에 protected 포함"""
+    _, w = r04_guard_env
+    for p in [".env", ".env.local", "sub/.env", ".ENV"]:
+        t, err = check_path(p, w)
+        assert t is None
+        assert err is not None and "protected" in err
+
+
+def test_010_scenario_07_git_files_rejected(r04_guard_env):
+    """시나리오 7: check_path('.git/hooks/pre-push', W), check_write_path('.git/hooks/pre-push', W), check_path('sub/.git/config', W) -> error에 protected 포함"""
+    _, w = r04_guard_env
+    t1, err1 = check_path(".git/hooks/pre-push", w)
+    assert t1 is None
+    assert err1 is not None and "protected" in err1
+
+    t2, err2 = check_write_path(".git/hooks/pre-push", w)
+    assert t2 is None
+    assert err2 is not None and "protected" in err2
+
+    t3, err3 = check_path("sub/.git/config", w)
+    assert t3 is None
+    assert err3 is not None and "protected" in err3
+
+
+def test_010_scenario_08_symlink_to_env_rejected(r04_guard_env):
+    """시나리오 8: W/link가 W/.env를 가리키는 링크일 때 check_path('link', W) -> error에 protected 포함 (풀린 경로 구성요소 검사)"""
+    _, w = r04_guard_env
+    env_target = w / ".env"
+    env_target.write_text("SECRET=1", encoding="utf-8")
+    link = w / "link"
+    link.symlink_to(env_target)
+
+    t, err = check_path("link", w)
+    assert t is None
+    assert err is not None and "protected" in err
+
+
+def test_010_scenario_09_non_protected_names_allowed(r04_guard_env):
+    """시나리오 9: check_path('environment.txt', W), check_path('docs/.gitignore', W), check_path('.github/x.yml', W), check_path('notes.txt', W) -> error None"""
+    _, w = r04_guard_env
+    (w / "docs").mkdir(parents=True, exist_ok=True)
+    (w / ".github").mkdir(parents=True, exist_ok=True)
+
+    for p in ["environment.txt", "docs/.gitignore", ".github/x.yml", "notes.txt"]:
+        t, err = check_path(p, w)
+        assert err is None
+        assert t == (w / p).resolve()
+
+
+def test_010_scenario_10_nonexistent_env_rejected(r04_guard_env):
+    """시나리오 10: check_path('.env', W)에서 파일이 실제로 없음 -> error에 protected 포함 (존재 여부 무관)"""
+    _, w = r04_guard_env
+    assert not (w / ".env").exists()
+    t, err = check_path(".env", w)
+    assert t is None
+    assert err is not None and "protected" in err

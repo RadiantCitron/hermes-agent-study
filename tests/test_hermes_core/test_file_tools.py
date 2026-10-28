@@ -891,3 +891,32 @@ def test_050_scenario_22_dispatcher_type_check_replace_all(patch_test_env, monke
     assert res["success"] is False
     assert "replace_all" in res["error"]
     assert (w / "q.txt").read_text(encoding="utf-8") == "one two three\n"
+
+
+# =============================================================================
+# 로드맵 04: 구현지시서 010 인수 테스트 시나리오 (시나리오 14)
+# =============================================================================
+
+
+def test_010_scenario_14_file_tools_block_protected_paths(tmp_path: Path):
+    """시나리오 14: read_file_tool('.env'), write_file_tool('.env', 'x'), patch_tool('.git/hooks/x', 'a', 'b')
+    -> 각각 success False, 오류에 protected 포함. W/.env 파일 미생성.
+    """
+    w = (tmp_path / "w_file_guard").resolve()
+    w.mkdir()
+
+    # read_file_tool
+    r_res = json.loads(read_file_tool(".env", workspace=w))
+    assert r_res["success"] is False
+    assert "protected" in r_res["error"]
+
+    # write_file_tool
+    w_res = json.loads(write_file_tool(".env", "SECRET=test", workspace=w))
+    assert w_res["success"] is False
+    assert "protected" in w_res["error"]
+    assert not (w / ".env").exists()
+
+    # patch_tool
+    p_res = json.loads(patch_tool(".git/hooks/x", "a", "b", workspace=w))
+    assert p_res["success"] is False
+    assert "protected" in p_res["error"]

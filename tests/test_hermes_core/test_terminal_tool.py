@@ -258,3 +258,33 @@ def test_workspace_argument_from_model_is_blocked_by_dispatcher(workspace, monke
     assert result["success"] is False
     assert "workspace" in result["error"]
     assert calls == []
+
+
+# =============================================================================
+# 로드맵 04: 구현지시서 010 인수 테스트 시나리오 (시나리오 12, 13)
+# =============================================================================
+
+
+def test_010_scenario_12_terminal_blocks_protected_without_executing(workspace, monkeypatch):
+    """시나리오 12: terminal_tool('cat .env'), ('ls .git'), ('grep x --file=.env a.txt')
+    -> 각각 success False, 오류에 protected 포함, subprocess.run 호출 0회.
+    """
+    calls = []
+    monkeypatch.setattr(terminal_module.subprocess, "run", lambda *a, **k: calls.append(1))
+
+    for cmd in ["cat .env", "ls .git", "grep x --file=.env a.txt"]:
+        res = json.loads(terminal_tool(cmd, workspace=workspace))
+        assert res["success"] is False
+        assert "protected" in res["error"]
+
+    assert calls == []
+
+
+def test_010_scenario_13_terminal_normal_file_allowed(workspace):
+    """시나리오 13: terminal_tool('cat notes.txt', workspace=W) (W/notes.txt 존재) -> success True"""
+    notes = workspace / "notes.txt"
+    notes.write_text("hello notes\n", encoding="utf-8")
+
+    res = json.loads(terminal_tool("cat notes.txt", workspace=workspace))
+    assert res["success"] is True
+    assert "hello notes" in res["stdout"]

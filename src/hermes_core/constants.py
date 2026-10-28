@@ -21,6 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 학습 샌드박스용 기본 로컬 격리 디렉터리 (.hermes/)
 DEFAULT_LOCAL_HERMES_HOME = PROJECT_ROOT / ".hermes"
 
+# 기본 작업 디렉터리 폴더명
+WORKSPACE_DIR_NAME = "workspace"
+
 
 def get_hermes_home() -> Path:
     """Hermes 상태 데이터(메모리, 세션 DB)가 저장되는 홈 디렉터리 반환.
@@ -36,6 +39,16 @@ def get_hermes_home() -> Path:
 
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_default_workspace() -> Path:
+    """Hermes 에이전트 기본 작업 폴더 경로 반환 (.hermes/workspace).
+
+    디렉터리를 생성(mkdir(parents=True, exist_ok=True))하고 resolve()하여 반환한다.
+    """
+    path = get_hermes_home() / WORKSPACE_DIR_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
 
 
 # =============================================================================
@@ -59,6 +72,10 @@ AGENTS_FILE_NAMES = ("AGENTS.md", "agents.md")
 SOUL_FILE_NAME = "SOUL.md"
 CURSORRULES_FILE_NAME = ".cursorrules"
 INSTRUCTION_FILE_NAMES = (*AGENTS_FILE_NAMES, SOUL_FILE_NAME, CURSORRULES_FILE_NAME)
+
+# 보호 파일 및 폴더 이름 상수 (.env* 비밀 파일 및 .git 저장소 메타데이터)
+PROTECTED_NAME_PREFIXES = (".env",)
+PROTECTED_NAME_EXACT = (".git",)
 
 
 # =============================================================================

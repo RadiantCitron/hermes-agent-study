@@ -16,7 +16,12 @@ from pathlib import Path
 import subprocess
 from typing import Any, Optional
 
-from hermes_core.tools.path_guard import is_inside, path_values, resolve_workspace
+from hermes_core.tools.path_guard import (
+    is_inside,
+    is_protected_path,
+    path_values,
+    resolve_workspace,
+)
 
 TERMINAL_MAX_OUTPUT_CHARS = 10_000
 TERMINAL_MAX_TIMEOUT = 30
@@ -80,8 +85,11 @@ def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT, workspace: 
 
     base = resolve_workspace(workspace)
     for arg in args[1:]:
-        if not all(is_inside(value, base) for value in path_values(arg)):
+        values = path_values(arg)
+        if not all(is_inside(value, base) for value in values):
             return _failure(f"Path '{arg}' is outside the workspace.")
+        if any(is_protected_path(value, base) for value in values):
+            return _failure(f"Path '{arg}' refers to a protected file or folder (.env*, .git).")
 
     try:
         proc = subprocess.run(
