@@ -11,7 +11,7 @@
 
 1. **상수** ([`constants.py`](../../../../src/hermes_core/constants.py)): 기존 `OPENROUTER_CHAT_URL`을 쓰고, 다음을 추가한다.
    - `DEFAULT_REAL_MODEL = "deepseek/deepseek-v4-flash-0731"`
-   - `OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"` (이름은 **미확인 가정**)
+   - `OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"` (이름은 사용자가 확인함, 2026-10-28)
    - `LLM_TIMEOUT_SECONDS = 60`, `LLM_MAX_OUTPUT_TOKENS = 4096`, `LLM_ERROR_BODY_MAX_CHARS = 500`
 2. **신규 모듈** `src/hermes_core/llm_client.py`:
    - `LLMError(Exception)`: 속성 `kind`(`rate_limited`, `timeout`, `network`, `http_error`, `bad_response`)와 `message`. 문자열 표현에 키가 들어가지 않는다.
