@@ -1150,4 +1150,447 @@ def test_060_scenario_11_migration_and_compression(tmp_path, monkeypatch):
     db.close()
 
 
+# =============================================================================
+# 로드맵 06: 구현지시서 050 통합 E2E 검증 시나리오 (시나리오 1 ~ 8)
+# =============================================================================
+
+import hashlib
+from pathlib import Path
+from hermes_core.agent.prompt_builder import SKILLS_GUIDANCE
+
+
+def _setup_r06_skills(home: Path) -> Path:
+    """로드맵 06 검증용 기본 스킬 디렉터리 및 release-checklist 스킬 배치."""
+    skills_dir = home / "skills"
+    skill_folder = skills_dir / "release-checklist"
+    skill_folder.mkdir(parents=True, exist_ok=True)
+    (skill_folder / "SKILL.md").write_text(
+        "---\nname: release-checklist\ndescription: Checklist for releases\n---\n## Steps\nSTEP-7: tag the build\n",
+        encoding="utf-8",
+    )
+    ref_folder = skill_folder / "references"
+    ref_folder.mkdir(parents=True, exist_ok=True)
+    (ref_folder / "notes.md").write_text("NOTE-ALPHA\n", encoding="utf-8")
+    return skills_dir
+
+
+def _snapshot_home_and_skills(hermes_home: Path) -> dict:
+    """스킬 디렉터리 내 파일 해시와 홈 직하위 항목 목록의 불변성 검증용 스냅샷."""
+    skills_dir = hermes_home / "skills"
+    skill_hashes = {}
+    if skills_dir.exists():
+        for p in sorted(skills_dir.rglob("*")):
+            if p.is_file():
+                rel = str(p.relative_to(skills_dir))
+                content = p.read_bytes()
+                skill_hashes[rel] = hashlib.sha256(content).hexdigest()
+    top_level_names = set(p.name for p in hermes_home.iterdir())
+    return {"top_level": top_level_names, "skill_hashes": skill_hashes}
+
+
+def _assert_no_key_in_db(db: SessionDB, fake_key: str):
+    """DB 전체(sessions, messages, llm_calls) 테이블에 가짜 키 문자열이 저장되지 않았음을 검증."""
+    cursor = db._conn.cursor()
+    all_rows_str = ""
+    for table in ["sessions", "messages", "llm_calls"]:
+        cursor.execute(f"SELECT * FROM {table}")
+        rows = cursor.fetchall()
+        for row in rows:
+            all_rows_str += str(dict(row)) + "\n"
+    assert fake_key not in all_rows_str
+
+
+def test_r06_050_scenario_01_and_06_skills_list_and_view_cycle(r05_e2e_env):
+    """시나리오 1 & 6: skills_list -> skill_view -> 응답 순서 검증 및 시스템 지시문 불변성(SKILLS_GUIDANCE 포함)."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    _setup_r06_skills(home)
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s01"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_list_1", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}}],
+        prompt_tokens=40,
+        completion_tokens=10,
+    )
+    p2 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "call_view_1",
+            "type": "function",
+            "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist"})},
+        }],
+        prompt_tokens=70,
+        completion_tokens=15,
+    )
+    p3 = _make_mock_provider_payload(
+        content="릴리즈 체크리스트 확인 완료: STEP-7 태그 생성",
+        prompt_tokens=120,
+        completion_tokens=10,
+    )
+
+    transport = SequentialMockTransport([p1, p2, p3])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("체크리스트 스킬을 찾아서 확인해줘")
+    assert res["stopped_reason"] == "completed"
+    assert res["iterations"] == 3
+    assert res["final_response"] == "릴리즈 체크리스트 확인 완료: STEP-7 태그 생성"
+
+    # 전송된 요청 본문에서 messages 검증
+    assert len(transport.captured_requests) == 3
+    req1 = json.loads(transport.captured_requests[0].content.decode("utf-8"))
+    req2 = json.loads(transport.captured_requests[1].content.decode("utf-8"))
+    req3 = json.loads(transport.captured_requests[2].content.decode("utf-8"))
+
+    # 2번째 요청: skills_list의 tool 메시지에 release-checklist가 있고 STEP-7은 없음
+    req2_msgs = req2["messages"]
+    tool_msg_1 = next(m for m in req2_msgs if m.get("role") == "tool" and m.get("tool_call_id") == "call_list_1")
+    assert "release-checklist" in tool_msg_1["content"]
+    assert "STEP-7" not in tool_msg_1["content"]
+
+    # 3번째 요청: skill_view의 tool 메시지에 STEP-7이 있음
+    req3_msgs = req3["messages"]
+    tool_msg_2 = next(m for m in req3_msgs if m.get("role") == "tool" and m.get("tool_call_id") == "call_view_1")
+    assert "STEP-7" in tool_msg_2["content"]
+
+    # 각 tool_call_id가 짝을 이룸
+    asst_1 = next(m for m in req2_msgs if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert asst_1["tool_calls"][0]["id"] == tool_msg_1["tool_call_id"] == "call_list_1"
+
+    asst_msgs_3 = [m for m in req3_msgs if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert asst_msgs_3[-1]["tool_calls"][0]["id"] == tool_msg_2["tool_call_id"] == "call_view_1"
+
+    # 시나리오 6: 각 요청의 첫 메시지가 role == 'system'이고 서로 바이트 동일, SKILLS_GUIDANCE 포함
+    sys_content_1 = req1["messages"][0]["content"]
+    for req in [req1, req2, req3]:
+        assert req["messages"][0]["role"] == "system"
+        assert req["messages"][0]["content"] == sys_content_1
+        assert SKILLS_GUIDANCE in sys_content_1
+
+    session_row = db.get_session(agent.session_id)
+    assert sys_content_1 == session_row["system_prompt"]
+
+    # 시나리오 8 검증
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_02_skill_view_linked_file(r05_e2e_env):
+    """시나리오 2: 1번 흐름에 skill_view(name='release-checklist', file_path='references/notes.md')를 더함."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    _setup_r06_skills(home)
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s02"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_list_1", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}}],
+    )
+    p2 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "call_view_1",
+            "type": "function",
+            "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist"})},
+        }],
+    )
+    p3 = _make_mock_provider_payload(
+        tool_calls=[{
+            "id": "call_ref_1",
+            "type": "function",
+            "function": {
+                "name": "skill_view",
+                "arguments": json.dumps({"name": "release-checklist", "file_path": "references/notes.md"}),
+            },
+        }],
+    )
+    p4 = _make_mock_provider_payload(content="노트 확인 완료: NOTE-ALPHA")
+
+    transport = SequentialMockTransport([p1, p2, p3, p4])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("체크리스트와 참조 노트 확인해줘")
+    assert res["stopped_reason"] == "completed"
+    assert res["iterations"] == 4
+
+    req4 = json.loads(transport.captured_requests[3].content.decode("utf-8"))
+    tool_ref = next(m for m in req4["messages"] if m.get("role") == "tool" and m.get("tool_call_id") == "call_ref_1")
+    assert "NOTE-ALPHA" in tool_ref["content"]
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_03_traversal_and_protection_rejected(r05_e2e_env):
+    """시나리오 3: skill_view 경로 이탈 및 보호 대상 접근 시도 3회 거부 후 루프 지속 및 정상 완료."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    _setup_r06_skills(home)
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s03"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_bad_1", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "../state.db"})}}],
+    )
+    p2 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_bad_2", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "../memories/MEMORY.md"})}}],
+    )
+    p3 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_bad_3", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist", "file_path": "../../../state.db"})}}],
+    )
+    p4 = _make_mock_provider_payload(content="비정상 접근 거부 확인")
+
+    transport = SequentialMockTransport([p1, p2, p3, p4])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("보호 파일 읽어봐")
+    assert res["stopped_reason"] == "completed"
+    assert res["iterations"] == 4
+
+    req4 = json.loads(transport.captured_requests[3].content.decode("utf-8"))
+    bad_tools = [m for m in req4["messages"] if m.get("role") == "tool"]
+    assert len(bad_tools) == 3
+
+    for t in bad_tools:
+        assert '"success": false' in t["content"].lower()
+        assert "SQLite format 3" not in t["content"]
+        assert "Known Fact: Initial Memory Item" not in t["content"]
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_04_no_skills_dir(r05_e2e_env):
+    """시나리오 4: 스킬 폴더 자체가 없는 상태에서 skills_list 호출 시 빈 목록 반환 및 디렉터리 미생성 검증."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    skills_dir = home / "skills"
+    assert not skills_dir.exists()
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s04"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_list_empty", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}}],
+    )
+    p2 = _make_mock_provider_payload(content="스킬 없음 확인 완료")
+
+    transport = SequentialMockTransport([p1, p2])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("스킬 목록 보여줘")
+    assert res["stopped_reason"] == "completed"
+    assert res["iterations"] == 2
+
+    req2 = json.loads(transport.captured_requests[1].content.decode("utf-8"))
+    tool_msg = next(m for m in req2["messages"] if m.get("role") == "tool" and m.get("tool_call_id") == "call_list_empty")
+    data = json.loads(tool_msg["content"])
+    assert data.get("skills") == []
+    assert data.get("count") == 0
+
+    # 대화 뒤에도 skills/ 폴더가 존재하지 않음 (폴더 미생성 원칙)
+    assert not skills_dir.exists()
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_05_skills_immutability(r05_e2e_env):
+    """시나리오 5: 시나리오 1~3 실행 전후 스킬 폴더(경로+내용 해시) 및 HERMES_HOME 직하위 항목 불변 검증."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    _setup_r06_skills(home)
+
+    snap_before = _snapshot_home_and_skills(home)
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s05"
+
+    # 시나리오 1~3 흐름을 순차적으로 한 번씩 실행
+    # 1. skills_list -> skill_view
+    t1 = SequentialMockTransport([
+        _make_mock_provider_payload(tool_calls=[{"id": "c1", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}}]),
+        _make_mock_provider_payload(tool_calls=[{"id": "c2", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist"})}}]),
+        _make_mock_provider_payload(content="flow 1 done"),
+    ])
+    a1 = HermesAgent(session_db=db, memory_store=r05_e2e_env["memory_store"], dispatcher=r05_e2e_env["dispatcher"], llm_client=OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=t1), quiet_mode=True)
+    a1.run_conversation("flow 1")
+
+    # 2. skill_view linked file
+    t2 = SequentialMockTransport([
+        _make_mock_provider_payload(tool_calls=[{"id": "c3", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist", "file_path": "references/notes.md"})}}]),
+        _make_mock_provider_payload(content="flow 2 done"),
+    ])
+    a2 = HermesAgent(session_db=db, memory_store=r05_e2e_env["memory_store"], dispatcher=r05_e2e_env["dispatcher"], llm_client=OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=t2), quiet_mode=True)
+    a2.run_conversation("flow 2")
+
+    # 3. bad skill_views
+    t3 = SequentialMockTransport([
+        _make_mock_provider_payload(tool_calls=[{"id": "c4", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "../state.db"})}}]),
+        _make_mock_provider_payload(tool_calls=[{"id": "c5", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "../memories/MEMORY.md"})}}]),
+        _make_mock_provider_payload(tool_calls=[{"id": "c6", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist", "file_path": "../../../state.db"})}}]),
+        _make_mock_provider_payload(content="flow 3 done"),
+    ])
+    a3 = HermesAgent(session_db=db, memory_store=r05_e2e_env["memory_store"], dispatcher=r05_e2e_env["dispatcher"], llm_client=OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=t3), quiet_mode=True)
+    a3.run_conversation("flow 3")
+
+    snap_after = _snapshot_home_and_skills(home)
+
+    assert snap_before["skill_hashes"] == snap_after["skill_hashes"]
+    assert snap_before["top_level"] == snap_after["top_level"]
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_07_compression_prunes_large_skill_content(r05_e2e_env):
+    """시나리오 7: 대용량(약 19,000자) 스킬 본문 조회 후 압축 발동 시 본문 가지치기/요약 치환 및 헤드 바이트 동일성 검증."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    skills_dir = home / "skills"
+    skill_folder = skills_dir / "heavy-skill"
+    skill_folder.mkdir(parents=True, exist_ok=True)
+
+    # 약 19,000자 본문 (ASCII)
+    heavy_body = "HEAVY-START\n" + ("A" * 18900) + "\nHEAVY-END\n"
+    assert 18900 < len(heavy_body) <= 19500
+    (skill_folder / "SKILL.md").write_text(
+        "---\nname: heavy-skill\ndescription: A very heavy skill for compression testing\n---\n" + heavy_body,
+        encoding="utf-8",
+    )
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s07"
+
+    # 헤드(처음 3개 메시지)와 꼬리(최근 6개 이상 메시지) 사이에 skill_view가 위치하도록 턴 구성:
+    # 턴 1, 2: 헤드 구간 채우기
+    p1_done = _make_mock_provider_payload(content="1턴 완료", prompt_tokens=40)
+    p2_done = _make_mock_provider_payload(content="2턴 완료", prompt_tokens=60)
+
+    # 턴 3: 중간(Middle) 구간에서 대용량 skill_view 도구 호출 -> 결과 수집
+    p3_tool = _make_mock_provider_payload(
+        tool_calls=[{"id": "call_h1", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "heavy-skill"})}}],
+        prompt_tokens=80,
+    )
+    p3_done = _make_mock_provider_payload(content="3턴 완료", prompt_tokens=4800)
+
+    # 턴 4, 5, 6: 꼬리(Tail) 구간 메시지 채우기 (6턴에서 prompt_tokens=350 보고하여 임계값 300 초과)
+    p4_done = _make_mock_provider_payload(content="4턴 완료", prompt_tokens=100)
+    p5_done = _make_mock_provider_payload(content="5턴 완료", prompt_tokens=120)
+    p6_done = _make_mock_provider_payload(content="6턴 완료", prompt_tokens=350)
+
+    # 턴 7: 토큰 수 임계값(600 * 0.5 = 300) 초과로 압축 파이프라인 트리거 -> 요약 모델 호출 -> 최종 응답
+    p7_sum = _make_mock_provider_payload(content="대용량 스킬 조회 및 과거 진행 내역 요약 완료", prompt_tokens=25, completion_tokens=15)
+    p7_done = _make_mock_provider_payload(content="7턴 완료", prompt_tokens=40, completion_tokens=10)
+
+    transport = SequentialMockTransport([
+        p1_done,
+        p2_done,
+        p3_tool, p3_done,
+        p4_done,
+        p5_done,
+        p6_done,
+        p7_sum, p7_done,
+    ])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        context_window_tokens=600,
+        quiet_mode=True,
+    )
+
+    history = None
+    for i in range(1, 7):
+        r = agent.run_conversation(f"{i}단계", conversation_history=history)
+        history = r["messages"]
+
+    r7 = agent.run_conversation("7단계", conversation_history=history)
+    assert "compression" in r7
+    assert r7["compression"]["count"] >= 1
+
+    # 압축 뒤 요청(p7_done 요청) 본문에서 어떤 tool 메시지도 19,000자 본문을 그대로 갖지 않음을 검증
+    # captured_requests 중 마지막 요청은 p7_done 요청
+    last_req = json.loads(transport.captured_requests[-1].content.decode("utf-8"))
+    for msg in last_req["messages"]:
+        if msg.get("role") == "tool":
+            assert heavy_body not in msg.get("content", "")
+            # 가지치기 표지가 있거나 요약으로 교체됨
+            assert "[Old tool output cleared: skill_view]" in msg.get("content", "") or len(msg.get("content", "")) < 1000
+
+    # 첫 시스템 메시지 바이트 동일성 검증
+    first_req = json.loads(transport.captured_requests[0].content.decode("utf-8"))
+    assert last_req["messages"][0]["role"] == "system"
+    assert last_req["messages"][0]["content"] == first_req["messages"][0]["content"]
+    assert SKILLS_GUIDANCE in last_req["messages"][0]["content"]
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+def test_r06_050_scenario_08_zero_leakage_in_db(r05_e2e_env):
+    """시나리오 8: 시나리오 1~7 형태의 대화 실행 후 DB 전체(messages, llm_calls, sessions)에 가짜 키가 없음을 검증."""
+    home = r05_e2e_env["home"]
+    db = r05_e2e_env["db"]
+    _setup_r06_skills(home)
+
+    fake_key = "sk-or-v1-" + "r06-e2e-fake-key-s08-strictly-zero-leak"
+
+    p1 = _make_mock_provider_payload(
+        tool_calls=[{"id": "c_list", "type": "function", "function": {"name": "skills_list", "arguments": "{}"}}],
+    )
+    p2 = _make_mock_provider_payload(
+        tool_calls=[{"id": "c_view", "type": "function", "function": {"name": "skill_view", "arguments": json.dumps({"name": "release-checklist"})}}],
+    )
+    p3 = _make_mock_provider_payload(content="모든 스킬 작업 완료")
+
+    transport = SequentialMockTransport([p1, p2, p3])
+    client = OpenRouterClient(api_key=fake_key, model=DEFAULT_REAL_MODEL, transport=transport)
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r05_e2e_env["memory_store"],
+        dispatcher=r05_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    _ = agent.run_conversation("스킬 전체 확인")
+
+    _assert_no_key_in_db(db, fake_key)
+    db.close()
+
+
+
 
