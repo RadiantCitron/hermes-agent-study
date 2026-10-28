@@ -117,6 +117,15 @@ COMPRESSION_TAIL_RATIO = 0.25
 # 압축 거부 후 재시도 필요 성장 배율 (25% 증가)
 COMPRESSION_RETRY_GROWTH = 1.25
 
+# 분할 시 시스템 프롬프트 뒤에 보존할 초기 대화 메시지 수 (헤드)
+COMPRESSION_HEAD_MESSAGES = 3
+
+# 분할 시 보존할 최소 최근 메시지 수 (테일)
+COMPRESSION_MIN_TAIL_MESSAGES = 6
+
+# 오래된 도구 실행 결과 본문 치환 표지 포맷
+TOOL_OUTPUT_CLEARED_FORMAT = "[Old tool output cleared: {tool}, {chars}자]"
+
 
 # =============================================================================
 # 외부 LLM 엔드포인트 기본값 (OpenRouter 호환)
