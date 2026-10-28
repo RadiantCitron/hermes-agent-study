@@ -27,7 +27,7 @@
    - 성공 결과(JSON): `success`(true), `content`, `total_lines`, `offset`, `lines_returned`, `truncated`(출력이 잘렸거나 뒤에 읽을 줄이 남았으면 true), `next_offset`(뒤에 읽을 줄이 남았으면 다음 줄 번호, 아니면 `null`).
    - 실패 결과: `{"success": false, "error": ...}` (예외를 밖으로 내지 않는다).
 4. **기본 디스패처 등록** ([`dispatcher.py`](../../../../src/hermes_core/tools/dispatcher.py) `create_default_dispatcher`): `read_file`을 등록한다. 설명서에는 `path`(필수, 문자열), `offset`(정수, 기본 1), `limit`(정수, 기본 2000)만 둔다. **`workspace`는 설명서에 넣지 않는다.** 설명에 「줄 번호 형식, 작업 폴더 밖 거부, 쓰기는 `write_file`·`patch`」를 적는다.
-5. **작동원리 갱신** (01편): Q4의 도구 목록 문장(「…3종입니다」)과 「파일을 읽고 쓰는 전용 도구는 지금은 없습니다」를 읽기 전용 도구가 생긴 사실에 맞게 고치고, 3부 지도의 도구 실행 라벨, 5부 ① 「파일 읽기」 행 신설·② 색인 항목 추가·③ 검증 행 신설을 한다. 02편은 ② 색인에 `file_tools.py`가 생겼음만 반영한다. `기준 커밋` 값은 건드리지 않는다.
+5. **작동원리 갱신** (01편): Q4의 도구 목록 문장(「…3종입니다」)과 「파일을 읽고 쓰는 전용 도구는 지금은 없습니다」를 읽기 전용 도구가 생긴 사실에 맞게 고치고, 3부 지도의 도구 실행 라벨, 5부 ① 「파일 읽기」 행 신설·② 색인 항목 추가·③ 검증 행 신설을 한다. 02편은 ② 색인에 `file_tools.py`가 생겼음만 반영한다. 03편의 읽기 도구 관련 `[계획]` 서술(Q7, 3부 지도, 5부 ①②③)도 사실로 고친다. `기준 커밋` 값은 건드리지 않는다.
 
 ---
 
@@ -36,7 +36,7 @@
 - `src/hermes_core/constants.py`, `src/hermes_core/tools/path_guard.py`, `src/hermes_core/tools/dispatcher.py` (수정)
 - `src/hermes_core/tools/file_tools.py` (신규)
 - `tests/test_hermes_core/test_file_tools.py` (신규)
-- `docs/작동원리/01-헤르메스코어-작동원리.md`, `docs/작동원리/02-코어-안전강화-작동원리.md` (수정, 위 5번 범위만)
+- `docs/작동원리/01-헤르메스코어-작동원리.md`, `docs/작동원리/02-코어-안전강화-작동원리.md`, `docs/작동원리/03-파일도구-작동원리.md` (수정, 위 5번 범위만)
 - `docs/로드맵/03-파일도구-추가/README.md`, `docs/인계.md` (갱신)
 
 ---

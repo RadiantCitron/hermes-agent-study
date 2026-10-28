@@ -17,7 +17,7 @@
    - 원자적 쓰기: 같은 폴더에 임시 파일(`tempfile.mkstemp`)을 만들어 `content`를 **UTF-8 바이트로** 쓰고(`flush`, `fsync`) 권한을 0o644로 맞춘 뒤, 교체 직전에 대상이 아직 없는지 한 번 더 확인하고 `os.replace`로 옮긴다. 실패하면 임시 파일을 지우고 `Failed to write file ...`을 포함한 실패 메시지를 돌려준다. 줄바꿈을 변환하지 않는다.
    - 성공 결과(JSON): `success`(true), `path`(작업 폴더 기준 상대경로, `/` 구분), `chars_written`, `bytes_written`.
 3. **기본 디스패처 등록** ([`dispatcher.py`](../../../../src/hermes_core/tools/dispatcher.py)): `write_file`을 등록한다. 설명서에는 `path`, `content`(둘 다 필수, 문자열)만 둔다. **`workspace`는 넣지 않는다.** 설명에 「새 파일만 만든다, 기존 파일은 `patch`로 수정한다, 지시문 파일과 상태 폴더는 쓸 수 없다」를 적는다.
-4. **작동원리 갱신** (01편): Q4의 파일 도구 서술, 3부 방어선 요약(쓰기 도구와 금지 정책), 5부 ① 「파일 생성」 행·② 색인·③ 검증 행을 추가·수정한다. 02편은 ② 색인만 반영한다. `기준 커밋` 값은 건드리지 않는다.
+4. **작동원리 갱신** (01편): Q4의 파일 도구 서술, 3부 방어선 요약(쓰기 도구와 금지 정책), 5부 ① 「파일 생성」 행·② 색인·③ 검증 행을 추가·수정한다. 02편은 ② 색인만 반영한다. 03편의 쓰기 도구 관련 `[계획]` 서술(Q2, Q6, 3부 지도, 5부 ①②③)도 사실로 고친다. `기준 커밋` 값은 건드리지 않는다.
 
 ---
 
@@ -25,7 +25,7 @@
 
 - `src/hermes_core/constants.py`, `src/hermes_core/tools/file_tools.py`, `src/hermes_core/tools/dispatcher.py` (수정)
 - `tests/test_hermes_core/test_file_tools.py` (수정, 시나리오 추가)
-- `docs/작동원리/01-헤르메스코어-작동원리.md`, `docs/작동원리/02-코어-안전강화-작동원리.md` (수정, 위 4번 범위만)
+- `docs/작동원리/01-헤르메스코어-작동원리.md`, `docs/작동원리/02-코어-안전강화-작동원리.md`, `docs/작동원리/03-파일도구-작동원리.md` (수정, 위 4번 범위만)
 - `docs/로드맵/03-파일도구-추가/README.md`, `docs/인계.md` (갱신)
 
 ---
