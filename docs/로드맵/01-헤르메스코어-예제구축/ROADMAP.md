@@ -46,6 +46,94 @@ flowchart TD
 | **실행 방식** | 데스크톱 앱 및 복합 게이트웨이 데몬 | `python -m hermes_core.cli` 단일 CLI 명령 |
 | **검증 용이성** | 복잡한 E2E 환경 구축 필요 | Mock LLM을 통한 100% 로컬 독립 단위 테스트 가능 |
 
+> 아래 그림은 도해 규칙([ROADMAP_정책.md §3-3](../ROADMAP_정책.md))에 따라 마감 뒤에 보강했다. 이름과 경로는 **현재 코드 기준**이며, 이 로드맵 이후 로드맵(02~06)이 더한 것(경로 안전, 파일 도구, 실제 모델, 압축, 스킬)은 그리지 않았다.
+
+이 로드맵이 만든 파일 (현재 경로 기준):
+
+```text
+src/hermes_core/
+  cli.py                    # 터미널 진입점 (argparse, Mock LLM으로 에이전트 구동)
+  constants.py              # 상태 폴더(.hermes/) 위치와 상한 상수
+  session_db.py             # SessionDB: SQLite + FTS5 원장
+  agent/
+    agent.py                # HermesAgent 턴 오케스트레이터, MockLLMClient
+    prompt_builder.py       # 계층형 시스템 프롬프트 조립, 도구 안내문
+  tools/
+    dispatcher.py           # ToolDispatcher: 도구 실행 단일 진입로
+    memory_tool.py          # MemoryStore(MEMORY.md/USER.md) + memory_tool
+    session_search_tool.py  # session_search_tool (FTS5 검색)
+    terminal_tool.py        # terminal_tool
+tests/test_hermes_core/     # 이 로드맵이 만든 단위·통합 시험
+```
+
+핵심 클래스의 관계 (화살표는 소유·호출 방향):
+
+```mermaid
+classDiagram
+    class HermesAgent {
+        +run_conversation(user_message)
+        -_build_system_prompt()
+        -_execute_tool_calls()
+    }
+    class MockLLMClient {
+        +queue_response()
+        +chat_completion(messages, tools)
+    }
+    class ToolDispatcher {
+        +register_tool(name, handler, schema)
+        +handle_function_call(name, args)
+    }
+    class MemoryStore {
+        +load_from_disk()
+        +add(target, content)
+        +replace(target, old_text, new_content)
+        +remove(target, old_text)
+        +format_for_system_prompt(target)
+    }
+    class SessionDB {
+        +create_session()
+        +append_message()
+        +search_messages()
+    }
+    class prompt_builder {
+        <<module>>
+        +build_system_prompt(...)
+    }
+    HermesAgent --> MockLLMClient : 모델 호출
+    HermesAgent --> ToolDispatcher : 도구 실행
+    HermesAgent --> MemoryStore : 동결 스냅샷
+    HermesAgent --> SessionDB : 원장 기록
+    HermesAgent --> prompt_builder : 프롬프트 조립
+    ToolDispatcher ..> MemoryStore : memory 도구
+    ToolDispatcher ..> SessionDB : session_search 도구
+```
+
+한 턴의 순서 (도구 호출이 한 번 있는 경우):
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자(cli)
+    participant A as HermesAgent
+    participant P as prompt_builder
+    participant L as LLM 클라이언트
+    participant D as ToolDispatcher
+    participant DB as SessionDB
+
+    U->>A: run_conversation(질문)
+    A->>P: 시스템 프롬프트 조립 (세션당 1회, 이후 캐시)
+    A->>DB: 시스템 프롬프트·사용자 메시지 기록
+    A->>L: chat_completion(messages, tools)
+    L-->>A: assistant 메시지(tool_calls)
+    A->>DB: assistant 메시지 기록
+    A->>D: handle_function_call(name, args)
+    D-->>A: 결과 JSON 문자열
+    A->>DB: tool 메시지 기록
+    A->>L: chat_completion (결과 포함)
+    L-->>A: 최종 답변
+    A->>DB: 최종 답변 기록
+    A-->>U: 응답
+```
+
 ---
 
 ## 3. 파급 범위와 무영향 근거 (Blast Radius)
