@@ -23,7 +23,7 @@
 src/hermes_core/
   constants.py                      [변경] CHILD_TOOL_NAMES(010), DELEGATE_* 상수·SUBAGENT_SOURCE(이후)
   agent/
-    agent.py                        [변경] 자식용 인자, 위임 도구 등록, 안내문 연동    (020, 030, 040)
+    agent.py                        [변경] 자식용 인자, 안내문 연동                    (020, 040)
     prompt_builder.py               [변경] SUBAGENT_GUIDANCE, 자식 포커스 프롬프트     (040)
   tools/
     dispatcher.py                   [변경] create_default_dispatcher(include), create_child_dispatcher (010)
@@ -37,7 +37,7 @@ tests/test_hermes_core/
 docs/작동원리/01-헤르메스코어-작동원리.md  [변경] 위임 영구 사실 동기화                (050)
 ```
 
-`session_db.py`, `llm_client.py`, `path_guard.py`, `file_tools.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 단, 자식 클라이언트 복제를 위해 `OpenRouterClient`에 복제 수단이 필요하면 030에서 판단해 그 시점에 이 표를 정정한다(**미확인**).
+`session_db.py`, `llm_client.py`, `path_guard.py`, `file_tools.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 단, 자식 클라이언트 복제를 위해 `OpenRouterClient`에 복제 수단이 필요 없음을 030 지시서에서 확정했다(팩토리 주입).
 
 ### 2-2. 구성요소 흐름 (As-Is → To-Be)
 
@@ -153,11 +153,11 @@ flowchart TD
 | `HermesAgent` 생성자 | 인자 4개 추가(모두 기본값) | 기존 호출부는 바뀌지 않는다. 가정 C를 020 시험으로 확인한다. |
 | `ToolDispatcher` 클래스 | 무변경 | 자식 통로는 조립 함수가 새 인스턴스를 만들 뿐이다. |
 | `create_default_dispatcher` | `include` 인자 추가(010). 기본값(`None`)은 현재와 동일 | 도구 정의를 한 곳에서만 관리하면서 자식용 부분집합을 만들기 위함. 호출부는 이름 인자라 영향 없음. |
-| 부모의 위임 도구 등록 | 기본 생성자가 **자동 등록하지 않는다** | 기존 시험이 기본 에이전트의 도구를 8종으로 단언한다(`test_skills_guidance.py`의 `len(names) == 8`). 시험을 고치지 않으려면 위임 도구는 명시적으로 켜는 방식이어야 한다. 켜는 방식(생성 인자 vs 별도 함수)은 030에서 확정한다. |
+| 부모의 위임 도구 등록 | 기본 생성자가 **자동 등록하지 않는다** | 기존 시험이 기본 에이전트의 도구를 8종으로 단언한다(`test_skills_guidance.py`의 `len(names) == 8`). 시험을 고치지 않으려면 위임 도구는 명시적으로 켜는 방식이어야 한다. 켜는 방식은 030에서 **별도 등록 함수 `register_delegate_tool`**로 확정했다(`agent.py` 무변경). |
 | `SessionDB` 스키마 | 무변경 | `parent_session_id`와 `source`는 기존 컬럼이다. |
 | 압축 | 무영향 | 위임 결과는 일반 tool 메시지다. 05의 가지치기 대상이 된다(050에서 확인). |
 | 시스템 프롬프트 | 안내문 한 덩어리 추가(040) | 06의 `SKILLS_GUIDANCE`와 같은 방식. 세션 중 불변. |
-| 실제 클라이언트 | 복제 수단 필요 시 한정 변경(**미확인**) | 030에서 코드로 확인. |
+| 실제 클라이언트 | 무변경 | 030에서 확정: 복제하지 않고 호출부가 클라이언트 팩토리를 넘긴다. 기록기가 인스턴스당 하나라 새 인스턴스면 충분하다. |
 | `path_guard`, 파일 도구, 터미널 | 무변경 | 자식도 같은 가드를 통과한다. |
 
 ---
@@ -177,7 +177,7 @@ flowchart TD
 | 7 | 자식이 예외로 부모를 죽임 | 안정성 | 생성·실행 예외를 결과 `status: failed`로 변환 |
 | 8 | 위임이 비용을 곱함 | 비용 | 자식 반복 상한 25, 부모 반복 상한 50. 060에서 호출 수 관찰 |
 | 9 | 자식 세션이 닫히지 않고 남음 | 정합성 | 성공·실패 모두 `end_session`(finally) |
-| 10 | 클라이언트 복제 방법이 없음 | 설계 불확실 | 030 지시서 작성 때 코드로 확정, 안 되면 계획 변경으로 보고 |
+| 10 | 클라이언트 복제 방법이 없음 | 설계 불확실 | **해소(030 지시서)**: 복제 대신 팩토리 주입. `llm_client.py` 무변경 |
 
 ---
 
@@ -203,7 +203,7 @@ flowchart TD
 `parent_session_id`와 `source`는 `create_session`에 전달한다. `skip_memory`가 참이면 메모리 블록을 시스템 프롬프트에 넣지 않고 `memory_store`를 읽지 않는다. `skip_context_files`가 참이면 지시문 파일 블록을 넣지 않는다. 기본값은 모두 현재 동작과 같다.
 
 ### 6-3. 위임 도구 (030)
-핸들러는 `goal`, `context`를 받아 ① 입력 검증 ② 클라이언트 팩토리로 새 클라이언트 ③ 자식 생성 ④ `run_conversation(goal)` ⑤ `end_session` ⑥ 결과 JSON을 만든다. 스키마 설명에 「자식은 당신의 대화를 모른다. 필요한 정보를 goal·context에 모두 담아라」를 쓴다. 부모 세션 id·세션 DB 연결 방식(클로저로 `self` 참조 vs 인자)은 030 지시서에서 코드로 확정한다.
+핸들러는 `goal`, `context`를 받아 ① 입력 검증 ② 클라이언트 팩토리로 새 클라이언트 ③ 자식 생성 ④ `run_conversation(goal)` ⑤ `end_session` ⑥ 결과 JSON을 만든다. 스키마 설명에 「자식은 당신의 대화를 모른다. 필요한 정보를 goal·context에 모두 담아라」를 쓴다. 부모 세션 id·세션 DB는 등록 함수의 **값 인자**로 받아 클로저에 쥔다(부모 에이전트 객체를 참조하지 않음, 030에서 확정). 클라이언트는 호출부가 넘기는 팩토리로 만든다.
 
 ### 6-4. 안내문과 자식 프롬프트 (040)
 `SUBAGENT_GUIDANCE`는 영어 간결 안내문(600자 이하)으로, 위임이 맞는 경우(탐색·반복 수정)와 `goal`·`context`를 자족적으로 쓰라는 지시를 담는다. 자식 프롬프트는 「집중된 하위 작업자」임을 알리고 `context`를 배경으로 넣고 요약 형식을 안내한다. `goal`은 시스템 프롬프트가 아니라 첫 사용자 메시지다(ADR-0007 §2-2).
