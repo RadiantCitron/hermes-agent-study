@@ -9,6 +9,7 @@
 
 ## 1. 구현 내용 명세
 
+0. **상수** ([`constants.py`](../../../../src/hermes_core/constants.py)): `SKILL_VIEW_MAX_CHARS = 20_000`, `SKILL_LINKED_FILES_MAX_PER_KIND = 100`, `SKILL_LINKED_DIRS = ("references", "templates", "assets", "scripts")`(010에서 옮겨 온 것: 쓰는 단계에서 만든다).
 1. **`skill_view_tool(name: str, file_path: Optional[str] = None, skills_root: Optional[Path] = None) -> str`** ([`skills_tool.py`](../../../../src/hermes_core/tools/skills_tool.py)): `skills_root`가 `None`이면 호출 시점의 `get_skills_dir()`, 어느 경우든 `resolve()`한 값을 기준으로 한다. 순서는 아래와 같다(앞 단계가 실패하면 뒤는 하지 않는다).
    1. `name`이 비어 있거나 공백뿐이면 실패.
    2. `path_guard.check_path(name, 스킬 루트)` — 제어문자, 루트 이탈(심볼릭 링크 포함), 보호 이름(`.env*`, `.git`)을 거부한다. [`path_guard.py`](../../../../src/hermes_core/tools/path_guard.py)는 **수정하지 않고 재사용**한다.
@@ -24,7 +25,7 @@
 
 ## 2. 변경할 파일 목록
 
-- `src/hermes_core/tools/skills_tool.py` (수정), `src/hermes_core/tools/dispatcher.py` (수정)
+- `src/hermes_core/constants.py` (수정), `src/hermes_core/tools/skills_tool.py` (수정), `src/hermes_core/tools/dispatcher.py` (수정)
 - `tests/test_hermes_core/test_skill_view.py` (신규)
 - `docs/로드맵/06-스킬-시스템-MVP/README.md`, `docs/인계.md` (갱신)
 
@@ -70,4 +71,4 @@
 
 1. 시나리오 1~24가 통과한다 (`test_skill_view.py`). 특히 8·9·10·12는 응답 **전체 문자열**에 비밀 마커가 없음을 확인한다.
 2. 기존 테스트가 모두 통과한다. 테스트 파일 diff에서 **삭제된 줄이 0**이다.
-3. `git diff <단계 시작 커밋>..HEAD --stat`의 `src/` 변경이 `skills_tool.py`와 `dispatcher.py`뿐이다 (`path_guard.py` 무변경).
+3. `git diff <단계 시작 커밋>..HEAD --stat`의 `src/` 변경이 `constants.py`, `skills_tool.py`, `dispatcher.py`뿐이다 (`path_guard.py` 무변경).

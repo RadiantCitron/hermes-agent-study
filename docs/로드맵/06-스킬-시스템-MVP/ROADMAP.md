@@ -67,7 +67,7 @@ flowchart TD
 
 - **수정 대상**
   - 신규 `src/hermes_core/tools/skills_tool.py` (010·020·030)
-  - `src/hermes_core/constants.py` (010: 스킬 상수와 `get_skills_dir()`)
+  - `src/hermes_core/constants.py` (010: 이름 상한 상수와 `get_skills_dir()`, 030: 본문·연결 파일 상한 상수)
   - `src/hermes_core/tools/dispatcher.py` (020·030: 등록 각 1줄, import)
   - `src/hermes_core/agent/prompt_builder.py` (040: `SKILLS_GUIDANCE` 상수)
   - `src/hermes_core/agent/agent.py` (040: `tools_guidance` 목록에 한 항목)
