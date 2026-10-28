@@ -3,8 +3,8 @@
 [원본 레퍼런스 매핑]
 - 대응 원본: hermes-agent/cli.py
 - 실행 방법:
-  - `python -m hermes_core.cli`
   - `python -m hermes_core.cli --mock` (오프라인 테스트 및 스모크 실행 모드)
+  - `python -m hermes_core.cli` (--mock 없이: 실제 모델 클라이언트가 아직 없으므로 안내 후 종료 코드 2)
 """
 
 import argparse
@@ -18,6 +18,14 @@ def main() -> None:
     parser.add_argument("--mock", action="store_true", help="Run with built-in Mock LLM without API keys")
     parser.add_argument("--model", type=str, default="gpt-4o", help="Model name (default: gpt-4o)")
     args = parser.parse_args()
+
+    if not args.mock:
+        # 실제 모델 클라이언트가 아직 없다. 가짜 모델을 조용히 쓰지 않고, 에이전트(세션 DB·기억 폴더)를 만들기 전에 종료한다.
+        print(
+            "Real model client is not available yet. Run with --mock to use the built-in Mock LLM.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     llm_client = None
     if args.mock:
