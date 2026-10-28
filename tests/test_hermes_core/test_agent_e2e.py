@@ -257,3 +257,440 @@ def test_agent_e2e_file_tools_full_cycle(tmp_path, monkeypatch):
         assert "OUTSIDE-SECRET" not in m["content"]
 
     session_db.close()
+
+
+# =============================================================================
+# 로드맵 04: 구현지시서 050 통합 E2E 검증 시나리오 (시나리오 1 ~ 13)
+# =============================================================================
+
+import json
+from typing import Any, Optional, Union
+import httpx
+import pytest
+
+from hermes_core.constants import DEFAULT_REAL_MODEL
+from hermes_core.llm_client import OpenRouterClient
+from hermes_core.tools.dispatcher import create_default_dispatcher
+
+FAKE_E2E_KEY = "test-key-1234567890"
+
+
+def _make_mock_provider_payload(
+    content: Optional[str] = None,
+    tool_calls: Optional[list[dict]] = None,
+    prompt_tokens: int = 10,
+    completion_tokens: int = 5,
+    finish_reason: Optional[str] = None,
+) -> dict:
+    """실제 제공자(OpenRouter) 응답 형태를 흉내 내는 딕셔너리."""
+    msg: dict[str, Any] = {"role": "assistant"}
+    if content is not None:
+        msg["content"] = content
+    if tool_calls is not None:
+        msg["tool_calls"] = tool_calls
+
+    return {
+        "choices": [
+            {
+                "message": msg,
+                "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+            }
+        ],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+    }
+
+
+class SequentialMockTransport(httpx.BaseTransport):
+    """지정된 순서대로 응답하는 MockTransport."""
+
+    def __init__(self, responses: list[Union[dict, int, Exception]]):
+        self.responses = list(responses)
+        self.captured_requests: list[httpx.Request] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.captured_requests.append(request)
+        if not self.responses:
+            return httpx.Response(200, json=_make_mock_provider_payload(content="fallback done"))
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, int):
+            return httpx.Response(item, text=f"HTTP {item} error simulation")
+        return httpx.Response(200, json=item)
+
+
+@pytest.fixture
+def r04_e2e_env(tmp_path, monkeypatch):
+    """로드맵 04 E2E 통합 환경: 작업 폴더 W(.hermes/workspace)로 이동 및 비밀 파일(.env) 배치."""
+    home = (tmp_path / "hermes_home").resolve()
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    workspace = (home / "workspace").resolve()
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    # 심어 둔 비밀 파일 (절대 유출되면 안 됨)
+    (workspace / ".env").write_text("SECRET=PLANTED-SECRET-VALUE\n", encoding="utf-8")
+
+    db = SessionDB(home / "state.db")
+    memory_store = MemoryStore(memory_dir=home / "memories")
+    dispatcher = create_default_dispatcher(memory_store=memory_store, session_db=db)
+
+    return {
+        "home": home,
+        "workspace": workspace,
+        "db": db,
+        "memory_store": memory_store,
+        "dispatcher": dispatcher,
+    }
+
+
+def test_050_scenarios_01_to_04_full_tool_cycle_and_zero_leakage(r04_e2e_env, caplog, capsys):
+    """시나리오 1~4: 정상 흐름(write_file -> done) 전체 사이클, 2차 요청 메시지 검증, 호출 원장 일치, 키 미저장 검증."""
+    w = r04_e2e_env["workspace"]
+    db = r04_e2e_env["db"]
+
+    tool_call_item = {
+        "id": "call_w1_e2e",
+        "type": "function",
+        "function": {"name": "write_file", "arguments": '{"path": "hello.txt", "content": "hi"}'},
+    }
+
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(tool_calls=[tool_call_item], prompt_tokens=20, completion_tokens=10),
+        _make_mock_provider_payload(content="done", prompt_tokens=35, completion_tokens=5),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    result = agent.run_conversation("create hello.txt with hi")
+
+    # 시나리오 1: 최종 응답, 파일 생성, 원장 순서
+    assert result["final_response"] == "done"
+    assert result["stopped_reason"] == "completed"
+    assert (w / "hello.txt").read_text(encoding="utf-8") == "hi"
+
+    db_msgs = db.get_messages(agent.session_id)
+    # 순서: user -> assistant(tool_calls) -> tool -> assistant
+    assert [m["role"] for m in db_msgs] == ["user", "assistant", "tool", "assistant"]
+
+    # 시나리오 2: 두 번째 요청 본문 messages 검증
+    assert len(transport.captured_requests) == 2
+    second_req_body = json.loads(transport.captured_requests[1].content.decode("utf-8"))
+    sent_messages = second_req_body["messages"]
+    tool_entry = next(m for m in sent_messages if m.get("role") == "tool")
+    assert tool_entry["tool_call_id"] == "call_w1_e2e"
+    assert "hello.txt" in tool_entry["content"]
+
+    # 시나리오 3: 호출 기록 2행, 토큰 합계 일치
+    calls = db.get_llm_calls(agent.session_id)
+    assert len(calls) == 2
+    assert calls[0]["error_kind"] is None
+    assert calls[1]["error_kind"] is None
+    session_info = db.get_session(agent.session_id)
+    assert session_info["input_tokens"] == 20 + 35  # 55
+    assert session_info["output_tokens"] == 10 + 5  # 15
+
+    # 시나리오 4: 키 미저장 검증 (원장, 세션, 로그, 표준출력 어디에도 FAKE_E2E_KEY 없음)
+    for c in calls:
+        assert FAKE_E2E_KEY not in str(dict(c))
+    for m in db_msgs:
+        assert FAKE_E2E_KEY not in str(dict(m))
+    assert FAKE_E2E_KEY not in str(session_info)
+    assert FAKE_E2E_KEY not in caplog.text
+    out_err = capsys.readouterr()
+    assert FAKE_E2E_KEY not in out_err.out + out_err.err
+
+    db.close()
+
+
+def test_050_scenario_05_secret_file_read_blocked(r04_e2e_env):
+    """시나리오 5: 모델이 read_file('.env')를 호출 -> 도구 거부(protected), 원장 및 요청 본문에 비밀값 없음."""
+    db = r04_e2e_env["db"]
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[{"id": "call_sec_read", "type": "function", "function": {"name": "read_file", "arguments": '{"path": ".env"}'}}]
+        ),
+        _make_mock_provider_payload(content="could not read secret"),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("read .env")
+    assert res["stopped_reason"] == "completed"
+
+    # 도구 메시지 확인
+    tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
+    assert "protected" in tool_msg["content"]
+    assert '"success": false' in tool_msg["content"].lower()
+
+    # 원장 및 요청 본문에 PLANTED-SECRET-VALUE 없음
+    all_db_msgs = db.get_messages(agent.session_id)
+    for m in all_db_msgs:
+        assert "PLANTED-SECRET-VALUE" not in str(dict(m))
+
+    for req in transport.captured_requests:
+        assert "PLANTED-SECRET-VALUE" not in req.content.decode("utf-8")
+
+    db.close()
+
+
+def test_050_scenario_06_secret_file_terminal_blocked(r04_e2e_env):
+    """시나리오 6: 모델이 terminal로 cat .env 호출 -> 실행 0회, 도구 거부, 비밀값 없음."""
+    db = r04_e2e_env["db"]
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[{"id": "call_sec_term", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "cat .env"}'}}]
+        ),
+        _make_mock_provider_payload(content="blocked"),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("run cat .env")
+    tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
+    assert "protected" in tool_msg["content"]
+    assert "PLANTED-SECRET-VALUE" not in tool_msg["content"]
+
+    for m in db.get_messages(agent.session_id):
+        assert "PLANTED-SECRET-VALUE" not in str(dict(m))
+
+    db.close()
+
+
+def test_050_scenario_07_outside_and_git_blocked(r04_e2e_env):
+    """시나리오 7: write_file('.git/hooks/pre-push')와 read_file('../state.db') 호출 -> 둘 다 거부, 파일 미생성."""
+    w = r04_e2e_env["workspace"]
+    db = r04_e2e_env["db"]
+
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[
+                {"id": "c_git", "type": "function", "function": {"name": "write_file", "arguments": '{"path": ".git/hooks/pre-push", "content": "malicious"}'}},
+                {"id": "c_db", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "../state.db"}'}},
+            ]
+        ),
+        _make_mock_provider_payload(content="done trying"),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("attack files")
+    assert res["stopped_reason"] == "completed"
+
+    tool_msgs = [m for m in res["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 2
+    assert "protected" in tool_msgs[0]["content"]  # .git
+    assert "outside" in tool_msgs[1]["content"]    # ../state.db
+
+    assert not (w / ".git").exists()
+    db.close()
+
+
+def test_050_scenario_08_instruction_write_blocked(r04_e2e_env):
+    """시나리오 8: write_file('AGENTS.md') 호출 -> 거부(instruction 포함), 파일 미생성."""
+    w = r04_e2e_env["workspace"]
+    db = r04_e2e_env["db"]
+
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[{"id": "c_instr", "type": "function", "function": {"name": "write_file", "arguments": '{"path": "AGENTS.md", "content": "override rules"}'}}]
+        ),
+        _make_mock_provider_payload(content="failed write"),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("override AGENTS.md")
+    tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
+    assert "instruction" in tool_msg["content"]
+    assert not (w / "AGENTS.md").exists()
+    db.close()
+
+
+def test_050_scenario_09_provider_rate_limited_429(r04_e2e_env):
+    """시나리오 9: 1회차에 429 반환 -> stopped_reason == 'llm_error', error.kind == 'rate_limited', llm_calls 1행."""
+    db = r04_e2e_env["db"]
+    transport = SequentialMockTransport([429])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("start")
+    assert res["stopped_reason"] == "llm_error"
+    assert res["error"]["kind"] == "rate_limited"
+
+    calls = db.get_llm_calls(agent.session_id)
+    assert len(calls) == 1
+    assert calls[0]["error_kind"] == "rate_limited"
+    db.close()
+
+
+def test_050_scenario_10_second_turn_error_500(r04_e2e_env):
+    """시나리오 10: 1회차 정상(도구 호출), 2회차 500 에러 -> tool 메시지 보존, llm_calls 2행."""
+    db = r04_e2e_env["db"]
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[{"id": "c_pwd", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "pwd"}'}}]
+        ),
+        500,
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("run pwd")
+    assert res["stopped_reason"] == "llm_error"
+    assert res["error"]["kind"] == "http_error"
+
+    # 원장에 tool 메시지까지 남아 있음
+    msgs = db.get_messages(agent.session_id)
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool"]
+
+    calls = db.get_llm_calls(agent.session_id)
+    assert len(calls) == 2
+    assert calls[0]["error_kind"] is None
+    assert calls[1]["error_kind"] == "http_error"
+    db.close()
+
+
+def test_050_scenario_11_broken_arguments_json_recovery(r04_e2e_env):
+    """시나리오 11: arguments가 깨진 JSON -> 인자 읽기 오류 메시지 반환 후 루프 계속, 최종 응답 정상 종료."""
+    db = r04_e2e_env["db"]
+    transport = SequentialMockTransport([
+        _make_mock_provider_payload(
+            tool_calls=[{"id": "c_broken", "type": "function", "function": {"name": "terminal", "arguments": '{"broken'}}]
+        ),
+        _make_mock_provider_payload(content="recovered from broken json"),
+    ])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("test broken json")
+    assert res["stopped_reason"] == "completed"
+    assert res["final_response"] == "recovered from broken json"
+
+    tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
+    assert "Invalid JSON" in tool_msg["content"]
+    assert '"success": false' in tool_msg["content"].lower()
+    db.close()
+
+
+def test_050_scenario_12_max_iterations_bounded(r04_e2e_env):
+    """시나리오 12: 제공자가 매번 도구 호출만 응답(max_iterations=3) -> iterations == 3, stopped_reason == 'max_iterations', llm_calls 3행."""
+    db = r04_e2e_env["db"]
+    # 3번 모두 도구 호출만 응답
+    loop_call = _make_mock_provider_payload(
+        tool_calls=[{"id": "c_loop", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "echo loop"}'}}]
+    )
+    transport = SequentialMockTransport([loop_call, loop_call, loop_call, loop_call])
+
+    client = OpenRouterClient(FAKE_E2E_KEY, DEFAULT_REAL_MODEL, transport=transport)
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=client,
+        max_iterations=3,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("infinite loop test")
+    assert res["iterations"] == 3
+    assert res["stopped_reason"] == "max_iterations"
+
+    calls = db.get_llm_calls(agent.session_id)
+    assert len(calls) == 3
+    db.close()
+
+
+def test_050_scenario_13_parity_with_mock_llm_client(r04_e2e_env):
+    """시나리오 13: 가정 G 대조 - 같은 시퀀스를 MockLLMClient로 재생 시 파일 결과와 도구 메시지 내용이 1번과 일치."""
+    w = r04_e2e_env["workspace"]
+    db = r04_e2e_env["db"]
+
+    mock_client = MockLLMClient()
+    mock_client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_w1_mock",
+            "function": {
+                "name": "write_file",
+                "arguments": '{"path": "hello_mock.txt", "content": "hi"}',
+            },
+        }],
+    )
+    mock_client.queue_response(content="done")
+
+    agent = HermesAgent(
+        session_db=db,
+        memory_store=r04_e2e_env["memory_store"],
+        dispatcher=r04_e2e_env["dispatcher"],
+        llm_client=mock_client,
+        quiet_mode=True,
+    )
+
+    res = agent.run_conversation("mock create")
+    assert res["final_response"] == "done"
+    assert res["stopped_reason"] == "completed"
+    assert (w / "hello_mock.txt").read_text(encoding="utf-8") == "hi"
+
+    tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
+    assert "hello_mock.txt" in tool_msg["content"]
+    assert '"success": true' in tool_msg["content"].lower()
+    db.close()
+
