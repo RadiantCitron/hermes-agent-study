@@ -11,11 +11,14 @@
 """
 
 import json
-import shlex
+import os
 from pathlib import Path
+import shlex
 import subprocess
 from typing import Any, Optional
 
+from hermes_core.constants import TERMINAL_STRIPPED_ENV_NAMES
+from hermes_core.tools.approval import Approver
 from hermes_core.tools.path_guard import (
     is_inside,
     is_protected_path,
@@ -63,43 +66,26 @@ def _failure(error: str) -> str:
     return json.dumps({"success": False, "error": error}, ensure_ascii=False)
 
 
-def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT, workspace: Optional[Path] = None) -> str:
-    """허용목록의 프로그램 하나를 작업 폴더에서 셸 없이 실행하고 JSON 문자열로 결과를 반환.
+def _child_env() -> dict[str, str]:
+    """호출 시점 os.environ 사본에서 TERMINAL_STRIPPED_ENV_NAMES를 뺀 환경."""
+    env = dict(os.environ)
+    for name in TERMINAL_STRIPPED_ENV_NAMES:
+        env.pop(name, None)
+    return env
 
-    workspace가 None이면 호출 시점의 현재 작업 폴더를 쓴다.
-    """
-    command = command.strip()
-    if not command:
-        return _failure("Command cannot be empty.")
 
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= TERMINAL_MAX_TIMEOUT:
-        return _failure(f"Invalid timeout {timeout!r}: must be between 1 and {TERMINAL_MAX_TIMEOUT} seconds.")
-
-    try:
-        args = shlex.split(command)
-    except ValueError as e:
-        return _failure(f"Cannot parse command: {e}")
-
-    if args[0] not in ALLOWED_COMMANDS:
-        return _failure(f"Command '{args[0]}' is not allowed. Allowed: {', '.join(ALLOWED_COMMANDS)}")
-
-    base = resolve_workspace(workspace)
-    for arg in args[1:]:
-        values = path_values(arg)
-        if not all(is_inside(value, base) for value in values):
-            return _failure(f"Path '{arg}' is outside the workspace.")
-        if any(is_protected_path(value, base) for value in values):
-            return _failure(f"Path '{arg}' refers to a protected file or folder (.env*, .git).")
-
+def _execute(args: list[str], cwd: Path, timeout: int) -> str:
+    """하위 프로세스를 실행하고 출력 상한 및 예외 처리를 거쳐 JSON 문자열로 반환."""
     try:
         proc = subprocess.run(
             args,
-            cwd=base,
+            cwd=cwd,
             shell=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_child_env(),
         )
 
         stdout = proc.stdout
@@ -131,3 +117,51 @@ def terminal_tool(command: str, timeout: int = TERMINAL_MAX_TIMEOUT, workspace: 
         }
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def terminal_tool(
+    command: str,
+    timeout: int = TERMINAL_MAX_TIMEOUT,
+    workspace: Optional[Path] = None,
+    approver: Optional[Approver] = None,
+) -> str:
+    """허용목록의 프로그램 또는 승인된 명령을 작업 폴더에서 셸 없이 실행하고 JSON 문자열로 결과를 반환.
+
+    workspace가 None이면 호출 시점의 현재 작업 폴더를 쓴다.
+    """
+    command = command.strip()
+    if not command:
+        return _failure("Command cannot be empty.")
+
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= TERMINAL_MAX_TIMEOUT:
+        return _failure(f"Invalid timeout {timeout!r}: must be between 1 and {TERMINAL_MAX_TIMEOUT} seconds.")
+
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return _failure(f"Cannot parse command: {e}")
+
+    base = resolve_workspace(workspace)
+
+    if args[0] in ALLOWED_COMMANDS:
+        for arg in args[1:]:
+            values = path_values(arg)
+            if not all(is_inside(value, base) for value in values):
+                return _failure(f"Path '{arg}' is outside the workspace.")
+            if any(is_protected_path(value, base) for value in values):
+                return _failure(f"Path '{arg}' refers to a protected file or folder (.env*, .git).")
+        return _execute(args, base, timeout)
+
+    if approver is None:
+        return _failure(f"Command '{args[0]}' is not allowed. Allowed: {', '.join(ALLOWED_COMMANDS)}")
+
+    for arg in args:
+        values = path_values(arg)
+        if any(is_protected_path(value, base) for value in values):
+            return _failure(f"Path '{arg}' refers to a protected file or folder (.env*, .git).")
+
+    outcome = approver.request(args)
+    if not outcome.approved:
+        return _failure(outcome.message)
+
+    return _execute(args, base, timeout)

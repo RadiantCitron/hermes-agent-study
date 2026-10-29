@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from hermes_core.constants import CHILD_TOOL_NAMES
 from hermes_core.session_db import SessionDB
+from hermes_core.tools.approval import Approver
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
     READ_FILE_SCHEMA,
@@ -144,6 +145,7 @@ def create_default_dispatcher(
     memory_store: Optional[MemoryStore] = None,
     session_db: Optional[SessionDB] = None,
     include: Optional[Collection[str]] = None,
+    approver: Optional[Approver] = None,
 ) -> ToolDispatcher:
     """Hermes 핵심 도구들이 등록된 기본 디스패처 생성.
 
@@ -179,7 +181,10 @@ def create_default_dispatcher(
 
     # 3. Terminal 도구 등록
     if _should_register("terminal"):
-        dispatcher.register_tool("terminal", terminal_tool, TERMINAL_SCHEMA)
+        def _terminal_handler(**kwargs):
+            return terminal_tool(approver=approver, **kwargs)
+
+        dispatcher.register_tool("terminal", _terminal_handler, TERMINAL_SCHEMA)
 
     # 4. Read File 도구 등록
     if _should_register("read_file"):

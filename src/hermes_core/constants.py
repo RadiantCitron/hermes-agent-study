@@ -265,4 +265,8 @@ APPROVAL_TOO_LONG_MESSAGE = (
     "The command is longer than {max_chars} characters and cannot be reviewed by the user, so it was not run."
 )
 
+# 터미널 실행 시 하위 프로세스 환경에서 제거할 환경변수 이름 목록
+TERMINAL_STRIPPED_ENV_NAMES = (OPENROUTER_API_KEY_ENV,)
+
+
 
