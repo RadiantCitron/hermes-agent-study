@@ -10,11 +10,18 @@
 
 from collections.abc import Callable, Collection
 import json
+import logging
 from typing import Any, Optional
 
-from hermes_core.constants import CHILD_TOOL_NAMES
+from hermes_core.constants import (
+    CHECKPOINT_PRE_RECORD_FAILED_MESSAGE,
+    CHECKPOINT_REFUSED_HINT,
+    CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE,
+    CHILD_TOOL_NAMES,
+)
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver
+from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
     READ_FILE_SCHEMA,
@@ -23,6 +30,7 @@ from hermes_core.tools.file_tools import (
     read_file_tool,
     write_file_tool,
 )
+from hermes_core.tools.path_guard import resolve_workspace
 from hermes_core.tools.memory_tool import MEMORY_SCHEMA, MemoryStore, memory_tool
 from hermes_core.tools.session_search_tool import SESSION_SEARCH_SCHEMA, session_search_tool
 from hermes_core.tools.skills_tool import (
@@ -33,6 +41,8 @@ from hermes_core.tools.skills_tool import (
 )
 from hermes_core.tools.terminal_tool import TERMINAL_SCHEMA, terminal_tool
 
+
+logger = logging.getLogger(__name__)
 
 _JSON_TYPES: dict[str, tuple[type, ...]] = {
     "string": (str,),
@@ -141,13 +151,87 @@ _DEFAULT_TOOL_NAMES = (
 )
 
 
+def _refusal(message: str) -> str:
+    """파일 도구의 실패 JSON과 같은 모양의 거부 결과."""
+    return json.dumps({"success": False, "error": message}, ensure_ascii=False)
+
+
+def _checkpointed_handler(
+    tool_name: str, tool: Callable[..., str], checkpointer: Checkpointer
+) -> Callable[..., str]:
+    """파일 도구를 체크포인트 선기록 → 실행 → 확정으로 감싼 핸들러를 만든다.
+
+    선기록에 실패하면 도구를 부르지 않는다(fail-closed).
+    """
+
+    def _handler(**kwargs: Any) -> str:
+        path = kwargs.get("path")
+        if not isinstance(path, str):
+            return tool(**kwargs)
+
+        if resolve_workspace(None) != resolve_workspace(checkpointer.workspace):
+            return _refusal(CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE + CHECKPOINT_REFUSED_HINT)
+
+        try:
+            cid = checkpointer.record_before(tool_name, path)
+        except CheckpointLimitError as e:
+            return _refusal(str(e) + CHECKPOINT_REFUSED_HINT)
+        except Exception as e:
+            return _refusal(
+                CHECKPOINT_PRE_RECORD_FAILED_MESSAGE.format(reason=str(e))
+                + CHECKPOINT_REFUSED_HINT
+            )
+
+        result_success: Optional[bool] = None
+        exception: Optional[BaseException] = None
+        result: Optional[str] = None
+        try:
+            result = tool(**kwargs)
+            try:
+                parsed = json.loads(result)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and isinstance(parsed.get("success"), bool):
+                result_success = parsed["success"]
+            return result
+        except BaseException as e:
+            exception = e
+            raise
+        finally:
+            if cid is not None:
+                try:
+                    checkpointer.finalize(
+                        cid,
+                        tool_name,
+                        path,
+                        result_success=result_success,
+                        exception=exception,  # type: ignore[arg-type]
+                    )
+                except Exception as fin_err:
+                    logger.warning(
+                        "Checkpoint %s finalize failed for %s: %s", cid, tool_name, fin_err
+                    )
+            elif result_success is True:
+                logger.warning(
+                    "기록 없는 변경 (unrecorded modification): %s succeeded on %r without a checkpoint",
+                    tool_name,
+                    path,
+                )
+
+    return _handler
+
+
 def create_default_dispatcher(
     memory_store: Optional[MemoryStore] = None,
     session_db: Optional[SessionDB] = None,
     include: Optional[Collection[str]] = None,
     approver: Optional[Approver] = None,
+    checkpointer: Optional[Checkpointer] = None,
 ) -> ToolDispatcher:
     """Hermes 핵심 도구들이 등록된 기본 디스패처 생성.
+
+    checkpointer가 주어지면 write_file·patch를 쓰기 전 기록·쓴 뒤 확정으로 감싼다.
+    None이면 기존처럼 도구를 그대로 등록한다.
 
     include가 주어지면 해당 이름의 도구만 등록한다.
     기본 도구 이름 목록에 없는 이름이 include에 있으면 ValueError를 발생시킨다.
@@ -192,11 +276,23 @@ def create_default_dispatcher(
 
     # 5. Write File 도구 등록
     if _should_register("write_file"):
-        dispatcher.register_tool("write_file", write_file_tool, WRITE_FILE_SCHEMA)
+        dispatcher.register_tool(
+            "write_file",
+            write_file_tool
+            if checkpointer is None
+            else _checkpointed_handler("write_file", write_file_tool, checkpointer),
+            WRITE_FILE_SCHEMA,
+        )
 
     # 6. Patch 도구 등록
     if _should_register("patch"):
-        dispatcher.register_tool("patch", patch_tool, PATCH_SCHEMA)
+        dispatcher.register_tool(
+            "patch",
+            patch_tool
+            if checkpointer is None
+            else _checkpointed_handler("patch", patch_tool, checkpointer),
+            PATCH_SCHEMA,
+        )
 
     # 7. Skills List 도구 등록
     if _should_register("skills_list"):

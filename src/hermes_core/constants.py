@@ -310,6 +310,14 @@ CHECKPOINT_PRE_RECORD_FAILED_MESSAGE = (
     "Failed to record checkpoint before modification ({reason}). The file was not modified."
 )
 
+# 체크포인트 작업 폴더 불일치 거부 메시지 (경로는 넣지 않는다)
+CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE = (
+    "Checkpoint workspace differs from the current workspace. The file was not modified."
+)
+
+# 체크포인트 거부 원인 뒤에 붙는 대처 문구
+CHECKPOINT_REFUSED_HINT = " Tell the user and do not repeat the same write."
+
 
 
 
