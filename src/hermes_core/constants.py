@@ -209,3 +209,6 @@ CLI_INPUT_DECODE_MAX_RETRIES = 5
 # prompt_toolkit 미설치 시 폴백 안내 문구 (프로세스당 한 번 출력)
 CLI_PROMPT_TOOLKIT_MISSING_NOTICE = "prompt_toolkit is not installed; falling back to basic input (no multi-line editing)."
 
+# 여러 줄 입력 가능 환경(터미널 + prompt_toolkit) 시작 배너 안내 문구
+CLI_MULTILINE_HINT = "Enter to send, Ctrl+J for a new line."
+

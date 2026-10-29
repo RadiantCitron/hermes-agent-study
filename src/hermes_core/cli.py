@@ -12,8 +12,9 @@ import os
 import sys
 
 from hermes_core.agent import HermesAgent, MockLLMClient
-from hermes_core.cli_input import read_user_input
+from hermes_core.cli_input import multiline_input_available, read_user_input
 from hermes_core.constants import (
+    CLI_MULTILINE_HINT,
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
     OPENROUTER_API_KEY_ENV,
@@ -136,6 +137,8 @@ def main() -> None:
     if args.no_skills_index:
         print("Skills index disabled (--no-skills-index).")
     print("Type 'exit' or 'quit' to terminate.")
+    if multiline_input_available():
+        print(CLI_MULTILINE_HINT)
     print("=" * 60)
 
     # Mock 모드 단발성 실행 시 1턴 자동 구동 후 종료 가능하게 처리

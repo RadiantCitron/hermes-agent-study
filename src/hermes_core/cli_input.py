@@ -4,6 +4,7 @@
 유니코드 디코드 예외 발생 시 세션이 비정상 종료되지 않도록 방어한다.
 """
 
+import importlib.util
 import sys
 from typing import Any
 
@@ -26,6 +27,20 @@ def is_interactive_terminal() -> bool:
     try:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
     except (AttributeError, ValueError):
+        return False
+
+
+def multiline_input_available() -> bool:
+    """줄바꿈 입력 안내(CLI_MULTILINE_HINT)를 출력할 수 있는 환경인지 판정한다.
+
+    표준 입출력이 모두 터미널이고 prompt_toolkit이 설치되어 있으면 True.
+    라이브러리를 실제로 import하지 않고 사양(spec) 존재 여부로 판정한다.
+    """
+    if not is_interactive_terminal():
+        return False
+    try:
+        return importlib.util.find_spec("prompt_toolkit") is not None
+    except (ImportError, ValueError, AttributeError):
         return False
 
 
