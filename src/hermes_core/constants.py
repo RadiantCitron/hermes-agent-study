@@ -219,6 +219,49 @@ CLI_APPROVAL_ENABLED_NOTICE = (
 )
 CLI_APPROVAL_DISABLED_NOTICE = "Command approval disabled (--no-approval)."
 
+# 체크포인트 관련 CLI 안내 문구
+CLI_CHECKPOINT_ENABLED_NOTICE = (
+    "File checkpoints enabled: write_file/patch changes can be undone with /rollback "
+    "(terminal and delegated changes are not covered; disable with --no-checkpoints)."
+)
+CLI_CHECKPOINT_DISABLED_NOTICE = "File checkpoints disabled (--no-checkpoints)."
+CLI_CHECKPOINT_REFUSED_NOTICE = (
+    "A file write was refused because its checkpoint could not be recorded, "
+    "so the file was not changed. Restart with --no-checkpoints to write without checkpoints."
+)
+CLI_ROLLBACK_DISABLED_NOTICE = (
+    "File checkpoints are disabled in this session (--no-checkpoints), so there is nothing to roll back."
+)
+CLI_ROLLBACK_USAGE_NOTICE = (
+    "Usage: /rollback (no arguments). It undoes the file changes of the most recent turn."
+)
+CLI_ROLLBACK_NOTHING_NOTICE = "Nothing to roll back."
+CLI_ROLLBACK_HEADER = (
+    "Rolling back turn {turn_index}: {restore_count} to restore, {skip_count} to skip (newest change first)."
+)
+CLI_ROLLBACK_LINE_RESTORE = "  [restore] {rel_path} ({tool_name})"
+CLI_ROLLBACK_LINE_DELETE = "  [delete]  {rel_path} ({tool_name})"
+CLI_ROLLBACK_LINE_SKIP = "  [skip]    {rel_path} ({tool_name}) - {reason}"
+CLI_ROLLBACK_EXTERNAL_WARNING = (
+    "Warning: terminal commands or delegated sub-agents ran during this turn. "
+    "Their changes are not rolled back, so the folder may end up in a mixed state."
+)
+CLI_ROLLBACK_PENDING_WARNING = (
+    "Warning: some changes have an unknown result and will not be restored (listed as skip)."
+)
+CLI_ROLLBACK_PROMPT = "Roll back these changes? [y/N] "
+CLI_ROLLBACK_CANCELLED_NOTICE = "Rollback cancelled. Nothing was changed."
+CLI_ROLLBACK_RESULT_RESTORED = "  restored  {rel_path}"
+CLI_ROLLBACK_RESULT_DELETED = "  deleted   {rel_path}"
+CLI_ROLLBACK_RESULT_SKIPPED = "  skipped   {rel_path} - {reason}"
+CLI_ROLLBACK_RESULT_SUMMARY = "Rolled back {rolled_back} file(s), skipped {skipped}."
+CLI_ROLLBACK_MODEL_UNAWARE_NOTICE = (
+    "The model does not know about this rollback. Ask it to re-read the changed files before continuing."
+)
+CLI_ROLLBACK_ERROR_NOTICE = (
+    "Rollback failed ({reason}). Some files may already have been restored; check the working directory."
+)
+
 
 # =============================================================================
 # 승인 흐름 관련 상수
