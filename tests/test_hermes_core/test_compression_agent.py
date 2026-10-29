@@ -6,8 +6,6 @@
 import copy
 from typing import Any, Optional
 
-import pytest
-
 from hermes_core.agent import HermesAgent, MockLLMClient
 from hermes_core.agent.agent import MockLLMResponse
 from hermes_core.constants import (

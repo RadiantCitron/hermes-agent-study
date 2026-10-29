@@ -6,8 +6,6 @@
 
 from typing import Any, Optional
 
-import pytest
-
 from hermes_core.agent.compression import (
     CompressionResult,
     assemble_compressed,

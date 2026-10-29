@@ -253,9 +253,6 @@ def test_scenario_08_keyboard_interrupt_exits_cleanly(
     out = capsys.readouterr().out
     assert "Exiting session..." in out
 
-    db = SessionDB(hermes_home / "state.db")
-    db.close()
-
 
 def test_scenario_09_eof_error_exits_cleanly(
     hermes_home: Path,
@@ -276,6 +273,3 @@ def test_scenario_09_eof_error_exits_cleanly(
 
     out = capsys.readouterr().out
     assert "Exiting session..." in out
-
-    db = SessionDB(hermes_home / "state.db")
-    db.close()

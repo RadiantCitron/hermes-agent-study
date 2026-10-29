@@ -5,7 +5,6 @@
 
 import json
 from typing import Any, Callable, Optional, Union
-import pytest
 
 from hermes_core.agent.agent import HermesAgent, MockLLMClient
 from hermes_core.llm_client import LLMError, LLMResponse

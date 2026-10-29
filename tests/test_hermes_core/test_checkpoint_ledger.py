@@ -629,8 +629,3 @@ def test_scenario_17_ledger_isolation(tmp_path):
     assert sess_after["message_count"] == sess_msg_count_before
 
     db.close()
-
-
-def test_scenario_18_existing_tests_suite_pass():
-    """시나리오 18: 기존 시험 전체 통과 (709건 기준선 + 신규 테스트 17건 = 726건)."""
-    assert True

@@ -9,9 +9,6 @@ import pytest
 
 from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.file_tools import (
-    PATCH_SCHEMA,
-    READ_FILE_SCHEMA,
-    WRITE_FILE_SCHEMA,
     patch_tool,
     read_file_tool,
     write_file_tool,
@@ -687,7 +684,6 @@ def test_050_scenario_09_crlf_exact_matching(patch_test_env):
 
 def test_050_scenario_10_permission_preservation(patch_test_env):
     """시나리오 10: 권한 0o755인 exec.sh(old\\n), old -> new => success true, 권한 여전히 0o755."""
-    import stat
     w, _, _ = patch_test_env
     exec_sh = w / "exec.sh"
     exec_sh.write_text("old\n", encoding="utf-8")

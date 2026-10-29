@@ -22,7 +22,6 @@ from hermes_core.agent.prompt_builder import (
     build_system_prompt,
 )
 from hermes_core.session_db import SessionDB
-from hermes_core.tools.memory_tool import MemoryStore
 
 
 @pytest.fixture(autouse=True)

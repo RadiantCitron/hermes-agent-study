@@ -1159,6 +1159,8 @@ def test_scenario_22_no_false_positive_refusal_notice(
     assert CLI_CHECKPOINT_REFUSED_NOTICE not in captured.out
 
     # 22b: .env 쓰기 (도구 자체의 path_guard 거부)
+    ScriptableClient.created_instances.clear()
+    ScriptableClient.responses_by_instance.clear()
     ScriptableClient.responses_by_instance[0] = [
         make_write_file_response("c2", ".env", "SECRET=1"),
         MockLLMResponse(content="Attempted .env."),
@@ -1171,6 +1173,13 @@ def test_scenario_22_no_false_positive_refusal_notice(
     assert CLI_CHECKPOINT_REFUSED_NOTICE not in captured2.out
     ws = get_default_workspace()
     assert not (ws / ".env").exists()
+
+    # 도구 거부 결과가 원장(도구 메시지)에 남음 검증 (대본이 실제 실행됨을 확인)
+    client2 = ScriptableClient.created_instances[0]
+    tool_msgs = [m for m in client2.call_history[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert "protected file or folder" in tool_msgs[0]["content"]
+    assert "false" in tool_msgs[0]["content"].lower()
 
 
 def test_scenario_rollback_prompt_passes_discard_typeahead(

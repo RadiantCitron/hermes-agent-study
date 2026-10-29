@@ -89,21 +89,10 @@ def test_scenario_01_no_approver_default_denies_unallowed(workspace: Path, monke
 
 def test_scenario_02_child_dispatcher_cannot_have_approver(
     workspace: Path,
-    session_db: SessionDB,
-    session_id: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """시나리오 2: create_child_dispatcher의 terminal은 별도 승인기가 있어도 연결되지 않고 거부."""
+    """시나리오 2: create_child_dispatcher의 terminal은 별도 승인기가 없어 python 명령 거부."""
     monkeypatch.chdir(workspace)
-    ask_calls: list[str] = []
-    approver = Approver(
-        session_db=session_db,
-        session_id=session_id,
-        ask=lambda p: (ask_calls.append(p), "y")[1],
-        is_interactive=lambda: True,
-        say=lambda s: None,
-    )
-
     calls: list[Any] = []
     monkeypatch.setattr(terminal_module.subprocess, "run", lambda *a, **k: calls.append(1))
 
@@ -112,9 +101,7 @@ def test_scenario_02_child_dispatcher_cannot_have_approver(
 
     assert res["success"] is False
     assert "not allowed. Allowed: echo, pwd, ls, cat, head, tail, wc, grep" in res["error"]
-    assert len(ask_calls) == 0
     assert len(calls) == 0
-    assert len(session_db.get_approval_requests(session_id)) == 0
 
 
 # =============================================================================

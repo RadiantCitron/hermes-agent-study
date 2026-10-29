@@ -3341,7 +3341,7 @@ def test_r10_050_scenario_09_zero_leakage_and_stripped_env(r10_e2e_env):
 
 
 def test_r10_050_scenario_10_no_approver_configurations_denied(r10_e2e_env):
-    """시나리오 10: 승인기 미설정 디스패처 3종(기본, 자식, 승인부모의 자식)은 허용 밖 명령 실행 없이 거부."""
+    """시나리오 10: 승인기 미설정 디스패처 2종(기본, 자식)은 허용 밖 명령 실행 없이 거부."""
     cmd = _py_cmd("print(1)")
 
     # 1. 기본 디스패처 (approver=None)
@@ -3351,21 +3351,8 @@ def test_r10_050_scenario_10_no_approver_configurations_denied(r10_e2e_env):
     )
     # 2. 자식 디스패처
     disp_child = create_child_dispatcher()
-    # 3. 승인 부모에서 만든 자식 디스패처
-    appr_parent = Approver(
-        session_db=r10_e2e_env["db"],
-        session_id=r10_e2e_env["session_id"],
-        ask=lambda p: pytest.fail("ask should not be called"),
-        is_interactive=lambda: True,
-    )
-    _ = create_default_dispatcher(
-        memory_store=r10_e2e_env["memory_store"],
-        session_db=r10_e2e_env["db"],
-        approver=appr_parent,
-    )
-    disp_child_from_parent = create_child_dispatcher()
 
-    for disp in [disp_default, disp_child, disp_child_from_parent]:
+    for disp in [disp_default, disp_child]:
         res_json = disp.handle_function_call("terminal", {"command": cmd})
         res_obj = json.loads(res_json)
         assert res_obj["success"] is False

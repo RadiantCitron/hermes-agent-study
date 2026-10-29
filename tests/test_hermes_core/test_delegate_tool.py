@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -569,7 +568,6 @@ def test_scenario_11_factory_failure(base_env):
 
     tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
     payload = json.loads(tool_msg["content"])
-    print("PAYLOAD IN TEST 12:", payload)
     assert payload["success"] is False
     assert "Failed to create child client" in payload["error"]
 
@@ -654,7 +652,6 @@ def test_scenario_13_child_runtime_exception(base_env):
     res = parent.run_conversation("test")
     tool_msg = next(m for m in res["messages"] if m.get("role") == "tool")
     payload = json.loads(tool_msg["content"])
-    print("PAYLOAD IN TEST 12:", payload)
     assert payload["success"] is False
     assert payload["status"] == "failed"
     assert payload["stopped_reason"] == "exception"
