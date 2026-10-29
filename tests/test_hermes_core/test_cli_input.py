@@ -430,3 +430,85 @@ def test_scenario_020_16_import_does_not_load_library() -> None:
 def test_scenario_020_17_dependency_declared() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "prompt_toolkit>=3.0.52,<4" in data["project"]["dependencies"]
+
+
+# =============================================================================
+# 계획 014 S1: 질문 전 미리 입력 폐기 (discard_typeahead)
+# =============================================================================
+
+import termios
+
+from prompt_toolkit.input.typeahead import get_typeahead, store_typeahead
+from prompt_toolkit.key_binding.key_processor import KeyPress
+
+
+class FdStream(FakeStream):
+    """fileno()를 가진 터미널 흉내 가짜 표준 입력."""
+
+    def fileno(self) -> int:
+        return 99
+
+
+class FakePtInput:
+    """typeahead 저장소의 열쇠만 제공하는 가짜 prompt_toolkit 입력."""
+
+    def typeahead_hash(self) -> str:
+        return "fd-plan014-test"
+
+
+def _install_discard_fakes(monkeypatch: pytest.MonkeyPatch, tty: bool, events: list[Any]) -> FakePtInput:
+    """터미널 여부, tcflush 기록, prompt_toolkit 입력 생성, 프롬프트 읽기를 가짜로 바꾼다."""
+    fake_input = FakePtInput()
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: tty)
+    monkeypatch.setattr(sys, "stdin", FdStream(tty))
+    monkeypatch.setattr(termios, "tcflush", lambda fd, queue: events.append(("tcflush", fd, queue)))
+    monkeypatch.setattr("prompt_toolkit.input.create_input", lambda *a, **kw: fake_input)
+
+    def fake_pt(prompt: str, **kwargs: Any) -> str:
+        events.append(("prompt", prompt))
+        return "n"
+
+    monkeypatch.setattr(cli_input, "read_with_prompt_toolkit", fake_pt)
+    monkeypatch.setattr("builtins.input", lambda prompt="": fake_pt(prompt))
+    return fake_input
+
+
+def test_scenario_014_01_discard_on_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #1: 터미널에서 discard_typeahead=True면 프롬프트 전에 tcflush 1회, typeahead 비움."""
+    events: list[Any] = []
+    fake_input = _install_discard_fakes(monkeypatch, tty=True, events=events)
+    store_typeahead(fake_input, [KeyPress("y"), KeyPress("\r")])
+
+    assert read_user_input("Run it? [y/N] ", discard_typeahead=True) == "n"
+
+    assert events == [("tcflush", 99, termios.TCIFLUSH), ("prompt", "Run it? [y/N] ")]
+    assert get_typeahead(fake_input) == []
+
+
+@pytest.mark.parametrize(("tty", "discard"), [(True, False), (False, True), (False, False)])
+def test_scenario_014_02_no_discard_by_default_or_on_pipe(
+    monkeypatch: pytest.MonkeyPatch, tty: bool, discard: bool
+) -> None:
+    """계획 014 #2: 기본값(False)이거나 비터미널(파이프)이면 폐기하지 않는다."""
+    events: list[Any] = []
+    fake_input = _install_discard_fakes(monkeypatch, tty=tty, events=events)
+    store_typeahead(fake_input, [KeyPress("y")])
+    try:
+        read_user_input("Run it? [y/N] ", discard_typeahead=discard)
+        assert [e for e in events if e[0] == "tcflush"] == []
+        assert len(get_typeahead(fake_input)) == 1
+    finally:
+        get_typeahead(fake_input)
+
+
+def test_scenario_014_03_flush_failure_still_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #3: tcflush가 termios.error를 내도 예외 없이 질문을 진행한다."""
+    events: list[Any] = []
+    _install_discard_fakes(monkeypatch, tty=True, events=events)
+
+    def failing_flush(fd: int, queue: int) -> None:
+        raise termios.error(25, "Inappropriate ioctl for device")
+
+    monkeypatch.setattr(termios, "tcflush", failing_flush)
+    assert read_user_input("Run it? [y/N] ", discard_typeahead=True) == "n"
+    assert events == [("prompt", "Run it? [y/N] ")]

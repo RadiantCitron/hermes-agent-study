@@ -527,3 +527,51 @@ def test_scenario_21_display_spoofing_defense_in_pty() -> None:
         assert rows[0]["decision"] == APPROVAL_DECISION_DENIED
     finally:
         session.close()
+
+
+def _run_typeahead_answer_is_discarded(fallback: bool) -> None:
+    """질문이 뜨기 전에 미리 보낸 'y'가 승인으로 쓰이지 않고, 질문은 사람의 새 입력을 기다리는지 검증한다."""
+    argv = _default_py_argv()
+    session = ApprovalPtySession(argv, fallback=fallback)
+    try:
+        session.wait_for("User >")
+
+        # 대화 입력과 승인 답을 한 번에 미리 보낸다 (질문을 보기 전에 친 입력)
+        session.write(b"go\ry\r")
+
+        session.wait_for(APPROVAL_HEADER)
+        session.wait_for(APPROVAL_PROMPT.strip(), from_last_match=True)
+
+        # 미리 보낸 'y'가 쓰였다면 이 사이에 실행이 끝난다. 잠시 기다려도 질문이 그대로 떠 있어야 한다
+        session.read_available(0.5)
+        rows_during = session.get_approval_rows()
+        assert len(rows_during) == 1
+        assert rows_during[0]["decision"] == APPROVAL_DECISION_PENDING
+        assert not (session.workspace / "marker.txt").exists()
+
+        # 질문을 본 뒤의 빈 입력은 fail-closed 거절
+        session.write(b"\r")
+        session.wait_for("[Scripted] tool_success=False")
+        session.wait_for("User >", from_last_match=True)
+
+        session.write(b"exit\r")
+        session.wait_for("Session saved and closed. Goodbye!")
+        exit_code = session.proc.wait(timeout=5.0)
+
+        assert exit_code == 0
+        assert not (session.workspace / "marker.txt").exists()
+        rows = session.get_approval_rows()
+        assert len(rows) == 1
+        assert rows[0]["decision"] == APPROVAL_DECISION_DENIED
+    finally:
+        session.close()
+
+
+def test_scenario_22_typeahead_answer_discarded() -> None:
+    """시나리오 22 (계획 014 #4): prompt_toolkit 경로에서 질문 전에 미리 친 'y'는 버려지고 자동 승인되지 않음."""
+    _run_typeahead_answer_is_discarded(fallback=False)
+
+
+def test_scenario_23_typeahead_answer_discarded_fallback() -> None:
+    """시나리오 23 (계획 014 #5): 폴백(input()) 경로에서도 질문 전에 미리 친 'y'는 버려지고 자동 승인되지 않음."""
+    _run_typeahead_answer_is_discarded(fallback=True)

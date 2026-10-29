@@ -128,7 +128,7 @@ class ScriptableInput:
         self.capsys = capsys
         self.output_before_rollback_prompt: list[str] = []
 
-    def __call__(self, prompt: str = CLI_USER_PROMPT) -> str:
+    def __call__(self, prompt: str = CLI_USER_PROMPT, **kwargs: Any) -> str:
         self.recorded_prompts.append(prompt)
         if prompt == CLI_ROLLBACK_PROMPT:
             if self.capsys:

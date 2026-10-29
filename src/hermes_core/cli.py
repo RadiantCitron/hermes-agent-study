@@ -114,7 +114,7 @@ def _handle_rollback(tokens: list[str], checkpointer: Checkpointer | None) -> No
             print(CLI_ROLLBACK_PENDING_WARNING)
 
         try:
-            answer = read_user_input(CLI_ROLLBACK_PROMPT)
+            answer = read_user_input(CLI_ROLLBACK_PROMPT, discard_typeahead=True)
         except (EOFError, KeyboardInterrupt):
             print(CLI_ROLLBACK_CANCELLED_NOTICE)
             return
@@ -251,7 +251,7 @@ def main() -> None:
         Approver(
             session_db=session_db,
             session_id=session_id,
-            ask=lambda p: read_user_input(p),
+            ask=lambda p: read_user_input(p, discard_typeahead=True),
             is_interactive=is_interactive_terminal,
         )
         if approval_enabled

@@ -82,6 +82,35 @@ def read_with_prompt_toolkit(prompt: str, *, input: Any = None, output: Any = No
     return session.prompt()
 
 
+def discard_pending_input() -> None:
+    """질문을 띄우기 전에 터미널에 미리 들어와 있던 입력을 모두 버린다.
+
+    커널 입력 버퍼와 prompt_toolkit이 다음 프롬프트로 넘기려고 보관한 키(typeahead)를 함께 비운다.
+    터미널이 아니면(파이프로 넣은 답은 의도된 입력이므로) 아무것도 하지 않는다.
+    버리기에 실패해도 예외를 내지 않는다 — 질문은 여전히 사람의 Enter를 기다린다.
+    """
+    if not is_interactive_terminal():
+        return
+    try:
+        import termios
+    except ImportError:
+        pass
+    else:
+        try:
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (termios.error, OSError, ValueError, AttributeError):
+            pass
+    try:
+        from prompt_toolkit.input import create_input
+        from prompt_toolkit.input.typeahead import clear_typeahead
+    except ImportError:
+        return
+    try:
+        clear_typeahead(create_input())
+    except Exception:
+        pass
+
+
 def _read_once(prompt: str) -> str:
     """입력 경로를 골라 한 번 읽는다."""
     global _missing_notice_shown
@@ -95,7 +124,7 @@ def _read_once(prompt: str) -> str:
     return input(prompt)
 
 
-def read_user_input(prompt: str = CLI_USER_PROMPT) -> str:
+def read_user_input(prompt: str = CLI_USER_PROMPT, *, discard_typeahead: bool = False) -> str:
     """사용자로부터 입력을 읽어 반환한다.
 
     입력의 공백이나 개행 문자를 임의로 가공(strip 등)하지 않고 그대로 돌려준다.
@@ -105,6 +134,8 @@ def read_user_input(prompt: str = CLI_USER_PROMPT) -> str:
 
     Args:
         prompt: 사용자 입력 프롬프트 문자열 (기본값: CLI_USER_PROMPT).
+        discard_typeahead: True면 읽기 전에 미리 들어와 있던 입력을 버린다(discard_pending_input).
+            승인처럼 질문을 보기 전에 친 키가 답이 되면 안 되는 질문에 쓴다.
 
     Returns:
         사용자가 입력한 원본 문자열.
@@ -113,6 +144,8 @@ def read_user_input(prompt: str = CLI_USER_PROMPT) -> str:
         EOFError: 입력 스트림 종료(EOF) 시 또는 연속 디코드 실패 상한 도달 시.
         KeyboardInterrupt: 사용자 인터럽트(Ctrl+C) 발생 시.
     """
+    if discard_typeahead:
+        discard_pending_input()
     consecutive_errors = 0
     while True:
         try:

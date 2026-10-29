@@ -92,7 +92,7 @@ class FakeInput:
         self.approval_answers = list(approval_answers or [])
         self.recorded_prompts: list[str] = []
 
-    def __call__(self, prompt: str = CLI_USER_PROMPT) -> str:
+    def __call__(self, prompt: str = CLI_USER_PROMPT, **kwargs: Any) -> str:
         self.recorded_prompts.append(prompt)
         if prompt == APPROVAL_PROMPT:
             if not self.approval_answers:
