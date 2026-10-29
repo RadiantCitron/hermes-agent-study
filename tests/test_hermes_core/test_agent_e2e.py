@@ -3466,3 +3466,761 @@ def test_r10_050_scenario_12_schema_invariance_and_approver_arg_rejection(r10_e2
 
 
 
+
+
+# ==============================================================================
+# 로드맵 11: 구현지시서 050 통합 E2E 검증 시나리오 (시나리오 1 ~ 11)
+# ==============================================================================
+
+import hashlib
+import sqlite3
+from hermes_core.tools.checkpoint import Checkpointer
+
+
+def _r11_snap(ws: Path) -> dict[str, tuple[str, int]]:
+    """작업 폴더 안 모든 파일의 {상대경로: (바이트 해시, 권한)} 스냅샷."""
+    res = {}
+    for p in ws.rglob("*"):
+        if p.is_file() or p.is_symlink():
+            rel = str(p.relative_to(ws))
+            try:
+                data = p.read_bytes()
+                sha = hashlib.sha256(data).hexdigest()
+            except Exception:
+                sha = ""
+            mode = p.stat().st_mode & 0o777
+            res[rel] = (sha, mode)
+    return res
+
+
+@pytest.fixture
+def r11_e2e_env(tmp_path, monkeypatch):
+    home = tmp_path / "hermes_home"
+    home.mkdir()
+    ws = home / "workspace"
+    ws.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.chdir(ws)
+
+    fake_key = "FAKE-NOT-A-REAL-KEY-0004"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    db_path = home / "state.db"
+    db = SessionDB(db_path)
+    session_id = "r11_e2e_session"
+
+    def build(
+        checkpointer=True,
+        approver=None,
+        bytes_limit=None,
+        custom_session_id=None,
+        mock_client=None,
+    ):
+        target_sid = custom_session_id or session_id
+        cp = None
+        if checkpointer:
+            kw = {}
+            if bytes_limit is not None:
+                kw["bytes_limit"] = bytes_limit
+            cp = Checkpointer(db=db, session_id=target_sid, workspace=ws, **kw)
+
+        dispatcher = create_default_dispatcher(
+            session_db=db,
+            checkpointer=cp,
+            approver=approver,
+        )
+        client = mock_client or MockLLMClient()
+        agent = HermesAgent(
+            session_id=target_sid,
+            session_db=db,
+            dispatcher=dispatcher,
+            llm_client=client,
+            skip_memory=True,
+            skip_context_files=True,
+            quiet_mode=True,
+        )
+        return {
+            "agent": agent,
+            "checkpointer": cp,
+            "client": client,
+            "dispatcher": dispatcher,
+            "session_id": target_sid,
+            "db": db,
+            "workspace": ws,
+        }
+
+    return {
+        "home": home,
+        "workspace": ws,
+        "db": db,
+        "session_id": session_id,
+        "build": build,
+    }
+
+
+def test_r11_050_scenario_01_single_turn_full_flow(r11_e2e_env):
+    """시나리오 1: 한 턴 전체 흐름 (write_file + patch -> 복원 -> messages 불변)."""
+    ws = r11_e2e_env["workspace"]
+    (ws / "old.txt").write_text("before", encoding="utf-8")
+
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    cp.begin_turn()
+
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "call_s1_w",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "new.txt", "content": "hello"}),
+                },
+            },
+            {
+                "id": "call_s1_p",
+                "function": {
+                    "name": "patch",
+                    "arguments": json.dumps({"path": "old.txt", "old_string": "before", "new_string": "after"}),
+                },
+            },
+        ],
+    )
+    client.queue_response(content="done")
+
+    res = agent.run_conversation("go")
+    assert res["stopped_reason"] == "completed"
+
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert len(rows) == 2
+    assert all(r["status"] == "applied" and r["turn_index"] == 1 for r in rows)
+
+    # messages 순서 및 tool_call_id 검증 (system 메시지 제외)
+    msgs = res["messages"]
+    user_msgs = [m for m in msgs if m["role"] != "system"]
+    assert user_msgs[0]["role"] == "user"
+    assert user_msgs[1]["role"] == "assistant"
+    assert len(user_msgs[1]["tool_calls"]) == 2
+    assert user_msgs[2]["role"] == "tool" and user_msgs[2]["tool_call_id"] == "call_s1_w"
+    assert user_msgs[3]["role"] == "tool" and user_msgs[3]["tool_call_id"] == "call_s1_p"
+    assert user_msgs[4]["role"] == "assistant" and user_msgs[4]["content"] == "done"
+
+    # 되돌림 전 messages 개수 기록
+    stored_msgs_before = agent.session_db.get_messages(bundle["session_id"])
+
+    # 되돌리기 계획
+    plan = cp.plan_rollback()
+    assert plan.turn_index == 1
+    assert [item.rel_path for item in plan.items] == ["old.txt", "new.txt"]
+
+    # 되돌리기 실행
+    rollback_res = cp.execute_rollback(plan)
+    assert rollback_res.rolled_back_count == 2
+    assert rollback_res.skipped_count == 0
+    assert not (ws / "new.txt").exists()
+    assert (ws / "old.txt").read_text(encoding="utf-8") == "before"
+
+    # 행 상태 검증
+    rows_after = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert all(r["status"] == "rolled_back" for r in rows_after)
+
+    # 되돌림 전후 messages 개수 불변 검증
+    stored_msgs_after = agent.session_db.get_messages(bundle["session_id"])
+    assert len(stored_msgs_after) == len(stored_msgs_before)
+
+
+def test_r11_050_scenario_02_turn_stack(r11_e2e_env):
+    """시나리오 2: 턴 단위 스택 (턴 1 -> 턴 2 -> 3회 되돌림)."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    # 턴 1: write_file a.txt = v1
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c1",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "a.txt", "content": "v1"})},
+        }],
+    )
+    client.queue_response(content="turn 1 done")
+    res1 = agent.run_conversation("turn 1")
+    assert res1["stopped_reason"] == "completed"
+
+    # 턴 2: patch a.txt v1->v2, write_file b.txt = vb
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c2_1",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "a.txt", "old_string": "v1", "new_string": "v2"})},
+            },
+            {
+                "id": "c2_2",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "b.txt", "content": "vb"})},
+            },
+        ],
+    )
+    client.queue_response(content="turn 2 done")
+    res2 = agent.run_conversation("turn 2")
+    assert res2["stopped_reason"] == "completed"
+
+    # 되돌림 1회: 턴 2 대상
+    plan1 = cp.plan_rollback()
+    assert plan1.turn_index == 2
+    r_res1 = cp.execute_rollback(plan1)
+    assert r_res1.rolled_back_count == 2
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "v1"
+    assert not (ws / "b.txt").exists()
+
+    # 되돌림 2회: 턴 1 대상
+    plan2 = cp.plan_rollback()
+    assert plan2.turn_index == 1
+    r_res2 = cp.execute_rollback(plan2)
+    assert r_res2.rolled_back_count == 1
+    assert not (ws / "a.txt").exists()
+
+    # 되돌림 3회: 빈 계획
+    plan3 = cp.plan_rollback()
+    assert len(plan3.items) == 0
+
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert len(rows) == 3
+    assert all(r["status"] == "rolled_back" for r in rows)
+
+
+def test_r11_050_scenario_03_same_file_triple_edit(r11_e2e_env):
+    """시나리오 3: 같은 파일 한 턴 3번 수정 (write -> patch -> patch)."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c3_1",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "a.txt", "content": "one"})},
+            },
+            {
+                "id": "c3_2",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "a.txt", "old_string": "one", "new_string": "two"})},
+            },
+            {
+                "id": "c3_3",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "a.txt", "old_string": "two", "new_string": "three"})},
+            },
+        ],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("triple edit")
+
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert len(rows) == 3
+    assert all(r["status"] == "applied" for r in rows)
+
+    plan = cp.plan_rollback()
+    res = cp.execute_rollback(plan)
+    assert res.skipped_count == 0
+    assert res.rolled_back_count == 3
+    assert not (ws / "a.txt").exists()
+
+
+def test_r11_050_scenario_04_conflict_and_deletion(r11_e2e_env):
+    """시나리오 4: 사람의 수정으로 인한 충돌 및 파일 삭제 시 건너뜀 검증."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    # 첫 실행: human edit 충돌
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c4_1",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "a.txt", "content": "one"})},
+            },
+            {
+                "id": "c4_2",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "b.txt", "content": "two"})},
+            },
+        ],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("turn 1")
+
+    (ws / "a.txt").write_text("human edit", encoding="utf-8")
+
+    plan1 = cp.plan_rollback()
+    res1 = cp.execute_rollback(plan1)
+    assert res1.rolled_back_count == 1
+    assert res1.skipped_count == 1
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "human edit"
+    assert not (ws / "b.txt").exists()
+
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    a_row = [r for r in rows if r["rel_path"] == "a.txt"][0]
+    b_row = [r for r in rows if r["rel_path"] == "b.txt"][0]
+    assert a_row["status"] == "skipped" and "충돌" in a_row["reason"]
+    assert b_row["status"] == "rolled_back"
+
+    # 둘째 실행: human deletion 충돌
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c4_3",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "c.txt", "content": "three"})},
+            },
+            {
+                "id": "c4_4",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "d.txt", "content": "four"})},
+            },
+        ],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("turn 2")
+
+    (ws / "c.txt").unlink()
+
+    plan2 = cp.plan_rollback()
+    res2 = cp.execute_rollback(plan2)
+    assert res2.rolled_back_count == 1
+    assert res2.skipped_count == 1
+    assert not (ws / "d.txt").exists()
+
+    rows2 = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    c_row = [r for r in rows2 if r["rel_path"] == "c.txt"][0]
+    assert c_row["status"] == "skipped" and "파일" in c_row["reason"]
+
+
+def test_r11_050_scenario_05_byte_fidelity_and_permissions(r11_e2e_env):
+    """시나리오 5: 바이트 충실도(CRLF, UTF-8, no-newline) 및 파일 권한 보존 검증."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    (ws / "crlf.txt").write_bytes(b"line1\r\nline2\r\n")
+    (ws / "ko.txt").write_text("한글 텍스트 원본", encoding="utf-8")
+    (ws / "nonl.txt").write_bytes(b"no-trailing-newline")
+    secret_path = ws / "secret_like.txt"
+    secret_path.write_text("classified info", encoding="utf-8")
+    secret_path.chmod(0o600)
+
+    initial_snap = _r11_snap(ws)
+
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c5_1",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "crlf.txt", "old_string": "line1\r\n", "new_string": "mod1\r\n"})},
+            },
+            {
+                "id": "c5_2",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "ko.txt", "old_string": "원본", "new_string": "수정본"})},
+            },
+            {
+                "id": "c5_3",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "nonl.txt", "old_string": "no-trailing", "new_string": "modified"})},
+            },
+            {
+                "id": "c5_4",
+                "function": {"name": "patch", "arguments": json.dumps({"path": "secret_like.txt", "old_string": "classified", "new_string": "public"})},
+            },
+            {
+                "id": "c5_5",
+                "function": {"name": "write_file", "arguments": json.dumps({"path": "new_created.txt", "content": "brand new"})},
+            },
+        ],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("byte fidelity")
+
+    assert (ws / "new_created.txt").exists()
+
+    plan = cp.plan_rollback()
+    res = cp.execute_rollback(plan)
+    assert res.rolled_back_count == 5
+    assert not (ws / "new_created.txt").exists()
+
+    after_snap = _r11_snap(ws)
+    assert after_snap == initial_snap
+
+
+def test_r11_050_scenario_06_record_failure_fails_closed(r11_e2e_env, monkeypatch):
+    """시나리오 6: DB 선기록 실패 시 도구를 실행하지 않고 fail-closed 처리됨을 검증."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    # 1. 선기록 실패 유발
+    orig_record = SessionDB.record_file_checkpoint
+
+    def locked_record(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SessionDB, "record_file_checkpoint", locked_record)
+
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c6_fail",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "n1.txt", "content": "fail content"})},
+        }],
+    )
+    client.queue_response(content="done after error")
+
+    res = agent.run_conversation("try write")
+    assert res["stopped_reason"] == "completed"
+    assert not (ws / "n1.txt").exists()
+
+    # 원장 행 0
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert len(rows) == 0
+
+    # 모델이 받은 tool 결과에 힌트 포함
+    tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+    assert "The file was not modified." in tool_msg["content"]
+    assert "do not repeat the same write" in tool_msg["content"]
+
+    # 2. 잠금 해제 후 다음 턴 성공 검증
+    monkeypatch.setattr(SessionDB, "record_file_checkpoint", orig_record)
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c6_ok",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "n1.txt", "content": "ok content"})},
+        }],
+    )
+    client.queue_response(content="done ok")
+
+    res2 = agent.run_conversation("try write again")
+    assert res2["stopped_reason"] == "completed"
+    assert (ws / "n1.txt").read_text(encoding="utf-8") == "ok content"
+
+    rows2 = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert len(rows2) == 1
+    assert rows2[0]["status"] == "applied"
+
+
+def test_r11_050_scenario_07_coexistence_with_terminal_approval(r11_e2e_env):
+    """시나리오 7: 터미널 승인 도구와 공존 시 R3 경고 카운트 및 터미널 변경 보존 검증."""
+    ws = r11_e2e_env["workspace"]
+    approver = Approver(
+        session_id=r11_e2e_env["session_id"],
+        ask=lambda p: "y",
+        is_interactive=lambda: True,
+        say=lambda msg: None,
+        session_db=r11_e2e_env["db"],
+    )
+
+    bundle = r11_e2e_env["build"](approver=approver)
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    # A: 터미널 승인 + write_file 공존
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "c7_term",
+                "function": {
+                    "name": "terminal",
+                    "arguments": json.dumps({"command": _py_cmd("open('marker.txt','w').write('x')")}),
+                },
+            },
+            {
+                "id": "c7_write",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "a.txt", "content": "one"}),
+                },
+            },
+        ],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("term and write")
+
+    assert (ws / "marker.txt").exists()
+    assert (ws / "a.txt").exists()
+
+    plan = cp.plan_rollback()
+    assert plan.terminal_approvals_count == 1
+    assert plan.has_warnings is True
+
+    res = cp.execute_rollback(plan)
+    assert res.rolled_back_count == 1
+    assert not (ws / "a.txt").exists()
+    # 터미널이 만든 marker.txt는 롤백 대상 밖이므로 그대로 유지
+    assert (ws / "marker.txt").exists()
+
+    # B: 대조군 (터미널 승인 없이 write_file만 실행)
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c7_only_w",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "pure.txt", "content": "pure"})},
+        }],
+    )
+    client.queue_response(content="done pure")
+    agent.run_conversation("only write")
+
+    plan_pure = cp.plan_rollback()
+    assert plan_pure.terminal_approvals_count == 0
+    assert plan_pure.has_warnings is False
+
+
+def test_r11_050_scenario_08_coexistence_with_delegated_subagent(r11_e2e_env):
+    """시나리오 8: 위임 자식 세션과 공존 시 R3 경고 및 자식 변경 보존 검증."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    # 자식 모델 모킹
+    child_client = MockLLMClient()
+    child_client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c_call_1",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps({"path": "child.txt", "content": "child data"}),
+            },
+        }],
+    )
+    child_client.queue_response(content="child finished")
+
+    register_delegate_tool(
+        agent.dispatcher,
+        session_db=agent.session_db,
+        parent_session_id=agent.session_id,
+        llm_client_factory=lambda: child_client,
+    )
+
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[
+            {
+                "id": "p_del",
+                "function": {
+                    "name": "delegate_task",
+                    "arguments": json.dumps({"goal": "write child.txt", "context": "ctx"}),
+                },
+            },
+            {
+                "id": "p_write",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "parent.txt", "content": "parent data"}),
+                },
+            },
+        ],
+    )
+    client.queue_response(content="parent finished")
+    agent.run_conversation("delegate and write")
+
+    assert (ws / "child.txt").exists()
+    assert (ws / "parent.txt").exists()
+
+    # 원장 전체에 부모 세션의 parent.txt 행만 존재
+    cursor = agent.session_db._conn.execute("SELECT session_id, rel_path FROM file_checkpoints")
+    all_rows = cursor.fetchall()
+    assert len(all_rows) == 1
+    assert all_rows[0][0] == agent.session_id
+    assert all_rows[0][1] == "parent.txt"
+
+    plan = cp.plan_rollback()
+    assert plan.subagent_count == 1
+    assert plan.has_warnings is True
+
+    res = cp.execute_rollback(plan)
+    assert res.rolled_back_count == 1
+    assert not (ws / "parent.txt").exists()
+    assert (ws / "child.txt").exists()
+
+
+def test_r11_050_scenario_09_path_revalidation(r11_e2e_env, tmp_path):
+    """시나리오 9: 경로 재판정(R1, 가정 E) - 작업 폴더 밖을 가리키는 심볼릭 링크 건너뜀 검증."""
+    ws = r11_e2e_env["workspace"]
+    bundle = r11_e2e_env["build"]()
+    agent = bundle["agent"]
+    cp = bundle["checkpointer"]
+    client = bundle["client"]
+
+    cp.begin_turn()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "c9_1",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "sub/f.txt", "content": "x"})},
+        }],
+    )
+    client.queue_response(content="done")
+    agent.run_conversation("write to sub/f.txt")
+
+    assert (ws / "sub" / "f.txt").exists()
+
+    # sub 폴더를 삭제하고 외부 폴더를 가리키는 심볼릭 링크로 교체
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "f.txt").write_text("x", encoding="utf-8")
+
+    import shutil
+    shutil.rmtree(ws / "sub")
+    (ws / "sub").symlink_to(outside_dir, target_is_directory=True)
+
+    plan = cp.plan_rollback()
+    res = cp.execute_rollback(plan)
+
+    # 밖 폴더의 f.txt는 손대지 않음
+    assert (outside_dir / "f.txt").read_text(encoding="utf-8") == "x"
+    assert res.skipped_count == 1
+    assert res.rolled_back_count == 0
+
+    rows = agent.session_db.get_file_checkpoints(bundle["session_id"])
+    assert rows[0]["status"] == "skipped"
+    assert "경로" in rows[0]["reason"] or "작업" in rows[0]["reason"]
+
+
+def test_r11_050_scenario_10_twin_comparison_with_checkpoints_disabled(r11_e2e_env, tmp_path):
+    """시나리오 10: 끈 구성과의 쌍둥이 비교 (가정 A) - checkpointer 유무에 따른 동일 동작 검증."""
+    ws_a = r11_e2e_env["workspace"]
+
+    ws_b = tmp_path / "workspace_b"
+    ws_b.mkdir()
+
+    # ⓐ checkpointer 포함 구성
+    bundle_a = r11_e2e_env["build"](checkpointer=True)
+    agent_a = bundle_a["agent"]
+    cp_a = bundle_a["checkpointer"]
+    client_a = bundle_a["client"]
+
+    # ⓑ checkpointer 미포함 구성
+    db_b = SessionDB(tmp_path / "state_b.db")
+    sid_b = "model_b"
+    disp_b = create_default_dispatcher(session_db=db_b, checkpointer=None)
+    client_b = MockLLMClient()
+    agent_b = HermesAgent(
+        session_id=sid_b,
+        session_db=db_b,
+        dispatcher=disp_b,
+        llm_client=client_b,
+        skip_memory=True,
+        skip_context_files=True,
+        quiet_mode=True,
+    )
+
+    tool_calls_spec = [
+        {
+            "id": "c10_1",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "file1.txt", "content": "content 1"})},
+        },
+        {
+            "id": "c10_2",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "file2.txt", "content": "content 2"})},
+        },
+        {
+            "id": "c10_3",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": ".git/forbidden.txt", "content": "bad"})},
+        },
+    ]
+
+    cp_a.begin_turn()
+    client_a.queue_response(content=None, tool_calls=tool_calls_spec)
+    client_a.queue_response(content="done")
+    res_a = agent_a.run_conversation("run twin")
+
+    # B 실행을 위해 chdir 전환
+    import os
+    orig_cwd = os.getcwd()
+    os.chdir(ws_b)
+    try:
+        client_b.queue_response(content=None, tool_calls=tool_calls_spec)
+        client_b.queue_response(content="done")
+        res_b = agent_b.run_conversation("run twin")
+    finally:
+        os.chdir(orig_cwd)
+
+    # 두 작업 폴더 snap 동일
+    snap_a = _r11_snap(ws_a)
+    snap_b = _r11_snap(ws_b)
+    assert snap_a == snap_b
+
+    # 모델이 받은 도구 결과 동일
+    tool_msgs_a = [m["content"] for m in res_a["messages"] if m["role"] == "tool"]
+    tool_msgs_b = [m["content"] for m in res_b["messages"] if m["role"] == "tool"]
+    assert tool_msgs_a == tool_msgs_b
+
+    # 원장 행 차이: ⓐ는 2개 applied, ⓑ는 0개
+    rows_a = agent_a.session_db.get_file_checkpoints(bundle_a["session_id"])
+    rows_b = db_b.get_file_checkpoints(sid_b)
+    assert len(rows_a) == 2
+    assert len(rows_b) == 0
+
+
+def test_r11_050_scenario_11_session_isolation(r11_e2e_env):
+    """시나리오 11: 같은 DB 내 세션 S1, S2 격리 검증."""
+    ws = r11_e2e_env["workspace"]
+    db = r11_e2e_env["db"]
+
+    s1_id = db.create_session("model_s1")
+    s2_id = db.create_session("model_s2")
+
+    cp1 = Checkpointer(db=db, session_id=s1_id, workspace=ws)
+    cp2 = Checkpointer(db=db, session_id=s2_id, workspace=ws)
+
+    # S1에서 파일 1 쓰기
+    cp1.begin_turn()
+    cid1 = cp1.record_before("write_file", "s1_file.txt")
+    (ws / "s1_file.txt").write_text("s1", encoding="utf-8")
+    cp1.finalize(cid1, "write_file", "s1_file.txt", result_success=True)
+
+    # S2에서 파일 2 쓰기
+    cp2.begin_turn()
+    cid2 = cp2.record_before("write_file", "s2_file.txt")
+    (ws / "s2_file.txt").write_text("s2", encoding="utf-8")
+    cp2.finalize(cid2, "write_file", "s2_file.txt", result_success=True)
+
+    plan1 = cp1.plan_rollback()
+    plan2 = cp2.plan_rollback()
+
+    assert [i.rel_path for i in plan1.items] == ["s1_file.txt"]
+    assert [i.rel_path for i in plan2.items] == ["s2_file.txt"]
+
+    # S1 되돌리기
+    cp1.execute_rollback(plan1)
+    assert not (ws / "s1_file.txt").exists()
+    assert (ws / "s2_file.txt").exists()
+
+    # S2 행은 여전히 applied
+    s2_rows = db.get_file_checkpoints(s2_id)
+    assert len(s2_rows) == 1
+    assert s2_rows[0]["status"] == "applied"

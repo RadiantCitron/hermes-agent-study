@@ -109,6 +109,7 @@ class Checkpointer:
 
         self.turn_index = 0
         self.turn_started_at = 0.0
+        self._turn_start_times: dict[int, float] = {}
         self._session_before_bytes = 0
 
     def begin_turn(self, turn_index: Optional[int] = None) -> int:
@@ -121,6 +122,7 @@ class Checkpointer:
             self.turn_index += 1
 
         self.turn_started_at = time.time()
+        self._turn_start_times[self.turn_index] = self.turn_started_at
         return self.turn_index
 
     def record_before(self, tool_name: str, path: str) -> Optional[int]:
@@ -387,6 +389,18 @@ class Checkpointer:
                 )
             )
 
+        start_time: Optional[float] = None
+        end_time: Optional[float] = None
+        if target_turn in self._turn_start_times:
+            start_time = self._turn_start_times[target_turn]
+            later_turns = [t for t in self._turn_start_times if t > target_turn]
+            if later_turns:
+                next_turn = min(later_turns)
+                end_time = self._turn_start_times[next_turn]
+        else:
+            if self.turn_started_at > 0:
+                start_time = self.turn_started_at
+
         terminal_approvals_count = 0
         try:
             apprs = self.db.get_approval_requests(self.session_id)
@@ -395,8 +409,12 @@ class Checkpointer:
                 for a in apprs
                 if a.get("decision") == "approved"
                 and (
-                    self.turn_started_at == 0
-                    or (a.get("decided_at") or 0) >= self.turn_started_at
+                    start_time is None
+                    or (a.get("decided_at") or 0) >= start_time
+                )
+                and (
+                    end_time is None
+                    or (a.get("decided_at") or 0) < end_time
                 )
             )
         except Exception:
@@ -404,10 +422,21 @@ class Checkpointer:
 
         subagent_count = 0
         try:
-            cursor = self.db._conn.execute(
-                "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ?",
-                (self.session_id, self.turn_started_at),
-            )
+            if start_time is None:
+                cursor = self.db._conn.execute(
+                    "SELECT count(*) FROM sessions WHERE parent_session_id = ?",
+                    (self.session_id,),
+                )
+            elif end_time is None:
+                cursor = self.db._conn.execute(
+                    "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ?",
+                    (self.session_id, start_time),
+                )
+            else:
+                cursor = self.db._conn.execute(
+                    "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ? AND started_at < ?",
+                    (self.session_id, start_time, end_time),
+                )
             row = cursor.fetchone()
             if row:
                 subagent_count = row[0]
