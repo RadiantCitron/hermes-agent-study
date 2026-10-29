@@ -2797,6 +2797,671 @@ def test_r08_040_scenario_08_no_skills_dir_and_readonly_immutability(r05_e2e_env
     db.close()
 
 
+# ==============================================================================
+# 로드맵 10: 구현지시서 050 통합 E2E 검증 시나리오 (시나리오 1 ~ 12)
+# ==============================================================================
+
+import shlex
+import sys
+from hermes_core.constants import (
+    APPROVAL_AUTO_DENIED_MESSAGE,
+    APPROVAL_DECISION_APPROVED,
+    APPROVAL_DECISION_AUTO_DENIED,
+    APPROVAL_DECISION_CANCELLED,
+    APPROVAL_DECISION_DENIED,
+    APPROVAL_DECISION_LIMIT_EXCEEDED,
+    APPROVAL_DECISION_PENDING,
+    APPROVAL_DENIED_MESSAGE,
+    APPROVAL_HEADER,
+    APPROVAL_LIMIT_MESSAGE,
+    APPROVAL_PROMPT,
+    APPROVAL_REQUEST_LIMIT,
+    TERMINAL_STRIPPED_ENV_NAMES,
+)
+from hermes_core.tools.approval import Approver, format_command_for_display
+from hermes_core.tools.dispatcher import create_child_dispatcher, create_default_dispatcher
+
+
+def _py_cmd(code: str) -> str:
+    return shlex.join([sys.executable, "-c", code])
+
+
+@pytest.fixture
+def r10_e2e_env(tmp_path, monkeypatch):
+    home = tmp_path / "hermes_home"
+    home.mkdir()
+    ws = home / "workspace"
+    ws.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.chdir(ws)
+
+    fake_key = "FAKE-NOT-A-REAL-KEY-0003"
+    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
+
+    db_path = home / "state.db"
+    db = SessionDB(db_path)
+
+    mem_dir = home / "memories"
+    mem_dir.mkdir()
+    memory_store = MemoryStore(memory_dir=mem_dir)
+
+    session_id = "test_r10_session"
+
+    collected_say = []
+
+    def build(
+        ask=None,
+        is_interactive=lambda: True,
+        say=None,
+        approver=True,
+        mock_client=None,
+        limit=APPROVAL_REQUEST_LIMIT,
+        custom_session_id=None,
+    ):
+        target_session_id = custom_session_id or session_id
+
+        if say is not None:
+            say_fn = say
+        else:
+            say_fn = collected_say.append
+
+        appr = None
+        if approver:
+            appr = Approver(
+                session_db=db,
+                session_id=target_session_id,
+                ask=ask if ask is not None else (lambda p: "y"),
+                is_interactive=is_interactive,
+                say=say_fn,
+                limit=limit,
+            )
+            dispatcher = create_default_dispatcher(
+                memory_store=memory_store,
+                session_db=db,
+                approver=appr,
+            )
+        else:
+            dispatcher = create_default_dispatcher(
+                memory_store=memory_store,
+                session_db=db,
+            )
+
+        client = mock_client if mock_client is not None else MockLLMClient()
+        agent = HermesAgent(
+            session_id=target_session_id,
+            session_db=db,
+            memory_store=memory_store,
+            dispatcher=dispatcher,
+            llm_client=client,
+            quiet_mode=True,
+        )
+        return {
+            "agent": agent,
+            "db": db,
+            "memory_store": memory_store,
+            "dispatcher": dispatcher,
+            "approver": appr,
+            "client": client,
+            "ws": ws,
+            "home": home,
+            "fake_key": fake_key,
+            "session_id": target_session_id,
+            "say_list": collected_say,
+        }
+
+    yield {
+        "home": home,
+        "ws": ws,
+        "db": db,
+        "memory_store": memory_store,
+        "session_id": session_id,
+        "fake_key": fake_key,
+        "build": build,
+        "say_list": collected_say,
+    }
+    db.close()
+
+
+def test_r10_050_scenario_01_approved_execution_flow(r10_e2e_env):
+    """시나리오 1: 허용 밖 명령 승인 시 실행 성공, 원장 approved 기록, tool_call_id 일치."""
+    code = "open('marker.txt', 'w').write('x'); print('ran')"
+    cmd = _py_cmd(code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_1",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="최종 답 완료")
+
+    bundle = r10_e2e_env["build"](ask=lambda p: "y", mock_client=client)
+    agent = bundle["agent"]
+
+    res = agent.run_conversation("실행해라")
+    assert res["stopped_reason"] == "completed"
+
+    # 1. marker.txt 존재
+    marker_file = r10_e2e_env["ws"] / "marker.txt"
+    assert marker_file.exists()
+    assert marker_file.read_text(encoding="utf-8") == "x"
+
+    # 2. 도구 메시지 검증
+    msgs = res["messages"]
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "tool", "assistant"]
+    tool_msg = msgs[3]
+    assert tool_msg["tool_call_id"] == "call_1"
+    tool_res = json.loads(tool_msg["content"])
+    assert tool_res["success"] is True
+    assert tool_res["stdout"] == "ran\n"
+
+    # 3. 원장 검증
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 1
+    assert rows[0]["decision"] == APPROVAL_DECISION_APPROVED
+    assert json.loads(rows[0]["argv_json"]) == [sys.executable, "-c", code]
+
+
+def test_r10_050_scenario_02_pending_ledger_at_ask_moment(r10_e2e_env):
+    """시나리오 2: ask 호출 순간 원장에 pending 행 선기록 및 messages에 tool 메시지 미존재 확인."""
+    code = "open('marker.txt', 'w').write('x'); print('ran')"
+    cmd = _py_cmd(code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_2",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="최종 답")
+
+    ask_moment_checked = []
+
+    def ask_and_check(prompt):
+        rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+        cur_msgs = list(r10_e2e_env["db"].get_messages(r10_e2e_env["session_id"]))
+        has_tool = any(m["role"] == "tool" for m in cur_msgs)
+        ask_moment_checked.append((
+            len(rows),
+            rows[0]["decision"] if rows else None,
+            has_tool,
+        ))
+        return "y"
+
+    bundle = r10_e2e_env["build"](ask=ask_and_check, mock_client=client)
+    res = bundle["agent"].run_conversation("실행해라")
+    assert res["stopped_reason"] == "completed"
+
+    # 질문 순간: pending 1행, tool 메시지 아직 없음
+    assert ask_moment_checked == [(1, APPROVAL_DECISION_PENDING, False)]
+
+    # 완료 후: approved로 갱신
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert rows[0]["decision"] == APPROVAL_DECISION_APPROVED
+
+
+def test_r10_050_scenario_03_denied_execution(r10_e2e_env):
+    """시나리오 3: 거부('n') 시 실행되지 않고 marker 미생성, 원장 denied 기록, 루프 정상 완료."""
+    code = "open('marker.txt', 'w').write('x'); print('ran')"
+    cmd = _py_cmd(code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_3",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="거부 확인 후 최종 답")
+
+    bundle = r10_e2e_env["build"](ask=lambda p: "n", mock_client=client)
+    res = bundle["agent"].run_conversation("실행해라")
+    assert res["stopped_reason"] == "completed"
+
+    # marker 파일 미존재
+    assert not (r10_e2e_env["ws"] / "marker.txt").exists()
+
+    # 도구 결과 실패
+    tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+    data = json.loads(tool_msg["content"])
+    assert data["success"] is False
+    assert APPROVAL_DENIED_MESSAGE in data["error"]
+
+    # 원장 denied
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 1
+    assert rows[0]["decision"] == APPROVAL_DECISION_DENIED
+
+
+def test_r10_050_scenario_04_various_answers_denied_and_cancelled(r10_e2e_env):
+    """시나리오 4: 다양한 승인 입력 판정 (공백/오답은 denied, 예외/None은 cancelled, ' YES '는 approved)."""
+    code = "open('marker.txt', 'w').write('x'); print('ran')"
+    cmd = _py_cmd(code)
+
+    cases = [
+        ("", APPROVAL_DECISION_DENIED),
+        ("   ", APPROVAL_DECISION_DENIED),
+        ("no", APPROVAL_DECISION_DENIED),
+        ("yes please", APPROVAL_DECISION_DENIED),
+        ("ㅇ", APPROVAL_DECISION_DENIED),
+        (KeyboardInterrupt(), APPROVAL_DECISION_CANCELLED),
+        (EOFError(), APPROVAL_DECISION_CANCELLED),
+        (None, APPROVAL_DECISION_CANCELLED),
+    ]
+
+    for idx, (ans, expected_decision) in enumerate(cases):
+        sid = f"s_case_{idx}"
+        client = MockLLMClient()
+        client.queue_response(
+            content=None,
+            tool_calls=[{
+                "id": f"call_4_{idx}",
+                "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+            }],
+        )
+        client.queue_response(content="답변 완료")
+
+        def make_ask(a):
+            def _ask(p):
+                if isinstance(a, BaseException):
+                    raise a
+                return a
+            return _ask
+
+        bundle = r10_e2e_env["build"](
+            ask=make_ask(ans),
+            mock_client=client,
+            custom_session_id=sid,
+        )
+        res = bundle["agent"].run_conversation("명령")
+        assert res["stopped_reason"] == "completed"
+        assert not (r10_e2e_env["ws"] / "marker.txt").exists()
+
+        tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+        data = json.loads(tool_msg["content"])
+        assert data["success"] is False
+
+        rows = r10_e2e_env["db"].get_approval_requests(sid)
+        assert len(rows) == 1
+        assert rows[0]["decision"] == expected_decision
+
+    # ' YES ' 허용 케이스
+    sid_yes = "s_case_yes"
+    client_yes = MockLLMClient()
+    client_yes.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_yes",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client_yes.queue_response(content="yes 답")
+    bundle_yes = r10_e2e_env["build"](
+        ask=lambda p: " YES ",
+        mock_client=client_yes,
+        custom_session_id=sid_yes,
+    )
+    res_yes = bundle_yes["agent"].run_conversation("yes 명령")
+    assert res_yes["stopped_reason"] == "completed"
+    assert (r10_e2e_env["ws"] / "marker.txt").exists()
+    rows_yes = r10_e2e_env["db"].get_approval_requests(sid_yes)
+    assert rows_yes[0]["decision"] == APPROVAL_DECISION_APPROVED
+    (r10_e2e_env["ws"] / "marker.txt").unlink()
+
+
+def test_r10_050_scenario_05_non_interactive_auto_denied(r10_e2e_env):
+    """시나리오 5: 비대화형 환경에서 질문 없이 자동 거부 (auto_denied)."""
+    code = "open('marker.txt', 'w').write('x'); print('ran')"
+    cmd = _py_cmd(code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_5",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="비대화형 완료")
+
+    ask_called = []
+    bundle = r10_e2e_env["build"](
+        ask=lambda p: (ask_called.append(p) or "y"),
+        is_interactive=lambda: False,
+        mock_client=client,
+    )
+    res = bundle["agent"].run_conversation("비대화형 테스트")
+    assert res["stopped_reason"] == "completed"
+    assert len(ask_called) == 0
+    assert not (r10_e2e_env["ws"] / "marker.txt").exists()
+
+    tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+    data = json.loads(tool_msg["content"])
+    assert data["success"] is False
+    assert APPROVAL_AUTO_DENIED_MESSAGE in data["error"]
+
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 1
+    assert rows[0]["decision"] == APPROVAL_DECISION_AUTO_DENIED
+
+
+def test_r10_050_scenario_06_request_limit_exceeded(r10_e2e_env):
+    """시나리오 6: 세션당 승인 요청 상한(10회) 초과 시 11번째는 질문 없이 limit_exceeded 거부."""
+    client = MockLLMClient()
+    for i in range(1, 12):
+        cmd = _py_cmd(f"print({i})")
+        client.queue_response(
+            content=None,
+            tool_calls=[{
+                "id": f"call_lim_{i}",
+                "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+            }],
+        )
+    client.queue_response(content="최종 종료")
+
+    ask_calls = []
+    bundle = r10_e2e_env["build"](
+        ask=lambda p: (ask_calls.append(p) or "n"),
+        mock_client=client,
+    )
+    res = bundle["agent"].run_conversation("상한 초과 테스트")
+    assert res["stopped_reason"] == "completed"
+
+    assert len(ask_calls) == 10
+
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 11
+    for r in rows[:10]:
+        assert r["decision"] == APPROVAL_DECISION_DENIED
+    assert rows[10]["decision"] == APPROVAL_DECISION_LIMIT_EXCEEDED
+
+    # 11번째 도구 메시지 에러 내용 확인
+    tool_11 = [m for m in res["messages"] if m["role"] == "tool"][10]
+    data_11 = json.loads(tool_11["content"])
+    assert data_11["success"] is False
+    assert APPROVAL_LIMIT_MESSAGE.format(limit=10) in data_11["error"]
+    assert "10" in data_11["error"]
+
+
+def test_r10_050_scenario_07_protected_files_blocked_before_ask(r10_e2e_env):
+    """시나리오 7: 보호 파일(.env, .git) 대상 명령은 질문 전에 가드되어 ask 호출 0회 및 행 미생성."""
+    commands = [
+        shlex.join([sys.executable, ".env"]),
+        shlex.join([sys.executable, "sub/.git/config"]),
+        ".git/hooks/x",
+    ]
+
+    for idx, cmd in enumerate(commands):
+        sid = f"s_prot_{idx}"
+        client = MockLLMClient()
+        client.queue_response(
+            content=None,
+            tool_calls=[{
+                "id": f"call_prot_{idx}",
+                "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+            }],
+        )
+        client.queue_response(content="보호 파일 응답")
+
+        ask_called = []
+        bundle = r10_e2e_env["build"](
+            ask=lambda p: (ask_called.append(p) or "y"),
+            mock_client=client,
+            custom_session_id=sid,
+        )
+        res = bundle["agent"].run_conversation("보호 파일 실행")
+        assert res["stopped_reason"] == "completed"
+        assert len(ask_called) == 0
+
+        rows = r10_e2e_env["db"].get_approval_requests(sid)
+        assert len(rows) == 0
+
+        tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+        data = json.loads(tool_msg["content"])
+        assert data["success"] is False
+        assert "protected" in data["error"].lower() or "not allowed" in data["error"].lower() or "denied" in data["error"].lower()
+
+
+def test_r10_050_scenario_08_mixed_commands_execution_flow(r10_e2e_env):
+    """시나리오 8: 허용목록/승인/거부/보호파일/문법오류 복합 순서에서 원장 순서와 tool_call_id 보존."""
+    cmd_approved = _py_cmd("print('approved_part')")
+    cmd_denied = _py_cmd("print('denied_part')")
+    cmd_protected = shlex.join([sys.executable, ".env"])
+    cmd_unclosed = "python -c 'unclosed"
+
+    client = MockLLMClient()
+    # 1. echo ok (허용 목록 안)
+    client.queue_response(
+        content=None,
+        tool_calls=[{"id": "c1", "function": {"name": "terminal", "arguments": json.dumps({"command": "echo ok"})}}],
+    )
+    # 2. cmd_approved (승인 "y")
+    client.queue_response(
+        content=None,
+        tool_calls=[{"id": "c2", "function": {"name": "terminal", "arguments": json.dumps({"command": cmd_approved})}}],
+    )
+    # 3. cmd_denied (거부 "n")
+    client.queue_response(
+        content=None,
+        tool_calls=[{"id": "c3", "function": {"name": "terminal", "arguments": json.dumps({"command": cmd_denied})}}],
+    )
+    # 4. cmd_protected (보호 파일)
+    client.queue_response(
+        content=None,
+        tool_calls=[{"id": "c4", "function": {"name": "terminal", "arguments": json.dumps({"command": cmd_protected})}}],
+    )
+    # 5. cmd_unclosed (따옴표 파싱 에러)
+    client.queue_response(
+        content=None,
+        tool_calls=[{"id": "c5", "function": {"name": "terminal", "arguments": json.dumps({"command": cmd_unclosed})}}],
+    )
+    # 6. 최종 답
+    client.queue_response(content="복합 테스트 종료")
+
+    answers = ["y", "n"]
+    ask_calls = []
+
+    def ask_mixed(p):
+        ask_calls.append(p)
+        return answers.pop(0)
+
+    bundle = r10_e2e_env["build"](ask=ask_mixed, mock_client=client)
+    res = bundle["agent"].run_conversation("복합 명령 수행")
+    assert res["stopped_reason"] == "completed"
+
+    assert len(ask_calls) == 2
+
+    # 원장 행은 오직 질문을 거친 2개만 기록
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 2
+    assert rows[0]["decision"] == APPROVAL_DECISION_APPROVED
+    assert rows[1]["decision"] == APPROVAL_DECISION_DENIED
+
+    # 도구 메시지 5개의 tool_call_id와 내용 순서 확인
+    tool_msgs = [m for m in res["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 5
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2", "c3", "c4", "c5"]
+
+    assert json.loads(tool_msgs[0]["content"])["stdout"] == "ok\n"
+    assert json.loads(tool_msgs[1]["content"])["success"] is True
+    assert json.loads(tool_msgs[2]["content"])["success"] is False
+    assert json.loads(tool_msgs[3]["content"])["success"] is False
+    assert json.loads(tool_msgs[4]["content"])["success"] is False
+
+
+def test_r10_050_scenario_09_zero_leakage_and_stripped_env(r10_e2e_env):
+    """시나리오 9: OPENROUTER_API_KEY 환경변수가 실행 자식에 제거되며 DB·대화·say에 키가 노출되지 않음."""
+    code = "import os; print(os.environ.get('OPENROUTER_API_KEY', '<unset>'))"
+    cmd = _py_cmd(code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_sec_1",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="키 점검 완료")
+
+    bundle = r10_e2e_env["build"](ask=lambda p: "y", mock_client=client)
+    res = bundle["agent"].run_conversation("키 확인해라")
+    assert res["stopped_reason"] == "completed"
+
+    tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+    data = json.loads(tool_msg["content"])
+    assert data["success"] is True
+    assert data["stdout"] == "<unset>\n"
+
+    # Zero Leakage 검증: 가짜 키 문자열 미유출
+    fake_key = r10_e2e_env["fake_key"]
+
+    # 1. 모델이 받은 모든 호출 메시지 검증
+    for call_item in client.call_history:
+        for msg in call_item.get("messages", []):
+            content_str = str(msg.get("content") or "")
+            assert fake_key not in content_str
+
+    # 2. DB의 messages, llm_calls, approval_requests 전 열 검증
+    db = r10_e2e_env["db"]
+    for tbl in ["messages", "llm_calls", "approval_requests"]:
+        rows = db._conn.execute(f"SELECT * FROM {tbl}").fetchall()
+        for r in rows:
+            for val in r:
+                assert fake_key not in str(val)
+
+    # 3. 수집된 say 출력 검증
+    for say_out in bundle["say_list"]:
+        assert fake_key not in str(say_out)
+
+
+def test_r10_050_scenario_10_no_approver_configurations_denied(r10_e2e_env):
+    """시나리오 10: 승인기 미설정 디스패처 3종(기본, 자식, 승인부모의 자식)은 허용 밖 명령 실행 없이 거부."""
+    cmd = _py_cmd("print(1)")
+
+    # 1. 기본 디스패처 (approver=None)
+    disp_default = create_default_dispatcher(
+        memory_store=r10_e2e_env["memory_store"],
+        session_db=r10_e2e_env["db"],
+    )
+    # 2. 자식 디스패처
+    disp_child = create_child_dispatcher()
+    # 3. 승인 부모에서 만든 자식 디스패처
+    appr_parent = Approver(
+        session_db=r10_e2e_env["db"],
+        session_id=r10_e2e_env["session_id"],
+        ask=lambda p: pytest.fail("ask should not be called"),
+        is_interactive=lambda: True,
+    )
+    _ = create_default_dispatcher(
+        memory_store=r10_e2e_env["memory_store"],
+        session_db=r10_e2e_env["db"],
+        approver=appr_parent,
+    )
+    disp_child_from_parent = create_child_dispatcher()
+
+    for disp in [disp_default, disp_child, disp_child_from_parent]:
+        res_json = disp.handle_function_call("terminal", {"command": cmd})
+        res_obj = json.loads(res_json)
+        assert res_obj["success"] is False
+        assert "not allowed" in res_obj["error"].lower()
+
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 0
+
+
+def test_r10_050_scenario_11_display_formatting_escaped_control_chars(r10_e2e_env):
+    """시나리오 11: 명령 문자열 내 개행 및 제어문자가 이스케이프되어 표시되고 프롬프트 위조 방지."""
+    raw_code = "print(1)\n\x1b[5;35mFAKE-PROMPT\x1b[0m\nRun it? [y/N] y"
+    cmd = _py_cmd(raw_code)
+
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_disp_1",
+            "function": {"name": "terminal", "arguments": json.dumps({"command": cmd})},
+        }],
+    )
+    client.queue_response(content="표시 확인 완료")
+
+    say_list = []
+    bundle = r10_e2e_env["build"](
+        ask=lambda p: "n",
+        say=say_list.append,
+        mock_client=client,
+    )
+    res = bundle["agent"].run_conversation("포맷 테스트")
+    assert res["stopped_reason"] == "completed"
+
+    full_say = "".join(say_list)
+
+    # 1. 표시 문자열에 실제 \n 개행이나 실제 ESC \x1b 바이트가 없고 이스케이프 문자열이 있음
+    assert "\x1b[5;35m" not in full_say
+    assert "\\x1b[5;35m" in full_say
+    assert "\\n" in full_say
+
+    # 2. format_command_for_display 와 일치
+    expected_display = format_command_for_display([sys.executable, "-c", raw_code])
+    assert expected_display in full_say
+    assert APPROVAL_HEADER in full_say
+
+
+def test_r10_050_scenario_12_schema_invariance_and_approver_arg_rejection(r10_e2e_env):
+    """시나리오 12: 승인기 유무에 따른 도구 스키마 불변성 및 approver 추가 인자 시 거부."""
+    # 1. 스키마 동일성
+    disp_no = create_default_dispatcher(
+        memory_store=r10_e2e_env["memory_store"],
+        session_db=r10_e2e_env["db"],
+    )
+    disp_yes = create_default_dispatcher(
+        memory_store=r10_e2e_env["memory_store"],
+        session_db=r10_e2e_env["db"],
+        approver=Approver(
+            session_db=r10_e2e_env["db"],
+            session_id=r10_e2e_env["session_id"],
+            ask=lambda p: "y",
+            is_interactive=lambda: True,
+        ),
+    )
+    assert disp_no.get_tools_schema() == disp_yes.get_tools_schema()
+
+    # 2. approver 인자 추가 시 거부
+    client = MockLLMClient()
+    client.queue_response(
+        content=None,
+        tool_calls=[{
+            "id": "call_bad_arg",
+            "function": {
+                "name": "terminal",
+                "arguments": json.dumps({
+                    "command": _py_cmd("print(1)"),
+                    "approver": "malicious_injection",
+                }),
+            },
+        }],
+    )
+    client.queue_response(content="인자 거부 완료")
+
+    bundle = r10_e2e_env["build"](ask=lambda p: "y", mock_client=client)
+    res = bundle["agent"].run_conversation("인자 주입 시도")
+    assert res["stopped_reason"] == "completed"
+
+    tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
+    data = json.loads(tool_msg["content"])
+    assert data["success"] is False
+    assert "unexpected argument" in data["error"].lower() or "not allowed" in data["error"].lower() or "validation" in data["error"].lower()
+
+    rows = r10_e2e_env["db"].get_approval_requests(r10_e2e_env["session_id"])
+    assert len(rows) == 0
+
+
+
 
 
 

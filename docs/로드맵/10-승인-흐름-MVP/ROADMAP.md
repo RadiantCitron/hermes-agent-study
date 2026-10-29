@@ -1,11 +1,9 @@
 # [마스터 설계도] 10-승인 흐름 MVP
 
-> **상태**: `Draft`  
+> **상태**: `In progress`  
 > **대시보드**: [README.md](README.md)  
 > **의도(Why)**: [WHY.md](WHY.md) · **승인된 계획**: [PLAN.md](PLAN.md) · **근거 결정**: [ADR-0010](../../adr/0010-승인_흐름_MVP_범위와_결정.md)  
 > **기준 코드**: 09 마감 이후 `main` (태그 `roadmap-09-closed`와 그 뒤 정정 커밋 포함) · **원본 참고**: `hermes-agent/tools/approval*.py`의 구조와 함정만 읽음(읽기 전용). 시험 케이스 각각은 일부만 읽음
->
-> **표기**: 아래 그림의 `[신규]`·`[변경]` 이름 중 코드에 아직 없는 것은 **지시서에서 확정할 이름**이다. 구현 때 달라지면 이 문서를 정정한다 (ROADMAP_정책 §3-3).
 
 ---
 
@@ -23,21 +21,19 @@
 src/hermes_core/
   session_db.py            # [변경] approval_requests 표(스키마 v5), 기록·결정 갱신·조회 메서드
   tools/
-    approval.py            # [신규] 승인 요청 객체, 표시 정제, 요청 상한, 판정(fail-closed) (파일 위치·이름은 후보)
+    approval.py            # [신규] 승인 요청 객체, 표시 정제, 요청 상한, 판정(fail-closed)
     terminal_tool.py       # [변경] 선택 인자 approver, 허용목록 거부 지점 분기, 보호 파일 바닥, 승인된 실행의 키 환경변수 제거
     dispatcher.py          # [변경] create_default_dispatcher(..., approver=None)로 terminal 핸들러에 승인기 주입. ToolDispatcher 클래스·create_child_dispatcher 무변경
   cli.py                   # [변경] 터미널일 때 승인기 연결, --no-approval, 배너
   constants.py             # [변경] 요청 상한, 프롬프트·거부 문구, 승인된 실행에서 뺄 키 환경변수 이름 목록
 tests/test_hermes_core/
-  test_approval_ledger.py          # [신규, 후보] 010
-  test_approval.py                 # [신규, 후보] 020
-  test_terminal_approval.py        # [신규, 후보] 030
-  test_cli_approval.py             # [신규, 후보] 040
-  test_agent_e2e.py                # [추가] 050 (대본형 가짜 모델)
-  test_cli_approval_pty.py         # [신규, 후보] 050
+  test_approval_ledger.py          # [신규] 010
+  test_approval.py                 # [신규] 020
+  test_terminal_approval.py        # [신규] 030
+  test_cli_approval.py             # [신규] 040
+  test_cli_approval_pty.py         # [신규] 050
+  test_agent_e2e.py                # [추가] 050 (대본형 가짜 모델 E2E)
 ```
-
-파일·시험 이름은 후보다. 지시서에서 코드와 대조해 확정한다.
 
 ### 2-2. 구성요소 흐름 (As-Is → To-Be)
 
@@ -91,7 +87,7 @@ sequenceDiagram
 |---|---|---|---|
 | 허용목록 안 | 기존 경로(묻지 않음) | 기록 없음 | 기존 동작 불변 |
 | 허용목록 밖, 승인기 없음 | 기존 거부 JSON | 기록 없음 | 라이브러리 기본·위임 자식·`--no-approval` |
-| 허용목록 밖, 인자가 보호 파일 | 거부 JSON, 묻지 않음 | 기록 없음 또는 `blocked`(지시서에서 확정) | 승인해도 유지되는 바닥 |
+| 허용목록 밖, 인자가 보호 파일 | 거부 JSON, 묻지 않음 | 기록 없음 | 승인해도 유지되는 바닥 |
 | 허용목록 밖, 승인기 있음, 요청 상한 초과 | 묻지 않고 거부 | `limit_exceeded` | 프롬프트 폭주 방지 |
 | 허용목록 밖, 승인기 있음, 비터미널 | 묻지 않고 거부 | `auto_denied` | 응답할 사람이 없음 |
 | 허용목록 밖, 승인기 있음, 터미널, 사람이 예 | 실행 | `approved` | 사람이 본 명령만 |
@@ -108,7 +104,7 @@ sequenceDiagram
 | `create_default_dispatcher` | 선택 인자 `approver` 하나 추가 | 기본값 `None`이면 지금과 같은 등록. `ToolDispatcher` 클래스·`include` 검사·`create_child_dispatcher`(인자를 넘기지 않음) 불변. 이미 등록된 도구를 같은 이름으로 다시 등록해 바꾸는 방식은 쓰지 않는다(ADR-0010 대안 H) |
 | `HermesAgent` 루프 | 무변경 | 승인은 도구 안에서 일어나고 결과는 기존과 같은 JSON 문자열. 도구 메시지 포장·원장 순서 불변 |
 | `SessionDB` | 새 표 하나 추가(스키마 v5) | `llm_calls` 때와 같은 방식. 기존 표·열 불변 |
-| 기존 시험 | 한 곳의 단언만 영향 | `test_agent_e2e.py:1085`의 `schema_version == 4`(v3 DB 마이그레이션 시험). 010 지시서에서 예고된 최소 수정 |
+| 기존 시험 | 5곳 단언 완화 | `test_agent_e2e.py:1085` 및 `test_session_db.py` 4곳의 `schema_version == 4` 단언을 `>= 4`로 완화 (010 사전 점검) |
 | 위임 자식 | 무변경 | `create_child_dispatcher()` 불변, 승인기 인자를 넘기지 않으므로 자식 `terminal`은 승인기 없음 = 기존 거부 |
 | 압축·스킬·서브에이전트·입력(09) | 무변경 | 이 로드맵은 터미널 도구와 CLI 연결, 새 표만 건드림. 입력은 `read_user_input` 호출만 재사용 |
 | 의존성 | 없음 | 표준 라이브러리만 |
@@ -154,21 +150,21 @@ sequenceDiagram
 ## 6. 설계 결정 상세
 
 ### 6-1. 원장 (010)
-`approval_requests` 표: 후보 열 `id`, `session_id`(FK), `argv_json`, `created_at`, `decision`, `decided_at`, `reason`. `tool_call_id`는 터미널 도구가 모르는 값이라 열에 둘지는 010에서 확정한다(없으면 `session_id`와 시간으로 대응). 메서드: 요청 기록(`pending`) → 결정 갱신 → 세션별 조회. 한 번 정해진 결정은 다시 바꾸지 않는다(멱등/불변 여부 시험).
+`approval_requests` 표: 열 `id`, `session_id`(FK), `argv_json`, `created_at`, `decision`, `decided_at`, `reason`. `tool_call_id`는 터미널 도구가 호출 ID를 알지 못하므로 열에 두지 않고 `session_id`와 시간으로 대응하도록 확정(010 지시서 7항). 메서드: 요청 기록(`pending`) → 결정 갱신 → 세션별 조회. 한 번 정해진 결정은 다시 바꾸지 않는다(멱등/불변 여부 시험).
 
 ### 6-2. 승인 판정 (020)
 요청 객체(argv, 세션), 승인기 호출 규약(결정값 반환), 표시 문자열 생성(제어문자 제거), 요청 상한 카운터, 입력 해석(정확히 `y`/`yes`만 예, 나머지 거부). 부작용(출력·입력)은 승인기 쪽에 두고 판정과 정제는 순수 함수로 둔다. 상한 값과 입력 허용 표기는 지시서에서 확정한다(에이전트가 정한 안).
 
 ### 6-3. 터미널 도구 연동 (030)
-허용목록 거부 지점(현재 `terminal_tool.py:83-84`)에서 승인기가 있으면 보호 파일 바닥 검사 → 판정 → 실행한다. 승인된 명령은 「작업 폴더 밖 경로 인자」 검사를 건너뛰되 `shell=False`·시간·출력 상한·`cwd`는 같다. 실행 환경은 부모 환경에서 키 환경변수 이름 목록(상수, 현재 `OPENROUTER_API_KEY`)을 뺀 사본을 `env`로 넘긴다(ADR-0010 §2-6). 허용목록 안 명령도 같은 사본을 쓸지(실행 경로 하나로 합칠지)는 030 지시서에서 코드와 대조해 확정한다.
+허용목록 거부 지점(현재 `terminal_tool.py:83-84`)에서 승인기가 있으면 보호 파일 바닥 검사 → 판정 → 실행한다. 승인된 명령은 「작업 폴더 밖 경로 인자」 검사를 건너뛰되 `shell=False`·시간·출력 상한·`cwd`는 같다. 030에서 실행 경로를 단일 함수(`_execute`)로 통합하고 허용목록 안팎 모두 동일하게 키 환경변수가 제거된 `_child_env` 사본을 `env`로 넘기도록 확정(ADR-0010 §2-6).
 
-승인기는 `create_default_dispatcher(..., approver=None)`의 선택 인자로 받아 `terminal` 핸들러 클로저에 넘긴다(ADR-0010 §2-10). 이미 등록된 `terminal`을 같은 이름으로 다시 등록하는 방식은 쓰지 않는다. 승인기는 원장 기록에 세션 ID가 필요하므로, CLI가 세션 ID·`SessionDB`·디스패처를 먼저 만들어 `HermesAgent`에 넘길지 `HermesAgent`에 별도 인자를 둘지는 030 지시서에서 확정한다.
+승인기는 `create_default_dispatcher(..., approver=None)`의 선택 인자로 받아 `terminal` 핸들러 클로저에 넘긴다(ADR-0010 §2-10). 이미 등록된 `terminal`을 같은 이름으로 다시 등록하는 방식은 쓰지 않는다. 승인기는 원장 기록에 세션 ID가 필요하므로, CLI가 session_id를 선발급하고 SessionDB·Approver·디스패처를 사전 조립해 HermesAgent에 주입하는 방식으로 확정(030·040).
 
 ### 6-4. CLI 연동 (040)
 stdin·stdout이 모두 터미널(`is_interactive_terminal`)이면 승인기를 기본 연결하고 `--no-approval`로 끈다. 프롬프트는 `read_user_input`에 별도 프롬프트 문자열을 넘겨 재사용한다(REPL의 `User >`와 구분). 배너에 안내 한 줄(문구는 040에서 확정).
 
-### 6-5. 값 (에이전트가 정한 안)
-요청 상한 10, 승인 입력은 정확히 `y`/`yes`(대소문자 무시)만 예, 거부 문구 「사용자가 거부했다. 같은 명령을 우회해 재시도하지 말 것」. 해당 단계 착수(「진행해라」) 시 승인으로 갈음하며, 바꾸고 싶으면 착수 전에 알린다.
+### 6-5. 값 (확정)
+요청 상한 10(`APPROVAL_REQUEST_LIMIT`), 승인 입력은 정확히 `y`/`yes`(대소문자 무시)만 예, 거부 문구 `APPROVAL_DENIED_MESSAGE` (020~040에서 확정).
 
 ### 6-6. 원본과 다른 점 (의도적)
 원본은 위험 패턴 감지, once/session/always, 영구 allowlist, smart 모드, 게이트웨이 대기, 타임아웃, 서브에이전트 설정 승인 모드를 가진다. 우리는 허용목록 밖 전부 묻기·예/아니오·원장 선기록·자식 거부만 한다. 원본의 판정 순서와 fail-closed 원칙을 따른다. 원본의 승인 시험 케이스는 일부만 읽어 비교가 불완전하다(**미확인**).
