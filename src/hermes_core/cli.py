@@ -12,6 +12,7 @@ import os
 import sys
 
 from hermes_core.agent import HermesAgent, MockLLMClient
+from hermes_core.cli_input import read_user_input
 from hermes_core.constants import (
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
@@ -149,7 +150,8 @@ def main() -> None:
         history = None
         while True:
             try:
-                user_input = input("\nUser > ").strip()
+                print()
+                user_input = read_user_input().strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting session...")
                 break

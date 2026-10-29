@@ -191,3 +191,18 @@ OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 LLM_TIMEOUT_SECONDS = 60
 LLM_MAX_OUTPUT_TOKENS = 4096
 LLM_ERROR_BODY_MAX_CHARS = 500
+
+
+# =============================================================================
+# CLI 입력 관련 상수
+# =============================================================================
+
+# CLI 사용자 프롬프트 기본값
+CLI_USER_PROMPT = "User > "
+
+# 디코드 실패 안내 문구
+CLI_INPUT_DECODE_NOTICE = "Input could not be decoded as UTF-8; please type it again."
+
+# 연속 디코드 실패 시 재시도 상한
+CLI_INPUT_DECODE_MAX_RETRIES = 5
+
