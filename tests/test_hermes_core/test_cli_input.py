@@ -234,3 +234,199 @@ def test_scenario_11_cli_main_prompt_has_leading_newline(
 
     captured = capsys.readouterr()
     assert "\nUser > " in captured.out
+
+
+# =============================================================================
+# 구현지시서 020: prompt_toolkit 경로
+# =============================================================================
+
+import subprocess
+import tomllib
+
+from hermes_core import cli_input
+from hermes_core.cli_input import is_interactive_terminal, read_with_prompt_toolkit
+from hermes_core.constants import CLI_PROMPT_TOOLKIT_MISSING_NOTICE
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class FakeStream:
+    """isatty 결과를 지정하는 가짜 스트림."""
+
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+class NoIsattyStream:
+    """isatty 메서드가 없는 스트림."""
+
+
+class RaisingIsattyStream:
+    """isatty()가 ValueError를 내는 (닫힌) 스트림."""
+
+    def isatty(self) -> bool:
+        raise ValueError("I/O operation on closed file")
+
+
+def _pt_read(keys: str) -> str:
+    """실제 prompt_toolkit을 파이프 입력·더미 출력으로 실행한다."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe:
+        pipe.send_text(keys)
+        return read_with_prompt_toolkit("User > ", input=pipe, output=DummyOutput())
+
+
+def test_scenario_020_01_both_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeStream(True))
+    monkeypatch.setattr(sys, "stdout", FakeStream(True))
+    assert is_interactive_terminal() is True
+
+
+def test_scenario_020_02_only_stdin_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeStream(True))
+    monkeypatch.setattr(sys, "stdout", FakeStream(False))
+    assert is_interactive_terminal() is False
+
+
+def test_scenario_020_03_only_stdout_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", FakeStream(False))
+    monkeypatch.setattr(sys, "stdout", FakeStream(True))
+    assert is_interactive_terminal() is False
+
+
+@pytest.mark.parametrize("bad_stdin", [NoIsattyStream(), RaisingIsattyStream()])
+def test_scenario_020_04_broken_isatty(monkeypatch: pytest.MonkeyPatch, bad_stdin: Any) -> None:
+    monkeypatch.setattr(sys, "stdin", bad_stdin)
+    monkeypatch.setattr(sys, "stdout", FakeStream(True))
+    assert is_interactive_terminal() is False
+
+
+def test_scenario_020_05_non_tty_uses_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_call(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("prompt_toolkit path must not be used")
+
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: False)
+    monkeypatch.setattr(cli_input, "read_with_prompt_toolkit", must_not_call)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+    assert read_user_input() == "hello"
+
+
+def test_scenario_020_06_tty_uses_prompt_toolkit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_pt(prompt: str, **kwargs: Any) -> str:
+        calls.append(prompt)
+        return "  뜻  "
+
+    def must_not_call(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("input() must not be used")
+
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_input, "read_with_prompt_toolkit", fake_pt)
+    monkeypatch.setattr("builtins.input", must_not_call)
+    assert read_user_input() == "  뜻  "
+    assert calls == [CLI_USER_PROMPT]
+
+
+def test_scenario_020_07_enter_submits() -> None:
+    assert _pt_read("hello\r") == "hello"
+
+
+def test_scenario_020_08_ctrl_j_inserts_newline() -> None:
+    assert _pt_read("a\nb\r") == "a\nb"
+
+
+def test_scenario_020_09_paste_is_one_input() -> None:
+    assert _pt_read("\x1b[200~l1\nl2\r\nl3\x1b[201~\r") == "l1\nl2\nl3"
+
+
+def test_scenario_020_10_korean_backspace() -> None:
+    assert _pt_read("한글ab\x7f\r") == "한글a"
+
+
+def test_scenario_020_11_empty_enter() -> None:
+    assert _pt_read("\r") == ""
+
+
+def test_scenario_020_12_ctrl_c() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        _pt_read("x\x03")
+
+
+def test_scenario_020_13_ctrl_d_on_empty() -> None:
+    with pytest.raises(EOFError):
+        _pt_read("\x04")
+
+
+def test_scenario_020_14_decode_error_in_terminal_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    err = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    sequence: list[Any] = [err, "ok"]
+
+    def fake_pt(prompt: str, **kwargs: Any) -> str:
+        item = sequence.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_input, "read_with_prompt_toolkit", fake_pt)
+    assert read_user_input() == "ok"
+    assert capsys.readouterr().out.count(CLI_INPUT_DECODE_NOTICE) == 1
+
+
+def test_scenario_020_14b_decode_error_limit_in_terminal_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def always_fail(prompt: str, **kwargs: Any) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_input, "read_with_prompt_toolkit", always_fail)
+    with pytest.raises(EOFError):
+        read_user_input()
+    assert capsys.readouterr().out.count(CLI_INPUT_DECODE_NOTICE) == CLI_INPUT_DECODE_MAX_RETRIES
+
+
+def test_scenario_020_15_missing_library_falls_back_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(cli_input, "_missing_notice_shown", False)
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("a\nb\n"))
+    assert read_user_input() == "a"
+    assert read_user_input() == "b"
+    assert capsys.readouterr().out.count(CLI_PROMPT_TOOLKIT_MISSING_NOTICE) == 1
+
+
+def test_scenario_020_16_import_does_not_load_library() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import hermes_core.cli_input; print('prompt_toolkit' in sys.modules)",
+        ],
+        env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": ""},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False"
+
+
+def test_scenario_020_17_dependency_declared() -> None:
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "prompt_toolkit>=3.0.52,<4" in data["project"]["dependencies"]

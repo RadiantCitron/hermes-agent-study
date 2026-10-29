@@ -206,3 +206,6 @@ CLI_INPUT_DECODE_NOTICE = "Input could not be decoded as UTF-8; please type it a
 # 연속 디코드 실패 시 재시도 상한
 CLI_INPUT_DECODE_MAX_RETRIES = 5
 
+# prompt_toolkit 미설치 시 폴백 안내 문구 (프로세스당 한 번 출력)
+CLI_PROMPT_TOOLKIT_MISSING_NOTICE = "prompt_toolkit is not installed; falling back to basic input (no multi-line editing)."
+
