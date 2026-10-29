@@ -25,7 +25,7 @@ src/hermes_core/
   agent/
     prompt_builder.py               [변경] render_skills_index, build_system_prompt 인자  (010, 020, 030)
     agent.py                        [변경] skills_index 인자(기본 False), 인덱스 조립·주입  (020)
-  cli.py                            [변경] 실제 앱에서 skills_index 켜기                  (025)
+  cli.py                            [변경] --no-skills-index 플래그, 기본으로 skills_index 켜기 (025)
 tests/test_hermes_core/
   test_skills_index.py              [신규] 렌더링·정제·상한                               (010)
   test_agent_skills_index.py        [신규] 연동·고정·꺼짐 기본값·바이트 동일             (020)
@@ -54,7 +54,7 @@ flowchart LR
   end
 ```
 
-인덱스를 켜지 않았거나(기본값), 스킬 도구가 등록되지 않았거나(`skills_list`·`skill_view` 둘 중 하나라도 없음), 스킬이 하나도 없으면 인덱스 블록은 만들지 않고, 지시문은 To-Be에서도 As-Is와 바이트 단위로 같다.
+인덱스를 켜지 않았거나(라이브러리 기본값. 앱은 025에서 켠다), 스킬 도구가 등록되지 않았거나(`skills_list`·`skill_view` 둘 중 하나라도 없음), 스킬이 하나도 없으면 인덱스 블록은 만들지 않고, 지시문은 To-Be에서도 As-Is와 바이트 단위로 같다.
 
 ### 2-3. 클래스·모듈 관계
 
@@ -140,7 +140,7 @@ flowchart TD
 | `_build_system_prompt` | 인덱스 조립 한 곳 추가 | 세션당 1회 조립·캐시·DB 저장 구조는 그대로다. 인덱스가 캐시 안에 들어가므로 세션 중 불변(가정 B). |
 | `SKILLS_GUIDANCE`와 기존 시험 | 무변경 | 인덱스는 **별도 블록**이다. 600자 이하·목록 미포함 시험이 그대로 통과한다. |
 | 자식 에이전트 | 무변경 | 자식은 `skills_index` 기본값(False)이라 프롬프트에 인덱스가 없다(가정 F). `delegate_tool.py`는 바뀌지 않는다. 자식의 스킬 도구는 그대로다. |
-| `cli.py` | 실제 모드에서 `skills_index=True`로 켜기(025) | 07의 `--delegate`처럼 앱이 켜는 방식. 모의 모드 여부는 025에서 확정. |
+| `cli.py` | 모의·실제 두 모드 모두 기본으로 `skills_index=True`, `--no-skills-index`로 끔(025) | 앱이 켜는 방식(07 `--delegate`와 달리 기본 켜짐). 스킬 폴더가 없거나 비면 프롬프트는 이전과 같아(020) 기존 시험·스킬을 안 쓰는 사용자에게 영향이 없다. |
 | 스킬 도구·디스패처 | 무변경 | `discover_skills`를 읽기만 한다. 스킬 폴더를 만들지 않는다. |
 | 압축 | 무영향 | 시스템 프롬프트는 압축 대상이 아니다(ADR-0005). 인덱스가 헤드에 있어도 압축 전후 헤드가 같다(가정 B, 040에서 확인). |
 | 스키마·DB | 무변경 | `sessions.system_prompt`에 조립된 문자열이 들어갈 뿐이다. |
