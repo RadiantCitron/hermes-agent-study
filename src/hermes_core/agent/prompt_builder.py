@@ -15,11 +15,15 @@ from datetime import datetime
 import os
 from pathlib import Path
 from typing import Optional
+import unicodedata
 
 from hermes_core.constants import (
     AGENTS_FILE_NAMES,
     CONTEXT_FILE_MAX_CHARS,
     CURSORRULES_FILE_NAME,
+    SKILLS_INDEX_DESC_MAX_CHARS,
+    SKILLS_INDEX_MAX_CHARS,
+    SKILLS_INDEX_MAX_ENTRIES,
     SOUL_FILE_NAME,
 )
 
@@ -163,6 +167,97 @@ def build_context_files_prompt(cwd: Optional[str] = None) -> str:
 
     header = "# Project Context & Standing Instructions\n\nThe following project files define guidelines for this workspace:"
     return header + "\n\n" + "\n\n".join(sections)
+
+
+# =============================================================================
+# 스킬 인덱스 렌더링 순수 함수 (08 로드맵)
+# =============================================================================
+
+def _sanitize_index_text(text: str) -> str:
+    """인덱스 항목의 텍스트 정제 (태그 위조 방지, 제어문자 및 공백 정규화).
+
+    1. <, > 태그 문자 제거 (프롬프트 태그 구획 위조 차단).
+    2. 공백 문자 및 유니코드 C* 범주(제어·서식 등)를 공백으로 치환.
+    3. 연속 공백 압축 및 앞뒤 공백 제거.
+    """
+    t = text.replace("<", "").replace(">", "")
+    chars: list[str] = []
+    for ch in t:
+        if ch.isspace() or unicodedata.category(ch).startswith("C"):
+            chars.append(" ")
+        else:
+            chars.append(ch)
+    return " ".join("".join(chars).split())
+
+
+def render_skills_index(
+    skills: list[dict],
+    max_entries: int = SKILLS_INDEX_MAX_ENTRIES,
+    desc_max_chars: int = SKILLS_INDEX_DESC_MAX_CHARS,
+    max_chars: int = SKILLS_INDEX_MAX_CHARS,
+) -> str:
+    """스킬 목록을 세션 시작 시 시스템 프롬프트에 주입할 평평한 한 줄 블록으로 렌더링.
+
+    [동작 원리]
+    1. 순수 함수: 디스크, 환경, 시계, 외부 모듈에 접근하지 않고 입력을 변경하지 않음.
+    2. 항목 정제:
+       - dict가 아니거나 정제 후 name이 빈 문자열인 항목은 건너뜀 (초과 안내 N 계산에서 제외).
+       - <, > 문자 제거, 제어문자(C*) 및 공백 문자를 단일 공백으로 치환, 연속 공백 압축.
+       - description이 desc_max_chars를 초과하면 말줄임표(...)로 절삭.
+    3. 상한 판정 (내림차순 검색):
+       - k = min(total, max_entries)부터 1까지 내려오며 후보 블록 생성.
+       - 후보 블록 길이가 max_chars 이하인 첫 번째 블록을 반환.
+       - 하나도 들어맞지 않거나 유효 항목이 0개이면 빈 문자열("") 반환.
+    """
+    if max_entries < 1:
+        raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+    if desc_max_chars < 4:
+        raise ValueError(f"desc_max_chars must be >= 4, got {desc_max_chars}")
+    if max_chars < 1:
+        raise ValueError(f"max_chars must be >= 1, got {max_chars}")
+
+    if not skills:
+        return ""
+
+    cleaned_items: list[str] = []
+    for item in skills:
+        if not isinstance(item, dict):
+            continue
+        raw_name = item.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        name = _sanitize_index_text(raw_name)
+        if not name:
+            continue
+
+        raw_desc = item.get("description")
+        if not isinstance(raw_desc, str):
+            raw_desc = ""
+        desc = _sanitize_index_text(raw_desc)
+        if len(desc) > desc_max_chars:
+            desc = desc[: desc_max_chars - 3].rstrip() + "..."
+
+        if desc:
+            cleaned_items.append(f"- {name}: {desc}")
+        else:
+            cleaned_items.append(f"- {name}")
+
+    total = len(cleaned_items)
+    if total == 0:
+        return ""
+
+    for k in range(min(total, max_entries), 0, -1):
+        candidates = cleaned_items[:k]
+        more = total - k
+        lines = ["<available_skills>"] + candidates
+        if more > 0:
+            lines.append(f"(+{more} more; use skills_list to see all)")
+        lines.append("</available_skills>")
+        block = "\n".join(lines)
+        if len(block) <= max_chars:
+            return block
+
+    return ""
 
 
 # =============================================================================

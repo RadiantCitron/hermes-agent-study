@@ -37,6 +37,11 @@ SKILL_VIEW_MAX_CHARS = 20_000
 SKILL_LINKED_FILES_MAX_PER_KIND = 100
 SKILL_LINKED_DIRS = ("references", "templates", "assets", "scripts")
 
+# 스킬 인덱스 주입 제한 상수 (08 로드맵)
+SKILLS_INDEX_MAX_ENTRIES = 50
+SKILLS_INDEX_DESC_MAX_CHARS = 120
+SKILLS_INDEX_MAX_CHARS = 4_000
+
 # 서브에이전트(자식) 허용 도구 목록 (07 로드맵)
 CHILD_TOOL_NAMES = ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view")
 
