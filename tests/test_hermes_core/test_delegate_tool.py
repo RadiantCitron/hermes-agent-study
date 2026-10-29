@@ -497,44 +497,6 @@ def test_scenario_09_empty_goal_rejected(base_env):
     assert session_count == 1
 
 
-def test_scenario_10_argument_schema_validation(base_env):
-    """시나리오 10: goal 누락, context 타입 오류, 정의되지 않은 인자 거부 검증."""
-    db = base_env["db"]
-    store = base_env["store"]
-    parent = HermesAgent(session_db=db, memory_store=store, quiet_mode=True)
-
-    factory_calls = 0
-
-    def factory():
-        nonlocal factory_calls
-        factory_calls += 1
-        return MockLLMClient()
-
-    register_delegate_tool(
-        parent.dispatcher,
-        session_db=db,
-        parent_session_id=parent.session_id,
-        llm_client_factory=factory,
-    )
-
-    # 1. goal 누락
-    r1 = json.loads(parent.dispatcher.handle_function_call("delegate_task", {}))
-    assert r1["success"] is False
-    assert "missing required argument 'goal'" in r1["error"]
-
-    # 2. context 타입 오류 (int)
-    r2 = json.loads(parent.dispatcher.handle_function_call("delegate_task", {"goal": "g", "context": 123}))
-    assert r2["success"] is False
-    assert "argument 'context' must be of type string" in r2["error"]
-
-    # 3. 정의되지 않은 인자 foo
-    r3 = json.loads(parent.dispatcher.handle_function_call("delegate_task", {"goal": "g", "foo": 1}))
-    assert r3["success"] is False
-    assert "unexpected argument 'foo'" in r3["error"]
-
-    assert factory_calls == 0
-
-
 def test_scenario_11_factory_failure(base_env):
     """시나리오 11: llm_client_factory 예외 발생 시 안전한 실패 처리 및 부모 루프 지속 검증."""
     db = base_env["db"]

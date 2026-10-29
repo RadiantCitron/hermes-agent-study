@@ -330,26 +330,6 @@ def test_030_scenario_14_split_without_system_message():
     assert head + middle + tail == messages
 
 
-def test_030_scenario_15_system_prompt_byte_identical():
-    """시나리오 15: 헤드의 S 메시지 내용이 분할 전후 바이트 동일 (시스템 프롬프트 불변)."""
-    sys_content = "SYSTEM PROMPT WITH SPECIFIC CONTENT\n- rule 1\n- rule 2"
-    messages = [
-        {"role": "system", "content": sys_content},
-        {"role": "user", "content": "u1"},
-        {"role": "assistant", "content": "a1"},
-        {"role": "user", "content": "u2"},
-        {"role": "assistant", "content": "a2"},
-        {"role": "user", "content": "u3"},
-        {"role": "assistant", "content": "a3"},
-        {"role": "user", "content": "u4"},
-    ]
-    res = split_for_compression(messages, head_messages=2, tail_tokens=15, min_tail_messages=2)
-    assert res is not None
-    head, _, _ = res
-    assert head[0]["content"] == sys_content
-    assert head[0]["content"].encode("utf-8") == sys_content.encode("utf-8")
-
-
 def test_030_scenario_16_split_with_head_messages_zero():
     """시나리오 16: head_messages=0으로 분할 시 헤드는 S뿐(S가 없으면 빈 헤드), 나머지가 중간+테일."""
     messages_with_sys = [

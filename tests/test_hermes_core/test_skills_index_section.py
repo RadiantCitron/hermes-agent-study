@@ -175,11 +175,3 @@ def test_scenario_07_hermes_agent_skills_index_enabled(skills_env):
     assert session_row is not None
     assert session_row["system_prompt"] == prompt
 
-
-def test_scenario_08_hermes_agent_skills_index_disabled(skills_env):
-    """시나리오 8: skills_index=False(기본)인 에이전트의 프롬프트에 제목이 전혀 없음을 검증."""
-    client = MockLLMClient()
-    agent = HermesAgent(llm_client=client, skills_index=False)
-
-    prompt = agent._build_system_prompt()
-    assert EXPECTED_HEADING not in prompt

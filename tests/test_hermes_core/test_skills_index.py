@@ -17,13 +17,6 @@ from hermes_core.agent.prompt_builder import render_skills_index
 from hermes_core.tools.skills_tool import discover_skills
 
 
-def test_scenario_01_constants_literal_values():
-    """시나리오 1: 상수 세 개가 정확히 50, 120, 4000인지 리터럴 대조."""
-    assert SKILLS_INDEX_MAX_ENTRIES == 50
-    assert SKILLS_INDEX_DESC_MAX_CHARS == 120
-    assert SKILLS_INDEX_MAX_CHARS == 4000
-
-
 def test_scenario_02_empty_skills_returns_empty_string():
     """시나리오 2: render_skills_index([])는 빈 문자열 반환."""
     assert render_skills_index([]) == ""

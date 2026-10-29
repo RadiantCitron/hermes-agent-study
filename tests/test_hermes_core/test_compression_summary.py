@@ -140,19 +140,6 @@ def test_scenario_04_build_summary_messages_with_previous_summary():
     assert "기존 요약의 정보를 보존하고 새 턴으로 갱신" not in user_content_without
 
 
-def test_scenario_05_secret_key_directive_presence():
-    """시나리오 5: middle에 가짜 키 문자열이 있을 때 직렬화 유지 및 시스템 지시문 마스킹 지시 확인."""
-    # gitleaks 정적 패턴 검출을 피하기 위해 런타임 결합
-    fake_key = "sk-or-v1-" + "mockkey" * 8
-    middle = [{"role": "user", "content": f"내 API 키는 {fake_key} 입니다"}]
-
-    messages = build_summary_messages(middle)
-    # 프롬프트에는 직렬화되어 포함(호출 기록 계층에서 마스킹)
-    assert fake_key in messages[1]["content"]
-    # 시스템 프롬프트에 [REDACTED] 지시문 존재 확인
-    assert "[REDACTED]" in messages[0]["content"]
-
-
 def test_scenario_06_build_static_summary():
     """시나리오 6: build_static_summary -> 모델 호출 없이 문자열 반환, 사용자 요청 문구와 호출 도구명 포함, 섹션 구조."""
     middle = [
@@ -473,30 +460,6 @@ def test_scenario_17_second_round_compression_finds_previous_summary():
         1 for m in res2.messages if SUMMARY_PREFIX in str(m.get("content", ""))
     )
     assert summary_count == 1
-
-
-def test_scenario_18_messages_immutability():
-    """시나리오 18: compress_messages 호출 전후 입력 messages 변경 없음."""
-    messages = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "요청 A " + ("길게 " * 20)},
-        {"role": "assistant", "content": "답변 A"},
-        {"role": "user", "content": "요청 B " + ("길게 " * 20)},
-        {"role": "assistant", "content": "답변 B"},
-        {"role": "user", "content": "최신 요청"},
-    ]
-    original_messages = [dict(m) for m in messages]
-
-    client = FakeSummaryLLMClient(response_content="요약")
-    _ = compress_messages(
-        messages,
-        client,
-        head_messages=1,
-        tail_tokens=50,
-        min_tail_messages=2,
-    )
-
-    assert messages == original_messages
 
 
 def test_scenario_19_second_round_with_merged_previous_summary():

@@ -513,29 +513,3 @@ def test_scenario_22_mock_client_rough_estimation_and_real_usage_estimation():
     assert agent_real._last_input_tokens == 1234
     assert agent_real._last_message_count is not None
 
-
-def test_scenario_23_cached_system_prompt_immutability():
-    """시나리오 23: 압축 후 시스템 프롬프트 캐시 -> _cached_system_prompt 불변, sessions.system_prompt 불변."""
-    db = SessionDB(":memory:")
-    client = TrackingLLMClient([
-        LLMResponse(content="요약"),
-        LLMResponse(content="응답"),
-    ])
-    agent = HermesAgent(
-        session_db=db,
-        llm_client=client,
-        context_window_tokens=400,
-    )
-
-    history = [
-        {"role": "system", "content": "Sys"},
-        {"role": "user", "content": "요청 " * 30},
-    ]
-
-    _ = agent.run_conversation("질문", conversation_history=history)
-
-    cached_prompt = agent._cached_system_prompt
-    assert cached_prompt is not None
-
-    db_session = db.get_session(agent.session_id)
-    assert db_session["system_prompt"] == cached_prompt

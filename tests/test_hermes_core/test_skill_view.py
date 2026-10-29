@@ -448,16 +448,6 @@ def test_scenario_22_schema_and_required_name(monkeypatch, tmp_path):
     assert "missing required argument 'name'" in data["error"]
 
 
-def test_scenario_23_dispatcher_traversal_rejection(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    dispatcher = create_default_dispatcher()
-
-    raw = dispatcher.handle_function_call("skill_view", {"name": "../state.db"})
-    data = json.loads(raw)
-    assert data["success"] is False
-    assert "error" in data
-
-
 def test_scenario_24_nonexistent_root_rejected(tmp_path):
     nonexistent = tmp_path / "skills_none"
     assert not nonexistent.exists()

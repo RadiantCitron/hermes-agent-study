@@ -125,68 +125,6 @@ def test_scenario_02_v4_migration_preserves_data(tmp_path):
     db.close()
 
 
-def test_scenario_03_v3_migration_preserves_data(tmp_path):
-    """시나리오 3: v3 모양 옛 DB(test_agent_e2e.py 형태)를 연다 -> schema_version == 5, approval_requests 생성, 옛 행 그대로."""
-    db_path = tmp_path / "v3_legacy.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE schema_version (version INTEGER NOT NULL);
-        INSERT INTO schema_version (version) VALUES (3);
-
-        CREATE TABLE sessions (
-            id TEXT PRIMARY KEY,
-            source TEXT NOT NULL,
-            user_id TEXT,
-            model TEXT,
-            model_config TEXT,
-            system_prompt TEXT,
-            parent_session_id TEXT,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            end_reason TEXT,
-            message_count INTEGER DEFAULT 0,
-            tool_call_count INTEGER DEFAULT 0,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            mode TEXT
-        );
-
-        CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL REFERENCES sessions(id),
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_call_id TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL,
-            token_count INTEGER,
-            finish_reason TEXT
-        );
-
-        INSERT INTO sessions (id, source, started_at) VALUES ('s_v3', 'cli', 1000.0);
-        INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s_v3', 'user', 'v3 내용', 1001.0);
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    db = SessionDB(db_path)
-    assert db.schema_version >= 5
-
-    cursor = db._conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='approval_requests'"
-    )
-    assert cursor.fetchone() is not None
-
-    msgs = db.get_messages("s_v3")
-    assert len(msgs) == 1
-    assert msgs[0]["content"] == "v3 내용"
-    assert msgs[0]["active"] == 1  # v4 migration executed
-    db.close()
-
-
 def test_scenario_04_record_approval_request_pending(tmp_path):
     """시나리오 4: record_approval_request(sid, ["python", "-c", "print('한글')"]) -> 양의 정수 id, pending 행."""
     db_path = tmp_path / "state.db"

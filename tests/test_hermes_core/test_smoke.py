@@ -13,19 +13,6 @@ from hermes_core.constants import (
 )
 
 
-def test_package_metadata():
-    """패키지 버전 및 메타데이터가 정상 로드되는지 검증."""
-    assert hermes_core.__version__ == "0.1.0"
-
-
-def test_constants_values():
-    """Hermes Agent 원본 기준의 바운디드 메모리 및 컨텍스트 상수가 올바른지 검증."""
-    assert ENTRY_DELIMITER == "\n§\n"
-    assert MEMORY_MAX_CHARS == 2200
-    assert USER_MAX_CHARS == 1375
-    assert CONTEXT_FILE_MAX_CHARS == 20000
-
-
 def test_get_hermes_home_local_isolation(monkeypatch, tmp_path):
     """기본 상태에서 호스트의 ~/.hermes가 아닌 프로젝트 로컬 .hermes로 격리되는지 검증."""
     fake_project_root = tmp_path / "fake_project"

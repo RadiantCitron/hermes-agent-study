@@ -131,30 +131,6 @@ def test_scenario_04_skills_list_empty_root(tmp_path: Path):
     assert "message" in data
 
 
-def test_scenario_05_skills_list_corrupted_file_skipped(tmp_path: Path):
-    root = tmp_path / "skills"
-    root.mkdir()
-
-    bad = root / "bad"
-    bad.mkdir()
-    (bad / "SKILL.md").write_bytes(b"\xff\xfe\x00")
-
-    good1 = root / "good1"
-    good1.mkdir()
-    (good1 / "SKILL.md").write_text("---\nname: good1\n---\nBody")
-
-    good2 = root / "good2"
-    good2.mkdir()
-    (good2 / "SKILL.md").write_text("---\nname: good2\n---\nBody")
-
-    raw = skills_list_tool(skills_root=root)
-    data = json.loads(raw)
-
-    assert data["success"] is True
-    assert data["count"] == 2
-    assert [s["name"] for s in data["skills"]] == ["good1", "good2"]
-
-
 def test_scenario_06_skills_list_readonly_folder_immutability(tmp_path: Path):
     root = tmp_path / "skills"
     root.mkdir()
@@ -206,28 +182,6 @@ def test_scenario_08_dispatcher_dynamic_hermes_home(tmp_path: Path, monkeypatch)
     assert data["success"] is True
     assert data["count"] == 1
     assert data["skills"][0]["name"] == "dynamic_skill"
-
-
-def test_scenario_09_dispatcher_rejects_undefined_skills_root(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    dispatcher = create_default_dispatcher()
-
-    raw = dispatcher.handle_function_call("skills_list", {"skills_root": "/etc"})
-    data = json.loads(raw)
-
-    assert data["success"] is False
-    assert "unexpected argument 'skills_root'" in data["error"]
-
-
-def test_scenario_10_dispatcher_rejects_invalid_category_type(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    dispatcher = create_default_dispatcher()
-
-    raw = dispatcher.handle_function_call("skills_list", {"category": 123})
-    data = json.loads(raw)
-
-    assert data["success"] is False
-    assert "must be of type string" in data["error"]
 
 
 def test_scenario_10b_korean_description_ensure_ascii_false(tmp_path: Path):

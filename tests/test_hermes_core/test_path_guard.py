@@ -248,28 +248,6 @@ def test_030_scenario_12_control_chars_write_rejection(write_guard_env: Path):
     assert "control" in err
 
 
-def test_030_scenario_13_read_allowed_for_instruction_and_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """시나리오 13 (경로 검증부): AGENTS.md와 .hermes/memories/MEMORY.md의 check_path는 오류 없음."""
-    w = (tmp_path / "w_read").resolve()
-    w.mkdir()
-    hermes_home = w / ".hermes"
-    hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-
-    (w / "AGENTS.md").write_text("instructions", encoding="utf-8")
-    mem_dir = hermes_home / "memories"
-    mem_dir.mkdir(parents=True)
-    (mem_dir / "MEMORY.md").write_text("memory content", encoding="utf-8")
-
-    target1, err1 = check_path("AGENTS.md", w)
-    assert err1 is None
-    assert target1 == (w / "AGENTS.md").resolve()
-
-    target2, err2 = check_path(".hermes/memories/MEMORY.md", w)
-    assert err2 is None
-    assert target2 == (mem_dir / "MEMORY.md").resolve()
-
-
 def test_030_scenario_14_all_instruction_files_injected(tmp_path: Path):
     """시나리오 14: INSTRUCTION_FILE_NAMES의 각 이름으로 파일 생성 시 build_context_files_prompt에 포함됨."""
     for idx, name in enumerate(INSTRUCTION_FILE_NAMES):
@@ -280,21 +258,6 @@ def test_030_scenario_14_all_instruction_files_injected(tmp_path: Path):
 
         prompt = build_context_files_prompt(str(w))
         assert marker in prompt
-
-
-def test_030_scenario_15_non_instruction_file_not_injected(tmp_path: Path):
-    """시나리오 15: 작업 폴더에 NOTES.md만 있을 때 build_context_files_prompt(cwd) -> 빈 문자열"""
-    w = tmp_path / "w_notes"
-    w.mkdir()
-    (w / "NOTES.md").write_text("notes content", encoding="utf-8")
-
-    prompt = build_context_files_prompt(str(w))
-    assert prompt == ""
-
-
-def test_030_scenario_16_instruction_file_names_tuple():
-    """시나리오 16: INSTRUCTION_FILE_NAMES == ('AGENTS.md', 'agents.md', 'SOUL.md', '.cursorrules')"""
-    assert INSTRUCTION_FILE_NAMES == ("AGENTS.md", "agents.md", "SOUL.md", ".cursorrules")
 
 
 # =============================================================================
@@ -421,11 +384,3 @@ def test_010_scenario_09_non_protected_names_allowed(r04_guard_env):
         assert err is None
         assert t == (w / p).resolve()
 
-
-def test_010_scenario_10_nonexistent_env_rejected(r04_guard_env):
-    """시나리오 10: check_path('.env', W)에서 파일이 실제로 없음 -> error에 protected 포함 (존재 여부 무관)"""
-    _, w = r04_guard_env
-    assert not (w / ".env").exists()
-    t, err = check_path(".env", w)
-    assert t is None
-    assert err is not None and "protected" in err

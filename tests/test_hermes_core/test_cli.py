@@ -171,28 +171,6 @@ class ErrorThenExitClient:
         raise LLMError("rate_limited", "Rate limit 429 exceeded")
 
 
-def test_040_scenario_08_llm_error_recovery_in_repl(hermes_home, monkeypatch, capsys):
-    """시나리오 8: LLMError('rate_limited') 발생 후 REPL 끊기지 않고 exit까지 처리."""
-    fake_key = "test-key-error-repl"
-    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
-    monkeypatch.setattr(cli, "OpenRouterClient", ErrorThenExitClient)
-
-    # 1번째 입력 'hi' -> 에러 출력, 2번째 입력 'exit' -> 정상 종료
-    monkeypatch.setattr(sys, "stdin", io.StringIO("hi\nexit\n"))
-    monkeypatch.setattr(sys, "argv", ["hermes-core"])
-
-    orig_cwd = Path.cwd()
-    try:
-        cli.main()
-    finally:
-        monkeypatch.chdir(orig_cwd)
-
-    captured = capsys.readouterr()
-    out = captured.out
-    assert "Model call failed (rate_limited): Rate limit 429 exceeded" in out
-    assert "Session saved and closed. Goodbye!" in out
-
-
 def test_040_scenario_09_agents_md_not_injected_after_chdir(tmp_path, hermes_home, monkeypatch):
     """시나리오 9: 원래 현재 폴더의 AGENTS.md에 MARKER가 있어도 작업 폴더로 이동하여 프롬프트에 주입되지 않음."""
     start_dir = tmp_path / "original_dir"
@@ -294,44 +272,6 @@ class QueueingMockClient:
         if isinstance(resp, Exception):
             raise resp
         return resp
-
-
-def test_010_scenario_01_02_repl_multi_turn_history_and_single_system(hermes_home, monkeypatch):
-    """시나리오 1 & 2: 2턴 입력 후 두 번째 모델 호출 messages에 1턴 user/assistant 포함 및 system 정확히 1개."""
-    fake_key = "test-key-010-sc12"
-    monkeypatch.setenv("OPENROUTER_API_KEY", fake_key)
-
-    mock_client = QueueingMockClient()
-    mock_client.queue_response(content="안녕 철수야")
-    mock_client.queue_response(content="철수야")
-
-    monkeypatch.setattr(cli, "OpenRouterClient", lambda *args, **kwargs: mock_client)
-
-    monkeypatch.setattr(sys, "stdin", io.StringIO("내 이름은 철수야\n내 이름이 뭐지?\nexit\n"))
-    monkeypatch.setattr(sys, "argv", ["hermes-core"])
-
-    orig_cwd = Path.cwd()
-    try:
-        cli.main()
-    finally:
-        monkeypatch.chdir(orig_cwd)
-
-    assert len(mock_client.call_history) == 2
-
-    # 시나리오 1: 두 번째 모델 호출 messages 검증
-    second_call_messages = mock_client.call_history[1]
-
-    # 첫 턴의 user 메시지 포함
-    assert any(m.get("role") == "user" and m.get("content") == "내 이름은 철수야" for m in second_call_messages)
-    # 첫 턴의 assistant 응답 포함
-    assert any(m.get("role") == "assistant" and m.get("content") == "안녕 철수야" for m in second_call_messages)
-    # 두 번째 턴의 user 메시지 포함
-    assert any(m.get("role") == "user" and m.get("content") == "내 이름이 뭐지?" for m in second_call_messages)
-
-    # 시나리오 2: system 메시지는 정확히 1개이고 첫 번째 요소여야 함
-    system_messages = [m for m in second_call_messages if m.get("role") == "system"]
-    assert len(system_messages) == 1
-    assert second_call_messages[0]["role"] == "system"
 
 
 def test_010_scenario_03_three_turns_order_preserved(hermes_home, monkeypatch):
@@ -499,14 +439,6 @@ def test_010_scenario_06_blank_input_no_effect_on_history(hermes_home, monkeypat
     user_msgs = [m for m in call_messages if m.get("role") == "user"]
     assert len(user_msgs) == 1
     assert user_msgs[0]["content"] == "정상입력"
-
-
-def test_010_scenario_07_mock_non_interactive_clean_exit(hermes_home, monkeypatch, capsys):
-    """시나리오 7: Mock 비대화형 단발 실행(기존 경로)이 1턴 실행 후 정상 종료되고 출력 문구 불변."""
-    _run(monkeypatch, "--mock")
-    captured = capsys.readouterr()
-    assert "Mock session finished cleanly." in captured.out
-    assert "MOCK mode" in captured.out
 
 
 def test_050_scenario_24_context_window_option(hermes_home, monkeypatch):

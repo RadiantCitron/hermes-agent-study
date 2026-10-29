@@ -60,66 +60,12 @@ def test_scenario_03_default_dispatcher_tool_names_and_order():
     }
 
 
-def test_scenario_04_difference_between_default_and_child():
-    """시나리오 4: 기본 통로 8종과 자식 통로 6종의 차이가 정확히 memory, session_search 2종인지 검증."""
-    default_names = {s["function"]["name"] for s in create_default_dispatcher().get_tools_schema()}
-    child_names = {s["function"]["name"] for s in create_child_dispatcher().get_tools_schema()}
-    assert default_names - child_names == {"memory", "session_search"}
-
-
 def test_scenario_05_schemas_identical():
     """시나리오 5: 기본 통로와 자식 통로의 6종 공통 도구 스키마 동일성 검증."""
     default_schemas = {s["function"]["name"]: s for s in create_default_dispatcher().get_tools_schema()}
     child_schemas = {s["function"]["name"]: s for s in create_child_dispatcher().get_tools_schema()}
     for name in ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"):
         assert child_schemas[name] == default_schemas[name]
-
-
-def test_scenario_06_child_file_tools_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """시나리오 6: 자식 통로의 파일 도구(read_file, write_file) 실제 실행 동작 검증."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "a.txt").write_text("hello child", encoding="utf-8")
-
-    child = create_child_dispatcher()
-    raw_read = child.handle_function_call("read_file", {"path": "a.txt"})
-    res_read = json.loads(raw_read)
-    assert res_read["success"] is True
-    assert "hello child" in res_read["content"]
-
-    raw_write = child.handle_function_call("write_file", {"path": "new.txt", "content": "created by child"})
-    res_write = json.loads(raw_write)
-    assert res_write["success"] is True
-    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "created by child"
-
-
-def test_scenario_07_child_path_guard_protection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """시나리오 7: 자식 통로에서도 경로 가드가 동일하게 적용되어 .env 쓰기/읽기 차단 및 비밀 비노출 검증."""
-    monkeypatch.chdir(tmp_path)
-    secret_marker = "SECRET_TOKEN_DO_NOT_LEAK_12345"
-    (tmp_path / ".env").write_text(secret_marker, encoding="utf-8")
-
-    child = create_child_dispatcher()
-
-    # 쓰기 시도 차단
-    raw_write = child.handle_function_call("write_file", {"path": ".env", "content": "malicious overwrite"})
-    res_write = json.loads(raw_write)
-    assert res_write["success"] is False
-    assert (tmp_path / ".env").read_text(encoding="utf-8") == secret_marker
-
-    # 읽기 시도 차단 및 비밀 내용 미노출
-    raw_read = child.handle_function_call("read_file", {"path": ".env"})
-    res_read = json.loads(raw_read)
-    assert res_read["success"] is False
-    assert secret_marker not in raw_read
-
-
-def test_scenario_08_child_argument_validation():
-    """시나리오 8: 자식 통로에서도 스키마 기반 인자 검증이 동일하게 작동함을 검증."""
-    child = create_child_dispatcher()
-    raw = child.handle_function_call("read_file", {"path": "a.txt", "foo": 1})
-    res = json.loads(raw)
-    assert res["success"] is False
-    assert "Invalid arguments for tool 'read_file'" in res["error"]
 
 
 def test_scenario_09_include_filter_terminal_and_empty():

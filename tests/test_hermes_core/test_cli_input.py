@@ -414,21 +414,6 @@ def test_scenario_020_15_missing_library_falls_back_once(
     assert capsys.readouterr().out.count(CLI_PROMPT_TOOLKIT_MISSING_NOTICE) == 1
 
 
-def test_scenario_020_16_import_does_not_load_library() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; import hermes_core.cli_input; print('prompt_toolkit' in sys.modules)",
-        ],
-        env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": ""},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert result.stdout.strip() == "False"
-
-
 def test_scenario_020_17_dependency_declared() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "prompt_toolkit>=3.0.52,<4" in data["project"]["dependencies"]

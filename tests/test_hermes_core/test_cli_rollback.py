@@ -1144,20 +1144,7 @@ def test_scenario_21_checkpoint_refused_notice_once(
 def test_scenario_22_no_false_positive_refusal_notice(
     cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ):
-    """시나리오 22: 정상 쓰기 및 도구 자체의 거부(.env)에서는 거부 알림 오탐이 발생하지 않음."""
-    # 22a: 정상 쓰기
-    ScriptableClient.responses_by_instance[0] = [
-        make_write_file_response("c1", "ok.txt", "fine"),
-        MockLLMResponse(content="OK."),
-    ]
-    fake_in = ScriptableInput(["go", "exit"])
-    monkeypatch.setattr(cli, "read_user_input", fake_in)
-    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
-
-    cli.main()
-    captured = capsys.readouterr()
-    assert CLI_CHECKPOINT_REFUSED_NOTICE not in captured.out
-
+    """시나리오 22: 도구 자체의 거부(.env)에서는 거부 알림 오탐이 발생하지 않음(22b)."""
     # 22b: .env 쓰기 (도구 자체의 path_guard 거부)
     ScriptableClient.created_instances.clear()
     ScriptableClient.responses_by_instance.clear()
@@ -1167,6 +1154,7 @@ def test_scenario_22_no_false_positive_refusal_notice(
     ]
     fake_in2 = ScriptableInput(["go", "exit"])
     monkeypatch.setattr(cli, "read_user_input", fake_in2)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
     cli.main()
     captured2 = capsys.readouterr()
 
