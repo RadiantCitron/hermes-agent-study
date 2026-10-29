@@ -83,20 +83,15 @@ flowchart TD
 
 ### 2-5. 클래스·모듈 관계
 
+한 그림에 3개씩 두 그림으로 나눈다(가로 한 줄 3개 규칙). 위는 「쓰기를 감싸는 쪽」, 아래는 「기록과 되돌리기를 하는 쪽」이다.
+
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "11px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 30}}}%%
 classDiagram
-  class Checkpointer {
-    +begin_turn(label)
-    +record_before(tool, path) id
-    +mark_applied(id) / mark_failed(id)
-    +plan_rollback() RollbackPlan
-    +execute_rollback(plan) RollbackResult
-  }
-  class SessionDB {
-    +record_file_checkpoint(...) int
-    +update_file_checkpoint(...) bool
-    +get_file_checkpoints(session_id) list
+  class cli {
+    <<module>>
+    --no-checkpoints
+    /rollback
   }
   class create_default_dispatcher {
     <<function>>
@@ -107,26 +102,60 @@ classDiagram
     write_file_tool()
     patch_tool()
   }
+  cli --> create_default_dispatcher : 사전 조립 주입
+  create_default_dispatcher --> file_tools : 감싼 핸들러에서 호출
+```
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "11px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 30}}}%%
+classDiagram
+  class Checkpointer {
+    +begin_turn(label)
+    +record_before(tool, path) id
+    +finalize(id)
+    +plan_rollback() RollbackPlan
+    +execute_rollback(plan) RollbackResult
+  }
+  class SessionDB {
+    +record_file_checkpoint(...) int
+    +update_file_checkpoint(...) bool
+    +get_file_checkpoints(session_id) list
+  }
   class path_guard {
     <<module, 무변경>>
     check_write_path()
   }
-  class cli {
-    <<module>>
-    --no-checkpoints
-    /rollback
-  }
   Checkpointer --> SessionDB : 기록·조회
   Checkpointer --> path_guard : 기록 전·복원 전 판정
-  create_default_dispatcher --> Checkpointer : 클로저로 감쌈
-  create_default_dispatcher --> file_tools : 등록
-  cli --> Checkpointer : 생성·begin_turn·/rollback
-  cli --> create_default_dispatcher : 사전 조립 주입
 ```
 
-메서드 이름과 반환 모양은 020·030 지시서에서 확정한다.
+두 그림의 연결: `cli`가 `Checkpointer`를 만들어 `create_default_dispatcher`에 넘기고(감싼 핸들러가 `record_before`·`finalize`를 부름), 턴 경계(`begin_turn`)와 `/rollback`(`plan_rollback`·`execute_rollback`)은 `cli`가 직접 부른다. 메서드 이름과 반환 모양은 020·030 지시서에서 확정한다(`finalize`는 §6-3의 「파일 상태로 결과 확정」을 맡는 자리의 안이다).
 
 ### 2-6. 실행 순서 (대표 시나리오: 한 턴에서 `patch` 한 번, 다음 입력으로 `/rollback`)
+
+한 그림에 참여자 3개씩, 쓰기와 되돌리기 두 그림으로 나눈다.
+
+**① 쓰기** (CLI가 턴 경계를 알린 뒤 `run_conversation`을 부르고, 에이전트가 모델의 `patch` 호출을 디스패처에 넘긴 다음부터. CLI·에이전트·모델 부분은 생략)
+
+```mermaid
+%%{init: {"themeVariables": {"fontSize": "11px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 30}}}%%
+sequenceDiagram
+  participant W as 감싼 핸들러(디스패처)
+  participant K as Checkpointer
+  participant T as patch_tool
+  W->>K: record_before(patch, path)
+  K->>K: 경로 판정 · 바뀌기 전 상태 읽기
+  K-->>W: 기록 id (DB에 pending 커밋 완료)
+  W->>T: 원래 도구 실행
+  T-->>W: 결과 JSON (또는 예외)
+  W->>K: finalize(id)
+  K->>K: 파일 상태를 다시 읽어 applied / failed 확정
+  W-->>W: 도구 결과를 그대로 반환 (예외는 다시 던짐)
+```
+
+DB 기록(`pending` 선기록, `applied`/`failed` 갱신)은 `Checkpointer`가 `SessionDB`를 불러서 한다(그림 생략). 선기록이 실패하면 `W`는 도구를 부르지 않고 실패 JSON을 돌려준다.
+
+**② 되돌리기** (다음 입력으로 `/rollback`. 모델은 부르지 않는다)
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "11px"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 30}}}%%
@@ -134,20 +163,14 @@ sequenceDiagram
   participant H as 사람
   participant C as CLI
   participant K as Checkpointer
-  participant T as patch_tool
-  participant DB as SessionDB
-  H->>C: 입력 한 줄
-  C->>K: begin_turn
-  C->>T: (에이전트·디스패처 경유) patch 호출 → 감싼 핸들러
-  K->>DB: 바뀌기 전 내용 pending 선기록
-  K->>T: 원래 도구 실행
-  T-->>K: 성공 JSON
-  K->>DB: 바뀐 뒤 해시 · applied
   H->>C: /rollback
-  C->>K: 되돌릴 턴 찾기 · 목록
+  C->>K: plan_rollback()
+  K-->>C: 대상 턴과 파일 목록
   C->>H: 파일 목록 + y/N
   H-->>C: y
-  K->>DB: 현재 해시 대조 후 복원 · rolled_back
+  C->>K: execute_rollback(plan)
+  K->>K: 파일마다 경로 재판정 · 현재 해시 대조 · 복원
+  K-->>C: rolled_back / skipped 결과
   C->>H: 되돌림 결과
 ```
 
@@ -194,7 +217,7 @@ stateDiagram-v2
 |---|---|---|---|
 | 1 | 체크포인트 기능이 없는 구성에서 파일 도구 동작이 바뀜 | 기존 동작 파괴 | 주입 없음 = 기존 핸들러 그대로. 시험: 라이브러리 기본·자식·`--no-checkpoints` (가정 A) |
 | 2 | 기록 없이 파일이 바뀜 | 선기록 위반 | 선기록이 예외·실패면 도구를 부르지 않고 실패 JSON. 시험: 기록 실패를 흉내 내 파일 불변 확인 (가정 B) |
-| 3 | 도구 실패인데 `applied`로 남아 되돌리기가 엉뚱한 파일을 지움 | 원장 오염 | 도구 반환 JSON의 `success`로 판정해 `failed`. 되돌리기는 `applied`만 대상 (가정 B·C) |
+| 3 | 도구 실패인데 `applied`로 남아 되돌리기가 엉뚱한 파일을 지움, 또는 도구 성공인데 `failed`로 남아 되돌리기 대상에서 빠짐 | 원장 오염 | 결과는 도구가 돌려준 글이 아니라 **실행 뒤 파일 상태**로 확정한다(§6-3). 되돌리기는 `applied`만 대상 (가정 B·C) |
 | 4 | 기록 뒤·쓰기 전에 프로세스가 끝나 `pending`이 남음 | 원장과 파일 어긋남 | 되돌리기에서 `pending`은 현재 파일 상태와 대조하는 규칙을 020에서 정함 (가정 F, **미확인**) |
 | 5 | 사람이 나중에 고친 파일을 되돌리기가 덮음 | 데이터 손실 | 복원 직전 현재 해시(또는 존재 여부)를 `applied` 때 해시와 대조, 다르면 `skipped` (가정 D) |
 | 6 | 되돌리기가 작업 폴더 밖·보호 파일·쓰기 금지 파일을 건드림 | 샌드박스 오염 | 복원 직전 `check_write_path` 재판정, 실패면 `skipped` (가정 E) |
@@ -207,6 +230,9 @@ stateDiagram-v2
 | 13 | `/rollback`이 모델 입력으로 넘어감 | 오작동 | REPL에서 모델 호출 전에 가로챔. 시험: `/rollback` 입력 뒤 모델 호출 횟수 불변 |
 | 14 | 비밀이 기록됨 | 비밀 노출 | 보호 파일(`.env*`·`.git`)·지시문·상태 폴더는 쓰기 도구가 이미 거부하므로 기록 대상이 아님. 기록 전 판정도 같은 함수 (가정 E) |
 | 15 | 스키마 v6 마이그레이션이 기존 DB를 깨뜨림 | 데이터 | `CREATE TABLE IF NOT EXISTS`만 사용, v3·v4·v5 DB 열기 시험 |
+| 16 | 도구 결과 JSON이 깨졌거나 `success`가 불(bool)이 아니거나, 도구가 예외를 던져 결과를 해석할 수 없음 | 비정형 출력 파싱 실패 | 확정에 결과 JSON을 쓰지 않는다. 예외도 `try/finally`로 확정을 거친 뒤 다시 던져 디스패처의 기존 예외 처리에 맡긴다. 결과 JSON과 파일 상태가 어긋나면 파일 상태를 따르고 `reason`에 어긋남을 남긴다. 시험: 깨진 JSON·`success` 없음·예외를 내는 가짜 도구 (가정 B) |
+| 17 | 실행 뒤 파일을 다시 읽지 못해 결과를 확정할 수 없음 | 원장과 파일 어긋남 | `skipped`(사유 「결과 확인 실패」)로 남겨 되돌리기 대상에서 빼고, 도구 결과는 그대로 모델에게 돌려준다. 되돌릴 수 없는 변경이 생길 수 있음을 한계로 문서화 (가정 F) |
+| 18 | 감싼 핸들러의 인자 모양이 도구와 달라 호출이 어긋남, 또는 인자 검증에 실패할 호출이 기록부터 남김 | 도구 호출 파라미터 스키마 불일치 | 감싼 핸들러는 받은 인자를 그대로 넘기고 모델에게 보이는 스키마는 바꾸지 않는다. 디스패처는 핸들러를 부르기 **전에** 인자를 검증하므로(`_validate_arguments`), 검증에 실패한 호출은 기록되지 않는다. 시험: 스키마 동일성, 잘못된 인자 호출 뒤 원장 0행 (가정 A·B) |
 
 ---
 
@@ -232,7 +258,9 @@ stateDiagram-v2
 턴 번호는 체크포인트 기능이 세션 안에서 센다. 바뀌기 전 상태 읽기는 쓰기 도구와 같은 경로 판정을 쓰고, 판정 실패면 기록하지 않고 도구에 넘긴다(도구가 같은 이유로 거부). 되돌리기는 「계획 세우기」(대상 턴과 파일 목록, 파일마다 예상 결과)와 「실행」을 나눠, CLI가 계획을 보이고 확인받은 뒤 실행한다. 계획과 실행 사이에 파일이 바뀌어도 실행 때 다시 대조한다.
 
 ### 6-3. 디스패처 연동 (030)
-`create_default_dispatcher(..., checkpointer=None)`가 `write_file`·`patch` 핸들러를 클로저로 감싼다. 감싼 핸들러는 기록 → 원래 도구 → 결과 JSON의 `success`로 확정한다. 모델에게 보이는 스키마는 바뀌지 않는다.
+`create_default_dispatcher(..., checkpointer=None)`가 `write_file`·`patch` 핸들러를 클로저로 감싼다. 감싼 핸들러는 기록 → 원래 도구 → 결과 확정 순서다. 모델에게 보이는 스키마는 바뀌지 않는다.
+
+**결과는 도구가 돌려준 글이 아니라 실행 뒤 파일 상태로 확정한다.** 지금의 두 도구는 성공하면 반드시 파일을 바꾼다. `write_file`은 없던 파일을 만들고, `patch`는 `old_string`과 `new_string`이 같으면 거부하므로 성공하면 내용이 달라진다(`file_tools.py`). 그래서 「바뀌기 전 상태와 같으면 `failed`, 다르면 `applied`(그 내용의 해시)」로 판정할 수 있고, 결과 JSON이 깨지거나 도구가 예외를 던져도 판정이 흔들리지 않는다. 결과 JSON의 `success`는 교차 확인에만 쓰고, 어긋나면 `reason`에 남긴다. 해시는 파일의 원시 바이트로 계산해 디코드 실패가 끼어들지 않게 한다. 실행 뒤 파일을 읽지 못하면 `skipped`(사유 「결과 확인 실패」)로 둔다. 확정은 `try/finally`로 예외 경로에서도 거치고, 예외는 다시 던져 디스패처의 기존 처리(실패 JSON으로 감쌈)에 맡긴다. 이 판정 규칙의 세부와 메서드 이름은 020·030 지시서에서 확정한다.
 
 ### 6-4. CLI 연동 (040)
 `--no-checkpoints`가 없으면 체크포인트 기능을 만들어 디스패처에 넣는다(승인기와 같은 사전 조립). `run_conversation` 직전에 턴 경계를 알린다. `/rollback`은 REPL에서 모델 호출 전에 가로챈다. 확인 질문은 `read_user_input`을 재사용한다. 배너에 켜짐 안내와 「파일 도구 변경만 대상」 한 줄.
