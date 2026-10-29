@@ -345,15 +345,67 @@ def test_050_scenario_02_new_db_schema_v4_column_match(tmp_path):
 
 
 def test_050_scenario_03_migration_idempotent(tmp_path):
-    """시나리오 3: 마이그레이션 두 번 실행(멱등성) 시 오류 없이 버전 4 유지."""
-    db_path = tmp_path / "idempotent.db"
+    """시나리오 3: v3 레거시 DB에서 마이그레이션 두 번 실행(멱등성) 시 오류 없이 버전 4 유지."""
+    import sqlite3
+
+    db_path = tmp_path / "v3_idempotent.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            user_id TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL NOT NULL,
+            ended_at REAL,
+            end_reason TEXT,
+            message_count INTEGER DEFAULT 0,
+            tool_call_count INTEGER DEFAULT 0,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            mode TEXT
+        );
+
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_count INTEGER,
+            finish_reason TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # 1차 마이그레이션 실행
     db1 = SessionDB(db_path)
     assert db1.schema_version >= 4
+    cursor1 = db1._conn.execute("PRAGMA table_info(messages)")
+    cols1 = [row["name"] for row in cursor1.fetchall()]
+    for c in ["active", "compacted", "is_copy"]:
+        assert c in cols1
     db1.close()
 
-    # 다시 열기
+    # 2차 마이그레이션 재실행 (멱등성 검증)
     db2 = SessionDB(db_path)
     assert db2.schema_version >= 4
+    cursor2 = db2._conn.execute("PRAGMA table_info(messages)")
+    cols2 = [row["name"] for row in cursor2.fetchall()]
+    for c in ["active", "compacted", "is_copy"]:
+        assert c in cols2
     db2.close()
 
 

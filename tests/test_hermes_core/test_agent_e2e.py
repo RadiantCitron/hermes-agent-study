@@ -3177,7 +3177,7 @@ def test_r10_050_scenario_07_protected_files_blocked_before_ask(r10_e2e_env):
         tool_msg = [m for m in res["messages"] if m["role"] == "tool"][0]
         data = json.loads(tool_msg["content"])
         assert data["success"] is False
-        assert "protected" in data["error"].lower() or "not allowed" in data["error"].lower() or "denied" in data["error"].lower()
+        assert "refers to a protected file or folder" in data["error"]
 
 
 def test_r10_050_scenario_08_mixed_commands_execution_flow(r10_e2e_env):

@@ -223,6 +223,7 @@ def test_scenario_08_to_14_long_conversation_compression_and_invariants():
     # 복제된 tool 행의 tool_name 복원 확인
     raw_msgs = db.get_messages(agent.session_id)
     copied_tools = [m for m in raw_msgs if m["is_copy"] == 1 and m["role"] == "tool"]
+    assert len(copied_tools) >= 1  # 비어 있지 않음을 보강 단언
     for ct in copied_tools:
         if ct["tool_call_id"] == "tc_read_1":
             assert ct["tool_name"] == "read_file"
@@ -328,8 +329,14 @@ def test_scenario_16_multiple_compressions_within_max_per_run():
     # 요약 메시지는 최종 결과에 정확히 1개
     summary_count = sum(1 for m in res["messages"] if SUMMARY_PREFIX in str(m.get("content", "")))
     assert summary_count == 1
-    assert res["compression"]["count"] >= 1
+    # 재압축이 실제로 발생(2회)했음을 단언
+    assert res["compression"]["count"] == 2
     assert res["compression"]["count"] <= COMPRESSION_MAX_PER_RUN
+
+    # 재압축 요약 생성 호출(3번째 모델 호출: 인덱스 2)의 프롬프트에 1차 요약이 포함되었음을 보강 단언
+    assert len(client.call_history) >= 3
+    second_summary_prompt = client.call_history[2]["messages"][1]["content"]
+    assert "1차 요약" in second_summary_prompt
 
 
 def test_scenario_17_18_rejection_and_retry_growth():
