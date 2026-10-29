@@ -297,6 +297,20 @@ CHECKPOINT_TRANSITIONS = {
 # 체크포인트 대상 도구 목록 (write_file, patch만 대상)
 CHECKPOINT_TOOL_NAMES = ("write_file", "patch")
 
+# 세션당 체크포인트 누적 바이트 상한 (50MB)
+CHECKPOINT_SESSION_BYTES_LIMIT = 50_000_000
+
+# 체크포인트 상한 초과 에러 메시지
+CHECKPOINT_LIMIT_ERROR_MESSAGE = (
+    "Checkpoint storage limit exceeded ({limit} bytes). The file was not modified."
+)
+
+# 체크포인트 선기록 실패 에러 메시지
+CHECKPOINT_PRE_RECORD_FAILED_MESSAGE = (
+    "Failed to record checkpoint before modification ({reason}). The file was not modified."
+)
+
+
 
 
 
