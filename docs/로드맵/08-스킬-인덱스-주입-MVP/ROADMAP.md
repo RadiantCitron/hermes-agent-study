@@ -24,18 +24,18 @@ src/hermes_core/
   constants.py                      [변경] SKILLS_INDEX_* 상수 3개                        (010)
   agent/
     prompt_builder.py               [변경] render_skills_index, build_system_prompt 인자  (010, 020, 030)
-    agent.py                        [변경] skip_skills_index 인자, 인덱스 조립·주입        (020)
-  tools/
-    delegate_tool.py                [변경] 자식 생성부에 skip_skills_index=True 한 줄     (020)
+    agent.py                        [변경] skills_index 인자(기본 False), 인덱스 조립·주입  (020)
+  cli.py                            [변경] 실제 앱에서 skills_index 켜기                  (025)
 tests/test_hermes_core/
   test_skills_index.py              [신규] 렌더링·정제·상한                               (010)
-  test_agent_skills_index.py        [신규] 연동·고정·자식 제외·바이트 동일               (020)
+  test_agent_skills_index.py        [신규] 연동·고정·꺼짐 기본값·바이트 동일             (020)
+  test_cli_skills_index.py          [신규]                                              (025)
   test_skills_guidance.py           [무변경] 기존 600자·목록 미포함 시험 그대로 통과
   test_agent_e2e.py                 [변경] 인덱스 E2E 시나리오 추가 (기존 삭제 0줄)       (040)
 docs/작동원리/01-헤르메스코어-작동원리.md  [변경] 인덱스 영구 사실 동기화                   (040)
 ```
 
-`tools/skills_tool.py`, `dispatcher.py`, `session_db.py`, `llm_client.py`, `path_guard.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 스킬 발견은 기존 `discover_skills`를 그대로 쓴다.
+`tools/skills_tool.py`, `tools/delegate_tool.py`, `dispatcher.py`, `session_db.py`, `llm_client.py`, `path_guard.py`, 압축 모듈은 **무변경**이 목표다(가정 H). 스킬 발견은 기존 `discover_skills`를 그대로 쓴다.
 
 ### 2-2. 구성요소 흐름 (As-Is → To-Be)
 
@@ -46,22 +46,23 @@ flowchart LR
     A1 --> D1[스킬 도구 skills_list / skill_view]
   end
   subgraph ToBe["To-Be (08)"]
-    A2[HermesAgent] -- 세션 시작 1회 --> DS[discover_skills]
+    A2["HermesAgent<br/>skills_index=True (CLI)"] -- 세션 시작 1회 --> DS[discover_skills]
     DS -- 이름·설명 목록 --> R[render_skills_index 정제·상한]
     R -- 인덱스 블록 --> SP2["시스템 프롬프트<br/>정체성 + 도구 안내문 + 스킬 인덱스 + 메모리 + 지시문파일"]
     A2 --> D2[스킬 도구 skills_list / skill_view]
-    K[자식 HermesAgent] -. skip_skills_index=True 인덱스 없음 .-> SP3[자식 프롬프트]
+    K["자식·기본 HermesAgent<br/>skills_index=False(기본)"] -. 인덱스 없음 .-> SP3[프롬프트 그대로]
   end
 ```
 
-스킬 도구가 등록되지 않았거나(`skills_list`·`skill_view` 둘 중 하나라도 없음) 스킬이 하나도 없으면 인덱스 블록은 만들지 않고, 지시문은 To-Be에서도 As-Is와 바이트 단위로 같다.
+인덱스를 켜지 않았거나(기본값), 스킬 도구가 등록되지 않았거나(`skills_list`·`skill_view` 둘 중 하나라도 없음), 스킬이 하나도 없으면 인덱스 블록은 만들지 않고, 지시문은 To-Be에서도 As-Is와 바이트 단위로 같다.
 
 ### 2-3. 클래스·모듈 관계
 
 ```mermaid
 classDiagram
   class HermesAgent {
-    +skip_skills_index: bool  %% [신규 인자]
+    +skills_index: bool  %% [신규 인자, 기본 False]
+    -_skills_index_block: str  %% [신규] 에이전트당 한 번만 계산
     -_build_system_prompt(system_message) str  %% [변경]
   }
   class prompt_builder {
@@ -80,7 +81,7 @@ classDiagram
     +SKILLS_INDEX_MAX_CHARS
   }
   class delegate_tool {
-    +register_delegate_tool(...)  %% 자식 생성 시 skip_skills_index=True
+    +register_delegate_tool(...)  %% 무변경: 자식은 skills_index 기본값(False)
   }
   HermesAgent --> prompt_builder : 조립
   HermesAgent --> skills_tool : 목록 발견
@@ -119,9 +120,9 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  S[시스템 프롬프트 조립] --> Q1{skip_skills_index?}
-  Q1 -- 예: 자식 --> N[인덱스 없음]
-  Q1 -- 아니오 --> Q2{skills_list 와 skill_view 모두 등록?}
+  S[시스템 프롬프트 조립] --> Q1{skills_index 켜짐?}
+  Q1 -- 아니오: 기본·자식 --> N[인덱스 없음]
+  Q1 -- 예: CLI --> Q2{skills_list 와 skill_view 모두 등록?}
   Q2 -- 아니오 --> N
   Q2 -- 예 --> Q3{발견된 스킬 1개 이상?}
   Q3 -- 아니오 --> N
@@ -134,11 +135,12 @@ flowchart TD
 
 | 대상 | 영향 | 근거 |
 |---|---|---|
-| `HermesAgent` 생성자 | 인자 1개 추가(`skip_skills_index`, 기본 `False`) | 기존 호출부는 바뀌지 않는다. 가정 H를 020 시험으로 확인한다. |
+| `HermesAgent` 생성자 | 키워드 인자 1개 추가(`skills_index`, 기본 `False`) | 기본이 꺼짐이라 기존 호출부·기존 시험(스킬 이름이 프롬프트에 없다고 단언하는 `test_scenario_05_skills_list_not_injected_into_prompt` 포함)은 한 글자도 바뀌지 않는다. 가정 H를 020 시험으로 확인한다. |
 | `build_system_prompt` | 선택 인자 1개 추가(`skills_index_block`, 기본 없음) | 인자를 주지 않으면 출력이 이전과 바이트 단위로 같다(가정 C). |
 | `_build_system_prompt` | 인덱스 조립 한 곳 추가 | 세션당 1회 조립·캐시·DB 저장 구조는 그대로다. 인덱스가 캐시 안에 들어가므로 세션 중 불변(가정 B). |
 | `SKILLS_GUIDANCE`와 기존 시험 | 무변경 | 인덱스는 **별도 블록**이다. 600자 이하·목록 미포함 시험이 그대로 통과한다. |
-| 자식 에이전트 | `delegate_tool.py` 한 줄(`skip_skills_index=True`) | 자식 프롬프트에 인덱스가 없다(가정 F). 자식의 스킬 도구는 그대로다. |
+| 자식 에이전트 | 무변경 | 자식은 `skills_index` 기본값(False)이라 프롬프트에 인덱스가 없다(가정 F). `delegate_tool.py`는 바뀌지 않는다. 자식의 스킬 도구는 그대로다. |
+| `cli.py` | 실제 모드에서 `skills_index=True`로 켜기(025) | 07의 `--delegate`처럼 앱이 켜는 방식. 모의 모드 여부는 025에서 확정. |
 | 스킬 도구·디스패처 | 무변경 | `discover_skills`를 읽기만 한다. 스킬 폴더를 만들지 않는다. |
 | 압축 | 무영향 | 시스템 프롬프트는 압축 대상이 아니다(ADR-0005). 인덱스가 헤드에 있어도 압축 전후 헤드가 같다(가정 B, 040에서 확인). |
 | 스키마·DB | 무변경 | `sessions.system_prompt`에 조립된 문자열이 들어갈 뿐이다. |
@@ -157,7 +159,7 @@ flowchart TD
 | 4 | 세션 중 스킬 폴더가 바뀌어 지시문이 달라짐 | 캐시·정합성 | 세션 시작 1회 조립, 캐시 안에 고정. 두 번째 호출의 첫 system 메시지 동일 시험 |
 | 5 | 스킬이 없는데 빈 블록이나 제목만 남음 | 회귀 | 발견 0개면 블록 자체를 만들지 않음. 바이트 동일 시험 |
 | 6 | 스킬 폴더를 조회하다 폴더를 만들거나 쓰기 발생 | 샌드박스 오염 | `discover_skills`는 읽기 전용(06 시험). 인덱스 시험에서 폴더 미생성 재확인 |
-| 7 | 자식 프롬프트에 인덱스가 섞임 | 격리 누수 | `skip_skills_index`, 자식 시험 |
+| 7 | 자식 프롬프트에 인덱스가 섞임 | 격리 누수 | `skills_index` 기본 꺼짐(자식은 켜지 않음), 자식 시험 |
 | 8 | 인덱스를 넣어도 모델이 스킬을 부르지 않음 | 효과 불확실 | 구조 시험과 별개로 050 스모크에서 관찰. 실패해도 구조를 되돌리지 않고 기록 후 멈춤(가정 A) |
 | 9 | 규칙 문장이 너무 강해 불필요한 로딩이 늘어남 | 비용 | 약한 문장으로 시작(ADR-0008 §2-6), 050에서 호출 수 관찰 |
 | 10 | 스킬 이름·설명에 비ASCII(한글) 포함 시 글자 수 계산 오류 | 안정성 | 파이썬 문자열 길이(코드포인트) 기준, 시험에 한글 포함 |
@@ -183,10 +185,10 @@ flowchart TD
 `render_skills_index(skills, max_entries, desc_max_chars, max_chars)`는 `discover_skills`가 준 사전 목록을 받아 문자열을 돌려준다. 입력 순서를 유지하고(정렬은 `discover_skills`가 이미 결정적으로 한다), 설명이 없으면 이름만 쓴다. 정제 규칙(ADR-0008 §2-4)을 이 함수 하나에 모아 다른 곳에 흩뿌리지 않는다. 상한 판정은 실을 개수 `k`를 `min(유효 항목 수, 항목 수 상한)`부터 1까지 내려오며 `len(블록) <= 전체 길이 상한`인 첫 후보를 고른다(초과 안내 줄이 붙은 후보가 줄이 사라지는 마지막 후보보다 길 수 있어 앞에서부터 채우다 멈추면 전부 들어가는데도 잘린다). 입력이 비거나 하나도 들어맞지 않으면 빈 문자열을 돌려주며 호출부가 블록을 만들지 않는다. 사전이 아니거나 이름이 비는 항목은 건너뛴다.
 
 ### 6-2. 에이전트 연동 (020)
-조립부는 ① `skip_skills_index`가 아니고 ② 등록된 도구에 `skills_list`·`skill_view`가 모두 있으며 ③ `discover_skills(get_skills_dir())` 결과가 비어 있지 않을 때만 인덱스를 만들어 `build_system_prompt`에 넘긴다. 스킬 도구 이름 판정은 이미 `select_tools_guidance`가 쓰는 규칙(`skills_list`·`skill_view` 모두 포함)과 같게 한다.
+조립부는 ① `skills_index`가 켜져 있고 ② 등록된 도구에 `skills_list`·`skill_view`가 모두 있으며(`select_tools_guidance`와 같은 규칙) ③ `discover_skills(get_skills_dir())` 결과로 `render_skills_index`가 빈 문자열이 아닐 때만 인덱스를 `build_system_prompt`의 새 선택 인자로 넘긴다. 블록은 도구 안내문 바로 뒤, 호출자 지시 앞에 놓는다(배치는 020에서 확정). 계산은 **에이전트당 한 번**이다: 첫 조립 때 얻은 블록을 `_skills_index_block`에 보관해, `system_message`를 넘겨 다시 조립해도 같은 블록을 쓴다(세션 중 고정, D-02). 에이전트는 `_build_system_prompt`를 첫 `run_conversation`에서 부르므로 「세션 시작」은 첫 턴 시작이다. 기본이 꺼짐이라 켜지 않은 구성은 이전과 바이트 동일하다. 앱에서 켜는 연결은 025다.
 
-### 6-3. 규칙 문장과 배치 (030)
-도구 안내문 바로 뒤, 호출자 지시 앞에 둔다(도구와 관련된 내용이 함께 모이게). 블록 안 규칙 문장은 한두 문장으로 「답하기 전 목록을 훑고 관련 있으면 `skill_view`로 읽어라」 수준이다. 정확한 문장은 030 지시서에서 확정한다.
+### 6-3. 제목과 규칙 문장 (030)
+배치는 020에서 이미 정했다(도구 안내문 바로 뒤, 호출자 지시 앞). 030은 인덱스 블록에 붙일 제목(`## Available Skills`)과 규칙 문장만 확정한다. 규칙 문장은 한두 문장으로 「답하기 전 목록을 훑고 관련 있으면 `skill_view`로 읽어라」 수준이다. 정확한 문장은 030 지시서에서 확정한다.
 
 ### 6-4. 값 (에이전트가 정한 안)
 `SKILLS_INDEX_MAX_ENTRIES = 50`, `SKILLS_INDEX_DESC_MAX_CHARS = 120`, `SKILLS_INDEX_MAX_CHARS = 4,000`. 근거: 줄 하나는 이름(최대 64자)과 설명(최대 120자)을 합쳐 길어야 190자 안팎이다. 평균 80자 안팎이면 50개가 4,000자에 들어오고, 줄이 길면 항목 수보다 전체 길이 상한이 먼저 걸린다. 어느 쪽이든 잘리면 `(+N more)` 줄이 붙는다. 이 값이 실제 사용에서 충분한지는 **미확인**이며 050 스모크와 사용 경험으로 조정한다. 해당 단계 착수 시 승인으로 갈음한다.
