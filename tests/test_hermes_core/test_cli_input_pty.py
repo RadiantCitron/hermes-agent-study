@@ -59,6 +59,8 @@ class PtySession:
         env["PYTHONPATH"] = str(repo_root / "src")
         env["HERMES_HOME"] = str(self.home)
         env["TERM"] = "xterm-256color"
+        # 커서 위치 질의(CPR)에 응답할 터미널이 없어 입력마다 1초씩 응답을 기다리므로 질의를 끈다
+        env["PROMPT_TOOLKIT_NO_CPR"] = "1"
         env.pop("PYTHONUTF8", None)
 
         self.proc = subprocess.Popen(

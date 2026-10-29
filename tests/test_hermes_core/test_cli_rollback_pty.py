@@ -140,6 +140,8 @@ class RollbackPtySession:
         env["HERMES_HOME"] = str(self.home)
         env["OPENROUTER_API_KEY"] = "FAKE-NOT-A-REAL-KEY-0004"
         env["TERM"] = "xterm-256color"
+        # 커서 위치 질의(CPR)에 응답할 터미널이 없어 입력마다 1초씩 응답을 기다리므로 질의를 끈다
+        env["PROMPT_TOOLKIT_NO_CPR"] = "1"
         env["R11_PTY_SCRIPT_JSON"] = json.dumps(script or DEFAULT_SCRIPT)
         env.pop("PYTHONUTF8", None)
 
