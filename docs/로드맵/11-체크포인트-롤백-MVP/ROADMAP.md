@@ -161,12 +161,13 @@ stateDiagram-v2
   pending --> failed : 도구 실패
   applied --> rolled_back : /rollback 복원
   applied --> skipped : 충돌·경로 판정 실패
+  pending --> skipped : 결과를 모름
   failed --> [*]
   rolled_back --> [*]
   skipped --> [*]
 ```
 
-`pending`이 남은 행(기록 뒤 프로세스 종료)과 `failed` 행을 되돌리기에서 어떻게 다룰지는 020 지시서에서 정한다(WHY 가정 F).
+허용 전이는 위 다섯 개뿐이다([010 지시서](instructions/010_체크포인트_원장.md) §1-2). `pending`이 남은 행(기록 뒤 프로세스 종료)은 쓰기가 일어났는지 알 수 없어 되돌리지 않고 `skipped`로만 넘길 수 있다. 언제 그렇게 할지와 `failed` 행의 표시는 020 지시서에서 정한다(WHY 가정 F).
 
 ---
 
@@ -225,7 +226,7 @@ stateDiagram-v2
 ## 6. 설계 결정 상세
 
 ### 6-1. 원장 (010)
-표 이름 안 `file_checkpoints`. 열 후보: `id`, `session_id`(FK), `turn_index`, `tool_name`, `rel_path`, `before_exists`, `before_content`, `after_sha256`, `status`, `created_at`, `updated_at`, `reason`. 상태값은 닫힌 목록(`pending`·`applied`·`failed`·`rolled_back`·`skipped`)으로 두고 허용된 전이만 갱신한다(10번 「`pending`만 갱신」 선례). 열·전이 규칙은 010 지시서에서 확정한다.
+표 `file_checkpoints`(010 지시서에서 확정). 열: `id`, `session_id`(FK), `turn_index`, `tool_name`, `workspace`, `rel_path`, `before_exists`, `before_content`, `after_sha256`, `status`, `created_at`, `updated_at`, `reason`. `workspace`는 되돌릴 때 같은 작업 폴더인지 대조하려고 둔다. 상태값은 닫힌 목록(`pending`·`applied`·`failed`·`rolled_back`·`skipped`)이고 허용된 전이만 갱신한다(10번 「`pending`만 갱신」 선례). 저장소도 바뀌기 전 내용의 크기(`FILE_MAX_BYTES`)와 해시 형식을 검사한다. 메서드는 `record_file_checkpoint`·`update_file_checkpoint`·`get_file_checkpoints`.
 
 ### 6-2. 체크포인트 모듈 (020)
 턴 번호는 체크포인트 기능이 세션 안에서 센다. 바뀌기 전 상태 읽기는 쓰기 도구와 같은 경로 판정을 쓰고, 판정 실패면 기록하지 않고 도구에 넘긴다(도구가 같은 이유로 거부). 되돌리기는 「계획 세우기」(대상 턴과 파일 목록, 파일마다 예상 결과)와 「실행」을 나눠, CLI가 계획을 보이고 확인받은 뒤 실행한다. 계획과 실행 사이에 파일이 바뀌어도 실행 때 다시 대조한다.
