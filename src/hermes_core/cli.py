@@ -10,10 +10,17 @@
 import argparse
 import os
 import sys
+import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
-from hermes_core.cli_input import multiline_input_available, read_user_input
+from hermes_core.cli_input import (
+    is_interactive_terminal,
+    multiline_input_available,
+    read_user_input,
+)
 from hermes_core.constants import (
+    CLI_APPROVAL_DISABLED_NOTICE,
+    CLI_APPROVAL_ENABLED_NOTICE,
     CLI_MULTILINE_HINT,
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
@@ -22,7 +29,11 @@ from hermes_core.constants import (
     get_hermes_home,
 )
 from hermes_core.llm_client import OpenRouterClient
+from hermes_core.session_db import SessionDB
+from hermes_core.tools.approval import Approver
 from hermes_core.tools.delegate_tool import register_delegate_tool
+from hermes_core.tools.dispatcher import create_default_dispatcher
+from hermes_core.tools.memory_tool import MemoryStore
 
 
 def main() -> None:
@@ -49,6 +60,11 @@ def main() -> None:
         "--no-skills-index",
         action="store_true",
         help="Disable the skills index in the system prompt (skills stay available via the skills_list/skill_view tools)",
+    )
+    parser.add_argument(
+        "--no-approval",
+        action="store_true",
+        help="Disable command approval (commands outside the allowed list are denied, as before)",
     )
     args = parser.parse_args()
 
@@ -110,11 +126,34 @@ def main() -> None:
 
         llm_client = OpenRouterClient(api_key=api_key, model=model)
 
+    approval_enabled = not args.no_approval and is_interactive_terminal()
+    session_id = str(uuid.uuid4())
+    session_db = SessionDB()
+    memory_store = MemoryStore()
+    approver = (
+        Approver(
+            session_db=session_db,
+            session_id=session_id,
+            ask=lambda p: read_user_input(p),
+            is_interactive=is_interactive_terminal,
+        )
+        if approval_enabled
+        else None
+    )
+    dispatcher = create_default_dispatcher(
+        memory_store=memory_store,
+        session_db=session_db,
+        approver=approver,
+    )
     agent = HermesAgent(
         model=model,
         llm_client=llm_client,
         context_window_tokens=args.context_window,
         skills_index=not args.no_skills_index,
+        session_id=session_id,
+        session_db=session_db,
+        memory_store=memory_store,
+        dispatcher=dispatcher,
     )
 
     if not args.mock and args.delegate:
@@ -136,6 +175,10 @@ def main() -> None:
         print("Delegation enabled (delegate_task).")
     if args.no_skills_index:
         print("Skills index disabled (--no-skills-index).")
+    if args.no_approval:
+        print(CLI_APPROVAL_DISABLED_NOTICE)
+    elif approval_enabled:
+        print(CLI_APPROVAL_ENABLED_NOTICE)
     print("Type 'exit' or 'quit' to terminate.")
     if multiline_input_available():
         print(CLI_MULTILINE_HINT)

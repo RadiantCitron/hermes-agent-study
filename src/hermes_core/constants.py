@@ -212,6 +212,13 @@ CLI_PROMPT_TOOLKIT_MISSING_NOTICE = "prompt_toolkit is not installed; falling ba
 # 여러 줄 입력 가능 환경(터미널 + prompt_toolkit) 시작 배너 안내 문구
 CLI_MULTILINE_HINT = "Enter to send, Ctrl+J for a new line."
 
+# 승인 흐름 관련 CLI 안내 문구
+CLI_APPROVAL_ENABLED_NOTICE = (
+    "Command approval enabled: commands outside the allowed list ask for your y/N"
+    " (disable with --no-approval)."
+)
+CLI_APPROVAL_DISABLED_NOTICE = "Command approval disabled (--no-approval)."
+
 
 # =============================================================================
 # 승인 흐름 관련 상수
