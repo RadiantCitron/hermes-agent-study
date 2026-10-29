@@ -13,9 +13,10 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
-from typing import Optional
+from typing import Optional, Sequence
 
 from hermes_core.constants import (
     CHECKPOINT_LIMIT_ERROR_MESSAGE,
@@ -27,6 +28,17 @@ from hermes_core.constants import (
     CHECKPOINT_STATUS_SKIPPED,
     CHECKPOINT_TOOL_NAMES,
     FILE_MAX_BYTES,
+    ROLLBACK_NOTICE_BEGIN,
+    ROLLBACK_NOTICE_END,
+    ROLLBACK_NOTICE_INSTRUCTION,
+    ROLLBACK_NOTICE_INTRO,
+    ROLLBACK_NOTICE_LINE_DELETED,
+    ROLLBACK_NOTICE_LINE_RESTORED,
+    ROLLBACK_NOTICE_LINE_SKIPPED,
+    ROLLBACK_NOTICE_MAX_PATHS,
+    ROLLBACK_NOTICE_MORE_LINE,
+    ROLLBACK_NOTICE_TURN_LINE,
+    ROLLBACK_NOTICE_UNKNOWN_REASON,
     get_default_workspace,
 )
 from hermes_core.session_db import SessionDB
@@ -623,3 +635,92 @@ class Checkpointer:
             skipped_count=skipped_count,
             items=tuple(item_results),
         )
+
+
+def _escape_control(s: str) -> str:
+    """문자열 내 제어·서식 문자를 repr 규칙에 따라 눈에 보이는 역슬래시 표기로 치환한다."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", lambda m: repr(m.group(0))[1:-1], s)
+
+
+def format_rollback_notice(results: Sequence[RollbackResult]) -> Optional[str]:
+    """되돌리기 실행 결과 목록을 바탕으로 모델에게 전달할 고정 형식의 알림 글을 생성한다.
+
+    - rolled_back_count == 0인 결과는 건너뛴다.
+    - 남는 결과가 없으면 None을 반환한다.
+    - 입력 순서대로 Turn 블록을 구성하며, 같은 턴 내 동일 (action, rel_path) 중복을 제거한다.
+    - 전체 경로 줄 수가 상한(ROLLBACK_NOTICE_MAX_PATHS)을 초과하면 초과분을 생략하고 MORE 줄을 덧붙인다.
+    - rel_path와 reason 내 제어 문자는 이스케이프하여 표지 줄 위조를 방지한다.
+    - 순수 함수로서 입력을 변경하지 않는다.
+    """
+    valid_results = [r for r in results if r.rolled_back_count > 0]
+    if not valid_results:
+        return None
+
+    # 1. 턴별 고유 항목 추출 (같은 턴 내 (action, rel_path) 중복 제거)
+    turn_entries: list[tuple[int, list[RollbackItemResult]]] = []
+    for res in valid_results:
+        seen: set[tuple[str, str]] = set()
+        deduped: list[RollbackItemResult] = []
+        for item in res.items:
+            key = (item.action, item.rel_path)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(item)
+        turn_entries.append((res.turn_index, deduped))
+
+    # 2. 상한 적용 및 라인 구성
+    lines: list[str] = [
+        ROLLBACK_NOTICE_BEGIN,
+        ROLLBACK_NOTICE_INTRO,
+    ]
+
+    total_paths = sum(len(items) for _, items in turn_entries)
+    path_count = 0
+    limit_reached = False
+
+    for turn_idx, items in turn_entries:
+        if limit_reached:
+            break
+
+        turn_lines: list[str] = [ROLLBACK_NOTICE_TURN_LINE.format(turn_index=turn_idx)]
+        added_in_turn = 0
+
+        for item in items:
+            if path_count >= ROLLBACK_NOTICE_MAX_PATHS:
+                limit_reached = True
+                break
+
+            safe_rel_path = _escape_control(item.rel_path)
+            if item.action == "restored":
+                turn_lines.append(ROLLBACK_NOTICE_LINE_RESTORED.format(rel_path=safe_rel_path))
+            elif item.action == "deleted":
+                turn_lines.append(ROLLBACK_NOTICE_LINE_DELETED.format(rel_path=safe_rel_path))
+            elif item.action == "skipped":
+                reason = item.reason if item.reason is not None else ROLLBACK_NOTICE_UNKNOWN_REASON
+                safe_reason = _escape_control(reason)
+                turn_lines.append(
+                    ROLLBACK_NOTICE_LINE_SKIPPED.format(
+                        rel_path=safe_rel_path,
+                        reason=safe_reason,
+                    )
+                )
+            else:
+                continue
+
+            path_count += 1
+            added_in_turn += 1
+
+        if added_in_turn > 0:
+            lines.extend(turn_lines)
+        elif not limit_reached:
+            # 항목이 하나도 없는 턴 블록인 경우(이론상 없으나 안전)
+            pass
+
+    if total_paths > ROLLBACK_NOTICE_MAX_PATHS:
+        overflow_count = total_paths - ROLLBACK_NOTICE_MAX_PATHS
+        lines.append(ROLLBACK_NOTICE_MORE_LINE.format(count=overflow_count))
+
+    lines.append(ROLLBACK_NOTICE_INSTRUCTION)
+    lines.append(ROLLBACK_NOTICE_END)
+
+    return "\n".join(lines)

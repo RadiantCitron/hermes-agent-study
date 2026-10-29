@@ -262,6 +262,24 @@ CLI_ROLLBACK_ERROR_NOTICE = (
     "Rollback failed ({reason}). Some files may already have been restored; check the working directory."
 )
 
+# 롤백 모델 알림 관련 상수 (12 로드맵)
+ROLLBACK_NOTICE_BEGIN = "[Rollback notice - added by the CLI, not typed by the user]"
+ROLLBACK_NOTICE_END = "[End of rollback notice]"
+ROLLBACK_NOTICE_INTRO = (
+    "The user ran /rollback and intentionally undid some of your earlier file changes. "
+    "Those files are back to their earlier state."
+)
+ROLLBACK_NOTICE_TURN_LINE = "Turn {turn_index}:"
+ROLLBACK_NOTICE_LINE_RESTORED = "  restored: {rel_path}"
+ROLLBACK_NOTICE_LINE_DELETED = "  deleted: {rel_path}"
+ROLLBACK_NOTICE_LINE_SKIPPED = "  skipped (your change is still in this file): {rel_path} - {reason}"
+ROLLBACK_NOTICE_MORE_LINE = "  ... and {count} more file(s)"
+ROLLBACK_NOTICE_UNKNOWN_REASON = "unknown reason"
+ROLLBACK_NOTICE_INSTRUCTION = (
+    "Do not re-apply these changes unless the user asks. Re-read a file before editing it."
+)
+ROLLBACK_NOTICE_MAX_PATHS = 20
+
 
 # =============================================================================
 # 승인 흐름 관련 상수
