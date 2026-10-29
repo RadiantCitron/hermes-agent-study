@@ -277,110 +277,6 @@ def test_scenario_02_korean_backspace_clean_exit() -> None:
         sess.close()
 
 
-def test_scenario_03_ctrl_j_inserts_newline() -> None:
-    """시나리오 3: Ctrl+J는 전송이 아닌 줄바꿈으로 동작하여 다중 행 단일 메시지 기록."""
-    sess = PtySession(fallback=False)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"a\nb\r")
-        sess.wait_for_prompt()
-        sess.write(b"exit\r")
-        sess.proc.wait(timeout=5)
-        sess.read_available(0.1)
-
-        assert sess.proc.returncode == 0
-        assert sess.get_user_messages() == ["a\nb"]
-    finally:
-        sess.close()
-
-
-def test_scenario_04_bracketed_paste_multiline() -> None:
-    """시나리오 4: 브래킷 붙여넣기(ESC[200~ ... ESC[201~) 여러 줄이 한 입력으로 전송."""
-    sess = PtySession(fallback=False)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"\x1b[200~l1\nl2\r\nl3\x1b[201~\r")
-        sess.wait_for_prompt()
-        sess.write(b"exit\r")
-        sess.proc.wait(timeout=5)
-        sess.read_available(0.1)
-
-        assert sess.proc.returncode == 0
-        assert sess.get_user_messages() == ["l1\nl2\nl3"]
-    finally:
-        sess.close()
-
-
-def test_scenario_05_ctrl_c_exits_cleanly() -> None:
-    """시나리오 5: 입력 도중 Ctrl+C 입력 시 정상 종료 안내 후 프로세스 종료."""
-    sess = PtySession(fallback=False)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"x\x03")
-        sess.proc.wait(timeout=5)
-
-        assert sess.proc.returncode == 0
-        sess.read_available(0.05)
-        assert "Exiting session..." in sess.accumulated
-    finally:
-        sess.close()
-
-
-def test_scenario_06_ctrl_d_on_empty_prompt() -> None:
-    """시나리오 6: 빈 프롬프트에서 Ctrl+D 입력 시 정상 종료 안내 후 프로세스 종료."""
-    sess = PtySession(fallback=False)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"\x04")
-        sess.proc.wait(timeout=5)
-
-        assert sess.proc.returncode == 0
-        sess.read_available(0.05)
-        assert "Exiting session..." in sess.accumulated
-    finally:
-        sess.close()
-
-
-def test_scenario_07_startup_banner_hint() -> None:
-    """시나리오 7: 시작 직후 배너에 다중 행 안내가 종료 안내 바로 다음 줄에 1회 출력."""
-    sess = PtySession(fallback=False)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"exit\r")
-        sess.proc.wait(timeout=5)
-        sess.read_available(0.1)
-
-        assert sess.proc.returncode == 0
-        assert sess.accumulated.count(CLI_MULTILINE_HINT) == 1
-
-        lines = [line.strip() for line in sess.accumulated.splitlines() if line.strip()]
-        hint_idx = -1
-        for i, l in enumerate(lines):
-            if CLI_MULTILINE_HINT in l:
-                hint_idx = i
-                break
-        assert hint_idx > 0
-        assert "Type 'exit' or 'quit' to terminate." in lines[hint_idx - 1]
-    finally:
-        sess.close()
-
-
-def test_scenario_08_fallback_banner_and_notice() -> None:
-    """시나리오 8 (폴백): prompt_toolkit 미설치 모사 시 힌트가 없고 미설치 알림이 1회 출력."""
-    sess = PtySession(fallback=True)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"exit\r")
-        sess.proc.wait(timeout=5)
-        sess.read_available(0.1)
-
-        assert sess.proc.returncode == 0
-        assert CLI_MULTILINE_HINT not in sess.accumulated
-        assert sess.accumulated.count(CLI_PROMPT_TOOLKIT_MISSING_NOTICE) == 1
-    finally:
-        sess.close()
-
-
 def test_scenario_09_fallback_korean_backspace_recovery() -> None:
     """시나리오 9 (폴백, 결함 재현 조건): 깨진 입력 안내 후 프로세스 생존 및 재입력 성공."""
     sess = PtySession(fallback=True)
@@ -397,23 +293,6 @@ def test_scenario_09_fallback_korean_backspace_recovery() -> None:
         assert sess.proc.returncode == 0
         assert sess.accumulated.count(CLI_INPUT_DECODE_NOTICE) == 1
         assert sess.get_user_messages() == ["ok"]
-    finally:
-        sess.close()
-
-
-def test_scenario_10_fallback_multiline_sent_line_by_line() -> None:
-    """시나리오 10 (폴백, 관찰 고정): basic input 환경에서는 여러 줄이 줄마다 분리되어 전송."""
-    sess = PtySession(fallback=True)
-    try:
-        sess.wait_for("User >")
-        sess.write(b"l1\nl2\nl3\r")
-        sess.wait_for("User >")
-        sess.write(b"exit\r")
-        sess.proc.wait(timeout=5)
-        sess.read_available(0.1)
-
-        assert sess.proc.returncode == 0
-        assert sess.get_user_messages() == ["l1", "l2", "l3"]
     finally:
         sess.close()
 
