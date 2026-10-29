@@ -15,6 +15,7 @@ import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
 from hermes_core.cli_input import (
+    hold_typeahead,
     is_interactive_terminal,
     multiline_input_available,
     read_user_input,
@@ -348,15 +349,17 @@ def main() -> None:
             if checkpointer is not None:
                 checkpointer.begin_turn()
 
-            result = agent.run_conversation(user_input, conversation_history=history)
-            history = result["messages"]
-            if result.get("stopped_reason") == "llm_error":
-                err = result.get("error", {})
-                kind = err.get("kind", "unknown")
-                msg = err.get("message", "Unknown error")
-                print(f"\nModel call failed ({kind}): {msg}")
-            else:
-                print(f"\nAssistant: {result['final_response']}")
+            # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
+            with hold_typeahead():
+                result = agent.run_conversation(user_input, conversation_history=history)
+                history = result["messages"]
+                if result.get("stopped_reason") == "llm_error":
+                    err = result.get("error", {})
+                    kind = err.get("kind", "unknown")
+                    msg = err.get("message", "Unknown error")
+                    print(f"\nModel call failed ({kind}): {msg}")
+                else:
+                    print(f"\nAssistant: {result['final_response']}")
 
             if checkpointer is not None and not checkpoint_refusal_notified:
                 messages = result.get("messages", [])

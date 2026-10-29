@@ -512,3 +512,101 @@ def test_scenario_014_03_flush_failure_still_asks(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(termios, "tcflush", failing_flush)
     assert read_user_input("Run it? [y/N] ", discard_typeahead=True) == "n"
     assert events == [("prompt", "Run it? [y/N] ")]
+
+
+# =============================================================================
+# 계획 014 S2: 처리 중 미리 입력 보존 (hold_typeahead)
+# =============================================================================
+
+import copy
+
+from hermes_core.cli_input import hold_typeahead
+
+
+class FakeTty:
+    """tcgetattr/tcsetattr를 흉내 내는 가짜 터미널 속성 저장소."""
+
+    def __init__(self) -> None:
+        cc: list[Any] = [b"\x00"] * termios.NCCS
+        cc[termios.VMIN] = 4
+        cc[termios.VTIME] = 3
+        self.attrs: list[Any] = [
+            termios.ICRNL | termios.IXON,
+            termios.OPOST,
+            termios.CS8,
+            termios.ICANON | termios.ECHO | termios.ISIG | termios.IEXTEN,
+            termios.B38400,
+            termios.B38400,
+            cc,
+        ]
+        self.set_calls = 0
+
+    def tcgetattr(self, fd: int) -> list[Any]:
+        return copy.deepcopy(self.attrs)
+
+    def tcsetattr(self, fd: int, when: int, attrs: list[Any]) -> None:
+        self.set_calls += 1
+        self.attrs = copy.deepcopy(attrs)
+
+
+def _install_fake_tty(monkeypatch: pytest.MonkeyPatch, available: bool) -> FakeTty:
+    tty = FakeTty()
+    monkeypatch.setattr(cli_input, "multiline_input_available", lambda: available)
+    monkeypatch.setattr(sys, "stdin", FdStream(available))
+    monkeypatch.setattr(termios, "tcgetattr", tty.tcgetattr)
+    monkeypatch.setattr(termios, "tcsetattr", tty.tcsetattr)
+    return tty
+
+
+def test_scenario_014_06_hold_switches_and_restores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #6: 안에서는 ICANON·ECHO·ICRNL 꺼짐, ISIG 켜짐. 나오면 원래 상태와 완전히 같다."""
+    tty = _install_fake_tty(monkeypatch, available=True)
+    original = copy.deepcopy(tty.attrs)
+
+    with hold_typeahead():
+        iflag, lflag, cc = tty.attrs[0], tty.attrs[3], tty.attrs[6]
+        assert not iflag & termios.ICRNL
+        assert not lflag & termios.ICANON
+        assert not lflag & termios.ECHO
+        assert lflag & termios.ISIG
+        assert cc[termios.VMIN] == 1
+        assert cc[termios.VTIME] == 0
+
+    assert tty.attrs == original
+
+
+def test_scenario_014_06b_hold_restores_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #6: 안에서 KeyboardInterrupt가 나도 원래 상태로 복원하고 예외는 그대로 올라간다."""
+    tty = _install_fake_tty(monkeypatch, available=True)
+    original = copy.deepcopy(tty.attrs)
+
+    with pytest.raises(KeyboardInterrupt):
+        with hold_typeahead():
+            raise KeyboardInterrupt
+
+    assert tty.attrs == original
+
+
+def test_scenario_014_07_hold_noop_without_terminal_or_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #7: 터미널이 아니거나 prompt_toolkit이 없으면(multiline_input_available 거짓) tcsetattr 0회."""
+    tty = _install_fake_tty(monkeypatch, available=False)
+    ran = False
+    with hold_typeahead():
+        ran = True
+    assert ran
+    assert tty.set_calls == 0
+
+
+def test_scenario_014_07b_hold_noop_when_getattr_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """계획 014 #7 보강: 터미널 속성을 읽지 못하면 아무것도 바꾸지 않고 본문은 그대로 실행한다."""
+    tty = _install_fake_tty(monkeypatch, available=True)
+
+    def failing_get(fd: int) -> list[Any]:
+        raise termios.error(25, "Inappropriate ioctl for device")
+
+    monkeypatch.setattr(termios, "tcgetattr", failing_get)
+    ran = False
+    with hold_typeahead():
+        ran = True
+    assert ran
+    assert tty.set_calls == 0

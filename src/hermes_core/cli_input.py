@@ -4,6 +4,8 @@
 유니코드 디코드 예외 발생 시 세션이 비정상 종료되지 않도록 방어한다.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import importlib.util
 import sys
 from typing import Any
@@ -109,6 +111,43 @@ def discard_pending_input() -> None:
         clear_typeahead(create_input())
     except Exception:
         pass
+
+
+@contextmanager
+def hold_typeahead() -> Iterator[None]:
+    """프롬프트 사이(모델 처리 중)에 사용자가 미리 친 키를 원래 바이트 그대로 보존한다.
+
+    prompt_toolkit 프롬프트가 끝나면 터미널은 줄 입력 모드(cooked)로 돌아가, 그동안 친 키가 화면에 찍히고
+    Enter(\\r)가 \\n(다음 프롬프트에서는 Ctrl+J 줄바꿈)으로 바뀐다. 이 구간 동안 ICANON·ECHO·ICRNL을 꺼서
+    다음 프롬프트가 미리 친 키를 정상 키로 읽게 한다. ISIG는 켜 두어 처리 중 Ctrl+C는 그대로 동작한다.
+    빠져나갈 때는 예외가 나도 들어올 때의 상태로 복원한다.
+    터미널이 아니거나 prompt_toolkit이 없으면(input() 폴백은 줄 입력 모드가 필요) 아무것도 하지 않는다.
+    """
+    saved: Any = None
+    termios: Any = None
+    fd = -1
+    if multiline_input_available():
+        try:
+            import termios
+
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            attrs = termios.tcgetattr(fd)
+            attrs[0] &= ~termios.ICRNL
+            attrs[3] &= ~(termios.ICANON | termios.ECHO)
+            attrs[6][termios.VMIN] = 1
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception:
+            saved = None
+    try:
+        yield
+    finally:
+        if saved is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, saved)
+            except Exception:
+                pass
 
 
 def _read_once(prompt: str) -> str:

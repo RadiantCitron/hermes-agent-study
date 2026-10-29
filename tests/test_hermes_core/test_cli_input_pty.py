@@ -30,10 +30,18 @@ if not hasattr(termios, "IUTF8"):
     pytest.skip("termios.IUTF8 is not available on this platform", allow_module_level=True)
 
 
+THINKING_MARKER = "[[pty-thinking]]"
+
+
 class PtySession:
     """IUTF8가 꺼진 가상 터미널(pty)에서 CLI 모의 세션을 실행하고 입출력을 중계하는 테스트 도구."""
 
-    def __init__(self, fallback: bool = False, hermes_home: Optional[Path] = None) -> None:
+    def __init__(
+        self, fallback: bool = False, hermes_home: Optional[Path] = None, think_delay: float = 0.0
+    ) -> None:
+        """think_delay > 0이면 모의 모델 호출마다 THINKING_MARKER를 찍고 그만큼 잠들어 「처리 중」 구간을 만든다.
+        이때 pty를 프로세스의 제어 터미널로 잡아, 실제 터미널처럼 처리 중 Ctrl+C가 SIGINT가 되게 한다.
+        """
         self.temp_dir: Optional[str] = None
         if hermes_home is None:
             self.temp_dir = tempfile.mkdtemp()
@@ -46,9 +54,18 @@ class PtySession:
         attrs[0] &= ~termios.IUTF8
         termios.tcsetattr(self.slave, termios.TCSANOW, attrs)
 
+        # 시험을 백그라운드(&)로 띄우면 SIGINT가 무시 상태로 상속되므로 대화형 터미널처럼 기본 처리기로 되돌린다
+        slow_model = (
+            "import fcntl, signal, termios, time; fcntl.ioctl(0, termios.TIOCSCTTY, 0); "
+            + "signal.signal(signal.SIGINT, signal.default_int_handler); "
+            + "import hermes_core.agent as _agent; _orig = _agent.MockLLMClient.chat_completion; "
+            + "_agent.MockLLMClient.chat_completion = lambda self, *a, **kw: ("
+            + f"print({THINKING_MARKER!r}, flush=True), time.sleep({think_delay!r}), _orig(self, *a, **kw))[-1]; "
+        )
         launcher = (
             "import sys; "
             + ("sys.modules['prompt_toolkit'] = None; " if fallback else "")
+            + (slow_model if think_delay > 0 else "")
             + "import runpy; "
             + "sys.argv = ['hermes-core', '--mock']; "
             + "runpy.run_module('hermes_core.cli', run_name='__main__')"
@@ -131,15 +148,29 @@ class PtySession:
         """마스터 터미널에 원시 바이트를 쓴다."""
         os.write(self.master, data)
 
+    def wait_exit(self, timeout: float = 5.0) -> int:
+        """출력을 계속 읽으면서 프로세스 종료를 기다리고 종료 코드를 돌려준다.
+
+        아무도 마스터를 읽지 않으면 자식은 출력 쓰기에서 막힌다. pty를 제어 터미널로 잡은 프로세스는
+        종료할 때도 남은 출력이 비워지기를 기다리므로, `proc.wait()`만으로는 끝나지 않을 수 있다.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.read_available(0.05)
+            returncode = self.proc.poll()
+            if returncode is not None:
+                return returncode
+        raise subprocess.TimeoutExpired(self.proc.args, timeout)
+
     def close(self) -> None:
         """자식 프로세스를 정리하고 파일 기술자와 임시 폴더를 닫는다."""
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
-                self.proc.wait(timeout=1.0)
+                self.wait_exit(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-                self.proc.wait(timeout=1.0)
+                self.wait_exit(timeout=1.0)
         self.read_available(0.05)
         try:
             os.close(self.slave)
@@ -423,3 +454,69 @@ def test_scenario_11_non_terminal_pipe_clean_exit() -> None:
         import shutil
 
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# =============================================================================
+# 계획 014 S2: 처리 중 미리 입력 보존 (hold_typeahead)
+# =============================================================================
+
+THINK_DELAY = 0.8
+
+
+def test_scenario_12_typeahead_exit_during_processing() -> None:
+    """계획 014 #8: 처리 중에 미리 친 'exit⏎'가 다음 프롬프트에서 전송되어 세션이 정상 종료된다."""
+    sess = PtySession(think_delay=THINK_DELAY)
+    try:
+        sess.wait_for("User >")
+        sess.write(b"hello\r")
+        sess.wait_for(THINKING_MARKER)
+        sess.write(b"exit\r")
+
+        sess.wait_for("Session saved and closed. Goodbye!")
+
+        assert sess.wait_exit() == 0
+        assert sess.get_user_messages() == ["hello"]
+    finally:
+        sess.close()
+
+
+def test_scenario_13_typeahead_korean_backspace_during_processing() -> None:
+    """계획 014 #9: 처리 중에 친 '한글ab⌫⏎'가 다음 메시지 '한글a'로 기록되고, 처리 중 화면에 에코되지 않는다."""
+    sess = PtySession(think_delay=THINK_DELAY)
+    try:
+        sess.wait_for("User >")
+        sess.write(b"hello\r")
+        sess.wait_for(THINKING_MARKER)
+        typed_at = len(sess.accumulated)
+        sess.write("한글ab".encode("utf-8") + b"\x7f\r")
+
+        sess.wait_for_prompt()  # 미리 친 입력을 받아 바로 전송하는 프롬프트
+        next_prompt_at = sess.accumulated.find("\x1b[?2004h", typed_at)
+        sess.wait_for_prompt()  # 그 메시지 처리 뒤의 프롬프트
+        sess.write(b"exit\r")
+
+        assert sess.wait_exit() == 0
+        assert "한글" not in sess.accumulated[typed_at:next_prompt_at]
+        assert sess.get_user_messages() == ["hello", "한글a"]
+    finally:
+        sess.close()
+
+
+def test_scenario_14_ctrl_c_during_processing_restores_terminal() -> None:
+    """계획 014 #10: 처리 중 Ctrl+C로 프로세스가 중단되고, 종료 뒤 터미널의 줄 입력 모드 플래그가 복원되어 있다."""
+    sess = PtySession(think_delay=THINK_DELAY)
+    try:
+        sess.wait_for("User >")
+        sess.write(b"hello\r")
+        sess.wait_for(THINKING_MARKER)
+        sess.write(b"\x03")
+        sess.wait_exit()
+
+        # 제어 터미널을 잡은 세션 리더가 끝나면 macOS가 slave를 회수해 slave fd로는 읽을 수 없다.
+        # master 쪽 속성은 회수 뒤에도 마지막 설정을 보여 준다(복원하지 않고 죽으면 꺼진 채로 보인다)
+        attrs = termios.tcgetattr(sess.master)
+        assert attrs[3] & termios.ICANON
+        assert attrs[3] & termios.ECHO
+        assert attrs[0] & termios.ICRNL
+    finally:
+        sess.close()
