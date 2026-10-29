@@ -19,9 +19,8 @@
 ```text
 src/hermes_core/
   constants.py          # 변경: 종료 사유 상수, 취소 알림 표지·문구, 화면 안내 (010·030·040)
-  session_db.py         # 변경(잠정): end_session이 이미 적힌 사유를 덮지 않음 (010)
   tools/checkpoint.py   # 변경: 취소 알림 글 만들기, execute_rollback 부분 결과 (030·040)
-  cli.py                # 변경: finally 단일 종료 지점, 처리 중 Ctrl+C 취소, 보류 알림 합침 (010·020·030·040)
+  cli.py                # 변경: finally 단일 종료 지점 `_close_session`, 처리 중 Ctrl+C 취소, 보류 알림 합침 (010·020·030·040)
 tests/test_hermes_core/
   test_cli_interrupt.py        # 신규(잠정): 종료 사유·Ctrl+C 취소 (010·020)
   test_checkpoint_module.py    # 변경: 취소 알림 글, 부분 결과 (030·040)
@@ -127,7 +126,7 @@ flowchart TD
 | 대상 | 영향 | 근거 |
 |---|---|---|
 | `cli.py` 메인 루프 | 변경 | 종료 지점, 처리 구간의 `KeyboardInterrupt`, 보류 알림. 기존 `exit`·`/rollback`·빈 줄 처리 순서는 유지 |
-| `session_db.py` `end_session` | 변경 가능성 | 위임 자식도 호출한다(`delegate_tool.py:144`). 덮어쓰기 방지를 어디에 둘지는 010에서 자식 영향을 대조해 정한다 |
+| `session_db.py` `end_session` | 무변경 | 위임 자식도 호출한다(`delegate_tool.py:144`). 덮어쓰기 방지는 `cli.py`의 `_close_session`(010 확정)에 두어 자식 경로에 영향이 없다 |
 | `checkpoint.py` | 추가·변경 | 취소 알림 글(순수 함수 추가), `execute_rollback` 부분 결과(040). 계획·`finalize` 로직은 무변경 |
 | `dispatcher.py` `finalize` | 무변경 | 도구 실행 중 `Ctrl+C`는 이미 확정한다. 시험으로 고정만 한다 |
 | `agent.py`·압축·시스템 프롬프트 | 무변경 | 취소 처리는 CLI 쪽에서 한다 |
@@ -162,7 +161,7 @@ flowchart TD
 ## 6. 설계 결정 상세
 
 ### 6-1. 종료 사유 단일 지점 (010)
-- 종료 경로가 어디든 `main`의 `finally`가 마지막에 한 번 처리한다. 이미 사유가 적힌 세션은 덮지 않는다.
+- 종료 경로가 어디든 `main`의 `finally`가 `_close_session`을 통해 마지막에 한 번 처리한다. 이미 사유가 적힌 세션은 덮지 않는다. 사유 기본값은 `error`이고 깨끗한 종료 경로가 덮어쓴다.
 - 어휘: `user_exit`·`user_interrupt`·`eof`·`error`. mock 단발 실행의 `completed`는 유지한다.
 
 ### 6-2. 처리 중 `Ctrl+C` 취소 (020)
