@@ -236,4 +236,33 @@ APPROVAL_FINAL_DECISIONS = (
     APPROVAL_DECISION_LIMIT_EXCEEDED,
 )
 
+# 승인기 기본 요청 상한 (인스턴스당)
+APPROVAL_REQUEST_LIMIT = 10
+
+# 승인기 명령 표시 최대 글자 수
+APPROVAL_DISPLAY_MAX_CHARS = 2000
+
+# 승인으로 판정하는 답변 닫힌 목록
+APPROVAL_YES_ANSWERS = ("y", "yes")
+
+# 승인 질문 헤더 및 프롬프트
+APPROVAL_HEADER = (
+    "Approval required: the agent wants to run a command that is not on the allowed list."
+)
+APPROVAL_PROMPT = "Run it? [y/N] "
+
+# 승인 거부/취소 시 모델 반환 메시지
+APPROVAL_DENIED_MESSAGE = (
+    "The user denied this command. Do not retry it or work around the denial."
+)
+APPROVAL_AUTO_DENIED_MESSAGE = (
+    "No user is available to approve commands, so the command was not run."
+)
+APPROVAL_LIMIT_MESSAGE = (
+    "The approval request limit ({limit}) has been reached, so the command was not run. Do not request more."
+)
+APPROVAL_TOO_LONG_MESSAGE = (
+    "The command is longer than {max_chars} characters and cannot be reviewed by the user, so it was not run."
+)
+
 
