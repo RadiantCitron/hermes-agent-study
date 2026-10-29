@@ -72,11 +72,11 @@ classDiagram
     reason
   }
   class NoticeBuilder {
-    <<function, 잠정>>
-    format_rollback_notice(result) str
+    <<function>>
+    format_rollback_notice(results) str
   }
   class CliMain {
-    pending_notices: list
+    pending_rollbacks: list
     history
   }
   RollbackResult "1" o-- "*" RollbackItemResult

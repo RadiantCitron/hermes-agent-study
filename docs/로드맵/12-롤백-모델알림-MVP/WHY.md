@@ -89,4 +89,4 @@
 
 ## 변경 기록
 
-(4단계 착수 후 여기에 덧붙인다.)
+- 2026-10-30 (030 단계): 010·020 구현을 통해 함수명 `format_rollback_notice(results)`, 화면 안내 상수명 `CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE`, 메인 루프 보류 목록명 `pending_rollbacks` 확정 반영. 030 시험을 통해 가정 D(압축 표지 비간섭) 및 가정 E(중간 구간 요약 대체, 보호 꼬리 보존) 검증 완료.
