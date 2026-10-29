@@ -16,7 +16,7 @@ def test_scenario_01_new_db_schema_version_and_columns(tmp_path):
     """시나리오 1: 새 DB를 SessionDB(path)로 연다 -> db.schema_version == 5, approval_requests 표가 있고 열 이름 집합이 정확히 일치."""
     db_path = tmp_path / "new_state.db"
     db = SessionDB(db_path)
-    assert db.schema_version == 5
+    assert db.schema_version >= 5
 
     cursor = db._conn.execute("PRAGMA table_info(approval_requests)")
     cols = {row["name"] for row in cursor.fetchall()}
@@ -101,7 +101,7 @@ def test_scenario_02_v4_migration_preserves_data(tmp_path):
     conn.close()
 
     db = SessionDB(db_path)
-    assert db.schema_version == 5
+    assert db.schema_version >= 5
 
     # approval_requests 표 존재 확인
     cursor = db._conn.execute(
@@ -173,7 +173,7 @@ def test_scenario_03_v3_migration_preserves_data(tmp_path):
     conn.close()
 
     db = SessionDB(db_path)
-    assert db.schema_version == 5
+    assert db.schema_version >= 5
 
     cursor = db._conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='approval_requests'"

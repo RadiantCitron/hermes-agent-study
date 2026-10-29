@@ -276,4 +276,27 @@ APPROVAL_TOO_LONG_MESSAGE = (
 TERMINAL_STRIPPED_ENV_NAMES = (OPENROUTER_API_KEY_ENV,)
 
 
+# =============================================================================
+# 체크포인트·롤백 관련 상수 (11 로드맵)
+# =============================================================================
+
+CHECKPOINT_STATUS_PENDING = "pending"
+CHECKPOINT_STATUS_APPLIED = "applied"
+CHECKPOINT_STATUS_FAILED = "failed"
+CHECKPOINT_STATUS_ROLLED_BACK = "rolled_back"
+CHECKPOINT_STATUS_SKIPPED = "skipped"
+
+# 허용되는 상태 전이 맵: 새 상태 -> 허용되는 이전 상태 튜플
+CHECKPOINT_TRANSITIONS = {
+    CHECKPOINT_STATUS_APPLIED: (CHECKPOINT_STATUS_PENDING,),
+    CHECKPOINT_STATUS_FAILED: (CHECKPOINT_STATUS_PENDING,),
+    CHECKPOINT_STATUS_ROLLED_BACK: (CHECKPOINT_STATUS_APPLIED,),
+    CHECKPOINT_STATUS_SKIPPED: (CHECKPOINT_STATUS_APPLIED, CHECKPOINT_STATUS_PENDING),
+}
+
+# 체크포인트 대상 도구 목록 (write_file, patch만 대상)
+CHECKPOINT_TOOL_NAMES = ("write_file", "patch")
+
+
+
 

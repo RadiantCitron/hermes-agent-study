@@ -23,10 +23,15 @@ from typing import Any, Optional, Union
 from hermes_core.constants import (
     APPROVAL_DECISION_PENDING,
     APPROVAL_FINAL_DECISIONS,
+    CHECKPOINT_STATUS_APPLIED,
+    CHECKPOINT_STATUS_PENDING,
+    CHECKPOINT_TOOL_NAMES,
+    CHECKPOINT_TRANSITIONS,
+    FILE_MAX_BYTES,
     get_hermes_home,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -94,12 +99,29 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS file_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    turn_index INTEGER NOT NULL,
+    tool_name TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    before_exists INTEGER NOT NULL,
+    before_content TEXT,
+    after_sha256 TEXT,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL,
+    reason TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id);
+CREATE INDEX IF NOT EXISTS idx_file_checkpoints_session_turn ON file_checkpoints(session_id, turn_index);
 """
 
 FTS_SQL = """
@@ -184,6 +206,8 @@ class SessionDB:
                 cursor.execute("UPDATE schema_version SET version = 4")
             if current_version < 5:
                 cursor.execute("UPDATE schema_version SET version = 5")
+            if current_version < 6:
+                cursor.execute("UPDATE schema_version SET version = 6")
 
         # FTS5 가상 테이블 초기화
         try:
@@ -635,4 +659,142 @@ class SessionDB:
             (session_id,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    # 체크포인트 원장(file_checkpoints) 기록 및 조회 메서드
+    # =========================================================================
+
+    def record_file_checkpoint(
+        self,
+        session_id: str,
+        turn_index: int,
+        tool_name: str,
+        workspace: str,
+        rel_path: str,
+        before_exists: bool,
+        before_content: Optional[str] = None,
+    ) -> int:
+        """파일 도구 실행 전 상태를 file_checkpoints 원장에 선기록(pending)하고 id를 반환한다."""
+        if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 1:
+            raise ValueError(f"turn_index must be an integer >= 1, got {turn_index!r}")
+        if not isinstance(tool_name, str) or tool_name not in CHECKPOINT_TOOL_NAMES:
+            raise ValueError(
+                f"tool_name must be one of {CHECKPOINT_TOOL_NAMES}, got {tool_name!r}"
+            )
+        if not isinstance(workspace, str) or len(workspace) == 0:
+            raise ValueError("workspace must be a non-empty string")
+        if not isinstance(rel_path, str) or len(rel_path) == 0:
+            raise ValueError("rel_path must be a non-empty string")
+        if not isinstance(before_exists, bool):
+            raise ValueError(f"before_exists must be a boolean, got {before_exists!r}")
+
+        if before_exists:
+            if not isinstance(before_content, str):
+                raise ValueError("before_content must be a string when before_exists is True")
+            encoded_len = len(before_content.encode("utf-8"))
+            if encoded_len > FILE_MAX_BYTES:
+                raise ValueError(
+                    f"before_content exceeds FILE_MAX_BYTES ({encoded_len} > {FILE_MAX_BYTES})"
+                )
+        else:
+            if before_content is not None:
+                raise ValueError("before_content must be None when before_exists is False")
+
+        cursor = self._conn.execute(
+            """INSERT INTO file_checkpoints (
+                session_id, turn_index, tool_name, workspace, rel_path,
+                before_exists, before_content, after_sha256, status,
+                created_at, updated_at, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL)""",
+            (
+                session_id,
+                turn_index,
+                tool_name,
+                workspace,
+                rel_path,
+                1 if before_exists else 0,
+                before_content,
+                CHECKPOINT_STATUS_PENDING,
+                time.time(),
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def update_file_checkpoint(
+        self,
+        checkpoint_id: int,
+        status: str,
+        *,
+        after_sha256: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """체크포인트의 상태를 갱신한다. 허용된 전이가 아니거나 없는 id면 False."""
+        if status not in CHECKPOINT_TRANSITIONS:
+            raise ValueError(
+                f"status must be one of {tuple(CHECKPOINT_TRANSITIONS.keys())}, got {status!r}"
+            )
+
+        if status == CHECKPOINT_STATUS_APPLIED:
+            if not _is_valid_hex_sha256(after_sha256):
+                raise ValueError(
+                    f"after_sha256 must be a 64-character lowercase hex string, got {after_sha256!r}"
+                )
+        else:
+            if after_sha256 is not None:
+                raise ValueError(
+                    f"after_sha256 can only be set when status is '{CHECKPOINT_STATUS_APPLIED}', got {after_sha256!r}"
+                )
+
+        allowed_previous = CHECKPOINT_TRANSITIONS[status]
+        placeholders = ", ".join("?" for _ in allowed_previous)
+        now = time.time()
+
+        if status == CHECKPOINT_STATUS_APPLIED:
+            cursor = self._conn.execute(
+                f"""UPDATE file_checkpoints
+                   SET status = ?, updated_at = ?, reason = ?, after_sha256 = ?
+                   WHERE id = ? AND status IN ({placeholders})""",
+                (status, now, reason, after_sha256, checkpoint_id, *allowed_previous),
+            )
+        else:
+            cursor = self._conn.execute(
+                f"""UPDATE file_checkpoints
+                   SET status = ?, updated_at = ?, reason = ?
+                   WHERE id = ? AND status IN ({placeholders})""",
+                (status, now, reason, checkpoint_id, *allowed_previous),
+            )
+
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_file_checkpoints(
+        self,
+        session_id: str,
+        turn_index: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """특정 세션의 파일 체크포인트 목록을 id 오름차순으로 반환한다."""
+        if turn_index is not None:
+            cursor = self._conn.execute(
+                """SELECT * FROM file_checkpoints
+                   WHERE session_id = ? AND turn_index = ?
+                   ORDER BY id ASC""",
+                (session_id, turn_index),
+            )
+        else:
+            cursor = self._conn.execute(
+                """SELECT * FROM file_checkpoints
+                   WHERE session_id = ?
+                   ORDER BY id ASC""",
+                (session_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _is_valid_hex_sha256(value: Any) -> bool:
+    """소문자 16진수 64자 SHA-256 해시 문자열인지 검증한다."""
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(c in "0123456789abcdef" for c in value)
+
 
