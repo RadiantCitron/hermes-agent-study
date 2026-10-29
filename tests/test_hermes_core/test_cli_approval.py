@@ -91,9 +91,11 @@ class FakeInput:
         self.user_inputs = list(user_inputs)
         self.approval_answers = list(approval_answers or [])
         self.recorded_prompts: list[str] = []
+        self.recorded_calls: list[dict[str, Any]] = []
 
     def __call__(self, prompt: str = CLI_USER_PROMPT, **kwargs: Any) -> str:
         self.recorded_prompts.append(prompt)
+        self.recorded_calls.append({"prompt": prompt, "kwargs": dict(kwargs)})
         if prompt == APPROVAL_PROMPT:
             if not self.approval_answers:
                 raise AssertionError(f"Unexpected approval prompt received: {prompt}")
@@ -731,3 +733,31 @@ def test_scenario_16_non_terminal_tools_and_prompt_unchanged(
 
     sys_msg = first_call["messages"][0]["content"]
     assert "delegate_task" not in sys_msg
+
+
+def test_scenario_040_approval_ask_discards_typeahead(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """계획 015 S1 ①: TerminalApprover의 ask 콜백이 read_user_input에 discard_typeahead=True를 넘기는지 검증."""
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+
+    py_argv = [sys.executable, "-c", "print('approved')"]
+    py_cmd = shlex.join(py_argv)
+
+    ScriptableClient.responses_by_instance[0] = [
+        make_terminal_call_response("call_1", py_cmd),
+        MockLLMResponse(content="Done."),
+    ]
+
+    fake_in = FakeInput(user_inputs=["run", "exit"], approval_answers=["y"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    approval_calls = [
+        c for c in fake_in.recorded_calls if c["prompt"] == APPROVAL_PROMPT
+    ]
+    assert len(approval_calls) == 1
+    assert approval_calls[0]["kwargs"].get("discard_typeahead") is True
+

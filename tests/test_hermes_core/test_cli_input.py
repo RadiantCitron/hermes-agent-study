@@ -1,5 +1,7 @@
 """CLI 입력 함수 분리 및 유니코드 디코드 예외 방어 테스트 (로드맵 09 / 구현지시서 010)."""
 
+from contextlib import contextmanager
+import copy
 import io
 from pathlib import Path
 import sys
@@ -610,3 +612,78 @@ def test_scenario_014_07b_hold_noop_when_getattr_fails(monkeypatch: pytest.Monke
         ran = True
     assert ran
     assert tty.set_calls == 0
+
+
+def test_scenario_014_08_ai_execution_runs_inside_hold_typeahead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """계획 015 S1 ②: AI 실행(agent.run)이 hold_typeahead() 컨텍스트 내부에서 실행되는지 검증."""
+    hermes_home = tmp_path / "hermes_home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "FAKE-TEST-KEY-0015")
+    monkeypatch.setattr(cli, "is_interactive_terminal", lambda: True)
+
+    events: list[str] = []
+
+    @contextmanager
+    def fake_hold():
+        events.append("enter_hold")
+        try:
+            yield
+        finally:
+            events.append("exit_hold")
+
+    class RecordingClient:
+        def __init__(self, api_key: str, model: str, **kwargs: Any) -> None:
+            pass
+
+        def set_call_recorder(self, recorder: Any) -> None:
+            pass
+
+        def chat_completion(self, messages: Any, tools: Any = None) -> LLMResponse:
+            events.append("chat_completion")
+            return LLMResponse(content="done", finish_reason="stop")
+
+    monkeypatch.setattr(cli, "hold_typeahead", fake_hold)
+    monkeypatch.setattr(cli, "OpenRouterClient", RecordingClient)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\nexit\n"))
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    assert "enter_hold" in events
+    assert "chat_completion" in events
+    assert "exit_hold" in events
+    enter_idx = events.index("enter_hold")
+    call_idx = events.index("chat_completion")
+    exit_idx = events.index("exit_hold")
+    assert enter_idx < call_idx < exit_idx
+
+
+def test_scenario_014_09_discard_pending_input_handles_missing_prompt_toolkit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """계획 015 S1 ③: prompt_toolkit이 없을 때 discard_pending_input이 termios tcflush 후 예외 없이 안전하게 복귀."""
+    monkeypatch.setattr(cli_input, "is_interactive_terminal", lambda: True)
+    tcflush_calls: list[tuple[int, int]] = []
+    fake_fd = 99
+    monkeypatch.setattr(sys.stdin, "fileno", lambda: fake_fd)
+    monkeypatch.setattr(
+        termios, "tcflush", lambda fd, queue: tcflush_calls.append((fd, queue))
+    )
+
+    orig_import = __import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if "prompt_toolkit" in name:
+            raise ImportError("No module named 'prompt_toolkit'")
+        return orig_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    # 예외 없이 안전하게 return되어야 함
+    cli_input.discard_pending_input()
+
+    assert len(tcflush_calls) == 1
+    assert tcflush_calls[0] == (fake_fd, termios.TCIFLUSH)
+

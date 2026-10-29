@@ -120,16 +120,21 @@ class ScriptableInput:
         rollback_answers: Optional[list[Any]] = None,
         approval_answers: Optional[list[Any]] = None,
         capsys: Optional[pytest.CaptureFixture] = None,
+        db_path: Optional[Path] = None,
     ) -> None:
         self.user_inputs = list(user_inputs)
         self.rollback_answers = list(rollback_answers or [])
         self.approval_answers = list(approval_answers or [])
         self.recorded_prompts: list[str] = []
+        self.recorded_calls: list[dict[str, Any]] = []
         self.capsys = capsys
+        self.db_path = db_path
         self.output_before_rollback_prompt: list[str] = []
+        self.checkpoint_rows_at_rollback_prompt: list[list[dict[str, Any]]] = []
 
     def __call__(self, prompt: str = CLI_USER_PROMPT, **kwargs: Any) -> str:
         self.recorded_prompts.append(prompt)
+        self.recorded_calls.append({"prompt": prompt, "kwargs": dict(kwargs)})
         if prompt == CLI_ROLLBACK_PROMPT:
             if self.capsys:
                 captured = self.capsys.readouterr()
@@ -137,6 +142,14 @@ class ScriptableInput:
                 # 복원하여 capsys에 계속 누적되도록 함
                 sys.stdout.write(captured.out)
                 sys.stderr.write(captured.err)
+            if self.db_path and self.db_path.exists():
+                conn = sqlite3.connect(self.db_path)
+                conn.row_factory = sqlite3.Row
+                try:
+                    rows = conn.execute("SELECT * FROM file_checkpoints ORDER BY id ASC").fetchall()
+                    self.checkpoint_rows_at_rollback_prompt.append([dict(r) for r in rows])
+                finally:
+                    conn.close()
             if not self.rollback_answers:
                 raise AssertionError(f"Unexpected rollback prompt received: {prompt}")
             val = self.rollback_answers.pop(0)
@@ -550,6 +563,7 @@ def test_scenario_11_rollback_basic_flow(
         user_inputs=["go", "/rollback", "exit"],
         rollback_answers=["y"],
         capsys=capsys,
+        db_path=cli_test_env["hermes_home"] / "state.db",
     )
     monkeypatch.setattr(cli, "read_user_input", fake_in)
     monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
@@ -592,7 +606,13 @@ def test_scenario_11_rollback_basic_flow(
     client = ScriptableClient.created_instances[0]
     assert len(client.call_history) == 3
 
-    # 원장 상태 확인
+    # 질문 진행 중 원장 상태 검증: 아직 applied 상태 유지
+    assert len(fake_in.checkpoint_rows_at_rollback_prompt) == 1
+    during_rows = fake_in.checkpoint_rows_at_rollback_prompt[0]
+    assert len(during_rows) == 2
+    assert all(r["status"] == "applied" for r in during_rows)
+
+    # 원장 상태 확인 (되돌림 완료 후 rolled_back 전이)
     db = SessionDB(cli_test_env["hermes_home"] / "state.db")
     rows = db._conn.execute("SELECT * FROM file_checkpoints").fetchall()
     assert len(rows) == 2
@@ -752,6 +772,11 @@ def test_scenario_15_sequential_rollbacks(
     assert not (ws / "a.txt").exists()
     assert fake_in.recorded_prompts.count(CLI_ROLLBACK_PROMPT) == 2
     assert CLI_ROLLBACK_NOTHING_NOTICE in captured.out
+
+    # 롤백 헤더의 turn 번호 검증 (연속 되돌리기: 턴 2 -> 턴 1)
+    assert len(fake_in.output_before_rollback_prompt) == 2
+    assert CLI_ROLLBACK_HEADER.format(turn_index=2, restore_count=1, skip_count=0) in fake_in.output_before_rollback_prompt[0]
+    assert CLI_ROLLBACK_HEADER.format(turn_index=1, restore_count=1, skip_count=0) in fake_in.output_before_rollback_prompt[1]
 
     db = SessionDB(cli_test_env["hermes_home"] / "state.db")
     rows = db._conn.execute("SELECT * FROM file_checkpoints").fetchall()
@@ -1146,3 +1171,31 @@ def test_scenario_22_no_false_positive_refusal_notice(
     assert CLI_CHECKPOINT_REFUSED_NOTICE not in captured2.out
     ws = get_default_workspace()
     assert not (ws / ".env").exists()
+
+
+def test_scenario_rollback_prompt_passes_discard_typeahead(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """계획 015 S1 ①: /rollback 확인 질문이 discard_typeahead=True를 넘기는지 검증."""
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "test.txt", "hello"),
+        MockLLMResponse(content="Done."),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["create", "/rollback", "exit"],
+        rollback_answers=["y"],
+        capsys=capsys,
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    rollback_calls = [
+        c for c in fake_in.recorded_calls if c["prompt"] == CLI_ROLLBACK_PROMPT
+    ]
+    assert len(rollback_calls) == 1
+    assert rollback_calls[0]["kwargs"].get("discard_typeahead") is True
+
