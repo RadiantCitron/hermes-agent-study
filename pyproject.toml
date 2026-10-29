@@ -15,9 +15,14 @@ dependencies = [
     "pytest>=8.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest-xdist>=3.5"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "--strict-markers"
+markers = ["pty: 가상 터미널(pty)로 실제 CLI 프로세스를 띄우는 느린 시험 (파일명 *_pty.py 에 자동 부여)"]
