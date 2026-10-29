@@ -180,7 +180,7 @@ flowchart TD
 ## 6. 설계 결정 상세
 
 ### 6-1. 렌더링 순수 함수 (010)
-`render_skills_index(skills, max_entries, desc_max_chars, max_chars)`는 `discover_skills`가 준 사전 목록을 받아 문자열을 돌려준다. 입력 순서를 유지하고(정렬은 `discover_skills`가 이미 결정적으로 한다), 설명이 없으면 이름만 쓴다. 정제 규칙(ADR-0008 §2-4)을 이 함수 하나에 모아 다른 곳에 흩뿌리지 않는다. 입력이 비면 빈 문자열을 돌려주며 호출부가 블록을 만들지 않는다.
+`render_skills_index(skills, max_entries, desc_max_chars, max_chars)`는 `discover_skills`가 준 사전 목록을 받아 문자열을 돌려준다. 입력 순서를 유지하고(정렬은 `discover_skills`가 이미 결정적으로 한다), 설명이 없으면 이름만 쓴다. 정제 규칙(ADR-0008 §2-4)을 이 함수 하나에 모아 다른 곳에 흩뿌리지 않는다. 상한 판정은 실을 개수 `k`를 `min(유효 항목 수, 항목 수 상한)`부터 1까지 내려오며 `len(블록) <= 전체 길이 상한`인 첫 후보를 고른다(초과 안내 줄이 붙은 후보가 줄이 사라지는 마지막 후보보다 길 수 있어 앞에서부터 채우다 멈추면 전부 들어가는데도 잘린다). 입력이 비거나 하나도 들어맞지 않으면 빈 문자열을 돌려주며 호출부가 블록을 만들지 않는다. 사전이 아니거나 이름이 비는 항목은 건너뛴다.
 
 ### 6-2. 에이전트 연동 (020)
 조립부는 ① `skip_skills_index`가 아니고 ② 등록된 도구에 `skills_list`·`skill_view`가 모두 있으며 ③ `discover_skills(get_skills_dir())` 결과가 비어 있지 않을 때만 인덱스를 만들어 `build_system_prompt`에 넘긴다. 스킬 도구 이름 판정은 이미 `select_tools_guidance`가 쓰는 규칙(`skills_list`·`skill_view` 모두 포함)과 같게 한다.
