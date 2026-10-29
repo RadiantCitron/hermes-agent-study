@@ -272,17 +272,19 @@ def build_system_prompt(
     context_files_block: Optional[str] = None,
     platform: str = "cli",
     start_time: Optional[datetime] = None,
+    skills_index_block: Optional[str] = None,
 ) -> str:
     """모든 계층을 순서대로 병합하여 불변 시스템 프롬프트 조립.
 
     [계층 조립 순서]
     1. Agent Identity (에이전트 기본 정체성)
     2. Tools Guidance (활성화된 도구 가이던스: Memory, Session Search 등)
-    3. Caller Prompt (사용자/시스템 임시 지시문)
-    4. Memory Block (Curated Bounded Memory 스냅샷)
-    5. Context Files Block (AGENTS.md, SOUL.md 등 프로젝트 컨텍스트)
-    6. Conversation Timestamp (대화 시작 시각 고정)
-    7. Platform Hint (플랫폼별 렌더링 힌트)
+    3. Skills Index Block (사용 가능한 스킬 요약 목록, 활성화 시)
+    4. Caller Prompt (사용자/시스템 임시 지시문)
+    5. Memory Block (Curated Bounded Memory 스냅샷)
+    6. Context Files Block (AGENTS.md, SOUL.md 등 프로젝트 컨텍스트)
+    7. Conversation Timestamp (대화 시작 시각 고정)
+    8. Platform Hint (플랫폼별 렌더링 힌트)
     """
     parts: list[str] = [agent_identity]
 
@@ -291,6 +293,10 @@ def build_system_prompt(
         valid_guidance = [g.strip() for g in tools_guidance if g and g.strip()]
         if valid_guidance:
             parts.append("\n\n".join(valid_guidance))
+
+    # 스킬 인덱스 블록 (도구 안내문 뒤, 호출자 지시 앞)
+    if skills_index_block and skills_index_block.strip():
+        parts.append(skills_index_block.strip())
 
     # 호출자 지정 추가 프롬프트
     if caller_prompt and caller_prompt.strip():

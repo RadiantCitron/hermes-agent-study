@@ -12,6 +12,7 @@
   4. 테스트 격리를 위한 MockLLMClient 내장.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 import json
 import logging
@@ -34,6 +35,7 @@ from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     build_context_files_prompt,
     build_system_prompt,
+    render_skills_index,
     select_tools_guidance,
 )
 from hermes_core.constants import (
@@ -44,11 +46,13 @@ from hermes_core.constants import (
     CONTEXT_WINDOW_TOKENS,
     SUMMARY_END_MARKER,
     SUMMARY_PREFIX,
+    get_skills_dir,
 )
 from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
+from hermes_core.tools.skills_tool import discover_skills
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +134,7 @@ class HermesAgent:
         source: str = "cli",
         skip_memory: bool = False,
         skip_context_files: bool = False,
+        skills_index: bool = False,
     ):
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
@@ -142,6 +147,10 @@ class HermesAgent:
         self.source = source
         self.skip_memory = skip_memory
         self.skip_context_files = skip_context_files
+        self.skills_index = skills_index
+
+        # 스킬 인덱스 블록 캐시 (세션 중 불변 고정)
+        self._skills_index_block: Optional[str] = None
 
         # 토큰 추정 및 압축 거부 추적 상태 (세션 간 미보존)
         self._last_input_tokens: Optional[int] = None
@@ -193,6 +202,25 @@ class HermesAgent:
         # 시스템 프롬프트 캐시 변수 (Prompt Caching 보존)
         self._cached_system_prompt: Optional[str] = None
 
+    def _resolve_skills_index_block(self, tool_names: Collection[str]) -> str:
+        """스킬 인덱스 블록을 1회 렌더링하여 보관하고 반환 (세션 중 불변 고정).
+
+        - self.skills_index가 False이거나, tool_names에 skills_list와 skill_view가 모두 없으면 빈 문자열 반환.
+        - 이미 보관된 블록이 있으면 재계산하지 않고 보관된 값 반환.
+        """
+        if not self.skills_index:
+            return ""
+
+        tool_names_set = set(tool_names) if tool_names else set()
+        if "skills_list" not in tool_names_set or "skill_view" not in tool_names_set:
+            return ""
+
+        if self._skills_index_block is None:
+            skills = discover_skills(get_skills_dir())
+            self._skills_index_block = render_skills_index(skills)
+
+        return self._skills_index_block
+
     def _build_system_prompt(self, system_message: Optional[str] = None) -> str:
         """시스템 프롬프트를 조립하고 캐싱. `system_message`를 넘기지 않으면 캐시를 재사용하고, 넘기면 다시 조립한다."""
         if self._cached_system_prompt is not None and system_message is None:
@@ -227,10 +255,12 @@ class HermesAgent:
             if s.get("function", {}).get("name")
         ]
         tools_guidance = select_tools_guidance(tool_names)
+        skills_index_block = self._resolve_skills_index_block(tool_names)
 
         assembled = build_system_prompt(
             agent_identity=DEFAULT_AGENT_IDENTITY,
             tools_guidance=tools_guidance,
+            skills_index_block=skills_index_block or None,
             caller_prompt=caller_prompt,
             memory_block=memory_full_block,
             context_files_block=context_block if context_block else None,
