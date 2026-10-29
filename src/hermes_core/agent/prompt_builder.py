@@ -57,6 +57,14 @@ SKILLS_GUIDANCE = (
     "If a relevant skill exists, use skill_view to read its full procedure or attached files and follow its instructions."
 )
 
+SKILLS_INDEX_HEADING = "## Available Skills"
+
+SKILLS_INDEX_RULE = (
+    "Before answering, scan the skills below. If one is relevant to the task, load it with skill_view(name) and "
+    "follow its instructions; if none is relevant, proceed without loading any. This index was taken at session "
+    "start; call skills_list for the current set."
+)
+
 SUBAGENT_GUIDANCE = (
     "## Subagent Delegation (`delegate_task`)\n"
     "- When to delegate: Use `delegate_task` for independent, exploratory, or multi-step subtasks "
@@ -260,6 +268,20 @@ def render_skills_index(
     return ""
 
 
+def format_skills_index_section(block: str) -> str:
+    """스킬 인덱스 블록에 제목과 규칙 문장을 덧붙여 구획(section)으로 포맷팅.
+
+    Args:
+        block: <available_skills> 태그로 감싸진 스킬 목록 문자열
+
+    Returns:
+        비어있거나 공백뿐이면 빈 문자열(""), 아니면 제목 + 규칙 + 블록으로 결합된 구획 문자열.
+    """
+    if not block or not block.strip():
+        return ""
+    return f"{SKILLS_INDEX_HEADING}\n{SKILLS_INDEX_RULE}\n\n{block.strip()}"
+
+
 # =============================================================================
 # 계층형 시스템 프롬프트 조립 메인 함수
 # =============================================================================
@@ -279,7 +301,7 @@ def build_system_prompt(
     [계층 조립 순서]
     1. Agent Identity (에이전트 기본 정체성)
     2. Tools Guidance (활성화된 도구 가이던스: Memory, Session Search 등)
-    3. Skills Index Block (사용 가능한 스킬 요약 목록, 활성화 시)
+    3. Skills Index Block (제목 + 규칙 문장 + 스킬 요약 목록, 활성화 시)
     4. Caller Prompt (사용자/시스템 임시 지시문)
     5. Memory Block (Curated Bounded Memory 스냅샷)
     6. Context Files Block (AGENTS.md, SOUL.md 등 프로젝트 컨텍스트)
@@ -296,7 +318,7 @@ def build_system_prompt(
 
     # 스킬 인덱스 블록 (도구 안내문 뒤, 호출자 지시 앞)
     if skills_index_block and skills_index_block.strip():
-        parts.append(skills_index_block.strip())
+        parts.append(format_skills_index_section(skills_index_block))
 
     # 호출자 지정 추가 프롬프트
     if caller_prompt and caller_prompt.strip():
