@@ -43,6 +43,11 @@ def main() -> None:
         action="store_true",
         help="Enable subagent delegation (delegate_task) in real model mode",
     )
+    parser.add_argument(
+        "--no-skills-index",
+        action="store_true",
+        help="Disable the skills index in the system prompt (skills stay available via the skills_list/skill_view tools)",
+    )
     args = parser.parse_args()
 
     if args.delegate and args.mock:
@@ -107,6 +112,7 @@ def main() -> None:
         model=model,
         llm_client=llm_client,
         context_window_tokens=args.context_window,
+        skills_index=not args.no_skills_index,
     )
 
     if not args.mock and args.delegate:
@@ -126,6 +132,8 @@ def main() -> None:
         print(f"📁 Working directory: {os.getcwd()}")
     if not args.mock and args.delegate:
         print("Delegation enabled (delegate_task).")
+    if args.no_skills_index:
+        print("Skills index disabled (--no-skills-index).")
     print("Type 'exit' or 'quit' to terminate.")
     print("=" * 60)
 
