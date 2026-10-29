@@ -212,3 +212,28 @@ CLI_PROMPT_TOOLKIT_MISSING_NOTICE = "prompt_toolkit is not installed; falling ba
 # 여러 줄 입력 가능 환경(터미널 + prompt_toolkit) 시작 배너 안내 문구
 CLI_MULTILINE_HINT = "Enter to send, Ctrl+J for a new line."
 
+
+# =============================================================================
+# 승인 흐름 관련 상수
+# =============================================================================
+
+# 승인 요청 대기 상태 (초기 상태)
+APPROVAL_DECISION_PENDING = "pending"
+
+# 승인 요청 최종 결정 상태 상수
+APPROVAL_DECISION_APPROVED = "approved"          # 사람이 명시적 승인 (예)
+APPROVAL_DECISION_DENIED = "denied"              # 사람이 거부 (아니오·빈 입력·알 수 없는 입력)
+APPROVAL_DECISION_CANCELLED = "cancelled"        # 입력 취소 (EOF·Ctrl+C·입력 예외)
+APPROVAL_DECISION_AUTO_DENIED = "auto_denied"    # 비터미널 환경 자동 거부
+APPROVAL_DECISION_LIMIT_EXCEEDED = "limit_exceeded"  # 세션당 요청 상한 초과
+
+# 승인 요청 최종 결정 닫힌 목록
+APPROVAL_FINAL_DECISIONS = (
+    APPROVAL_DECISION_APPROVED,
+    APPROVAL_DECISION_DENIED,
+    APPROVAL_DECISION_CANCELLED,
+    APPROVAL_DECISION_AUTO_DENIED,
+    APPROVAL_DECISION_LIMIT_EXCEEDED,
+)
+
+

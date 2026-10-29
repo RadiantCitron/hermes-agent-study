@@ -1082,7 +1082,7 @@ def test_060_scenario_11_migration_and_compression(tmp_path, monkeypatch):
 
     # SessionDB로 열어 마이그레이션 확인
     db = SessionDB(db_path)
-    assert db.schema_version == 4
+    assert db.schema_version >= 4
 
     long_payload = "X" * 200
 

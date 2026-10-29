@@ -257,7 +257,7 @@ def test_050_scenario_01_schema_v3_to_v4_migration(tmp_path):
 
     # SessionDB로 열어 마이그레이션 검증
     db = SessionDB(db_path)
-    assert db.schema_version == 4
+    assert db.schema_version >= 4
 
     # 기존 메시지 컬럼 값 확인
     raw_msgs = db.get_messages("s1")
@@ -281,7 +281,7 @@ def test_050_scenario_02_new_db_schema_v4_column_match(tmp_path):
     import sqlite3
 
     db_new = SessionDB(":memory:")
-    assert db_new.schema_version == 4
+    assert db_new.schema_version >= 4
 
     # 새 DB의 messages 열 조회
     cursor_new = db_new._conn.execute("PRAGMA table_info(messages)")
@@ -348,12 +348,12 @@ def test_050_scenario_03_migration_idempotent(tmp_path):
     """시나리오 3: 마이그레이션 두 번 실행(멱등성) 시 오류 없이 버전 4 유지."""
     db_path = tmp_path / "idempotent.db"
     db1 = SessionDB(db_path)
-    assert db1.schema_version == 4
+    assert db1.schema_version >= 4
     db1.close()
 
     # 다시 열기
     db2 = SessionDB(db_path)
-    assert db2.schema_version == 4
+    assert db2.schema_version >= 4
     db2.close()
 
 

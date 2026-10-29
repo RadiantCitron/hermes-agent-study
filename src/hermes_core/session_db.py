@@ -20,9 +20,13 @@ import sqlite3
 import time
 from typing import Any, Optional, Union
 
-from hermes_core.constants import get_hermes_home
+from hermes_core.constants import (
+    APPROVAL_DECISION_PENDING,
+    APPROVAL_FINAL_DECISIONS,
+    get_hermes_home,
+)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -79,11 +83,23 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     error_message TEXT
 );
 
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    tool_name TEXT NOT NULL,
+    argv_json TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    decision TEXT NOT NULL,
+    decided_at REAL,
+    reason TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id);
 """
 
 FTS_SQL = """
@@ -166,6 +182,8 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass
                 cursor.execute("UPDATE schema_version SET version = 4")
+            if current_version < 5:
+                cursor.execute("UPDATE schema_version SET version = 5")
 
         # FTS5 가상 테이블 초기화
         try:
@@ -564,3 +582,57 @@ class SessionDB:
             (session_id,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # =========================================================================
+    # 승인 요청 원장(approval_requests) 기록 및 조회 메서드
+    # =========================================================================
+
+    def record_approval_request(
+        self,
+        session_id: str,
+        argv: list[str],
+        tool_name: str = "terminal",
+    ) -> int:
+        """승인 요청을 approval_requests 원장에 선기록(pending)하고 생성된 id를 반환한다."""
+        if not isinstance(argv, list) or len(argv) == 0 or not all(isinstance(a, str) for a in argv):
+            raise ValueError("argv must be a non-empty list of strings")
+
+        argv_json = json.dumps(argv, ensure_ascii=False)
+        cursor = self._conn.execute(
+            """INSERT INTO approval_requests (
+                session_id, tool_name, argv_json, created_at, decision, decided_at, reason
+            ) VALUES (?, ?, ?, ?, ?, NULL, NULL)""",
+            (session_id, tool_name, argv_json, time.time(), APPROVAL_DECISION_PENDING),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def resolve_approval_request(
+        self,
+        request_id: int,
+        decision: str,
+        reason: Optional[str] = None,
+    ) -> bool:
+        """pending 상태인 승인 요청의 최종 결정을 기록한다. 이미 결정되었거나 없으면 False."""
+        if decision not in APPROVAL_FINAL_DECISIONS:
+            raise ValueError(
+                f"decision must be one of {APPROVAL_FINAL_DECISIONS}, got {decision!r}"
+            )
+
+        cursor = self._conn.execute(
+            """UPDATE approval_requests
+               SET decision = ?, decided_at = ?, reason = ?
+               WHERE id = ? AND decision = ?""",
+            (decision, time.time(), reason, request_id, APPROVAL_DECISION_PENDING),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_approval_requests(self, session_id: str) -> list[dict[str, Any]]:
+        """특정 세션의 승인 요청 기록 목록을 id 오름차순으로 반환한다."""
+        cursor = self._conn.execute(
+            "SELECT * FROM approval_requests WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
