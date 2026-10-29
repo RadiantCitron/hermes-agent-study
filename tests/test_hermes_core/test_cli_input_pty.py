@@ -114,6 +114,17 @@ class PtySession:
                 return self.accumulated
         raise TimeoutError(f"Marker {marker!r} not found. Output tail: {self.accumulated[-300:]}")
 
+    def wait_for_prompt(self, timeout: float = 15.0) -> str:
+        """입력을 보낸 뒤 다음 prompt_toolkit 프롬프트가 입력받을 준비가 될 때까지 기다린다.
+
+        `User >`만 기다리면 같은 프롬프트를 다시 그린 출력(`User > ok`)에 걸려, CLI가 아직 처리 중이라
+        raw 모드가 풀린 때 다음 입력을 보내게 된다. 그러면 tty가 `\\r`을 `\\n`(Ctrl+J 줄바꿈)으로 바꿔 입력이
+        다음 메시지에 붙고 세션이 끝나지 않는다. prompt_toolkit은 raw 모드에 들어간 뒤 첫 그리기에서만
+        `\\x1b[?2004h`를 출력하므로, 그 뒤의 `User >`를 새 프롬프트로 본다.
+        """
+        self.wait_for("\x1b[?2004h", timeout=timeout)
+        return self.wait_for("User >", timeout=timeout, from_last_match=True)
+
     def write(self, data: bytes) -> None:
         """마스터 터미널에 원시 바이트를 쓴다."""
         os.write(self.master, data)
@@ -217,9 +228,9 @@ def test_scenario_02_korean_backspace_clean_exit() -> None:
     try:
         sess.wait_for("User >")
         sess.write("한".encode("utf-8") + b"\x7fok\r")
-        sess.wait_for("User >")
+        sess.wait_for_prompt()
         sess.write("한글ab".encode("utf-8") + b"\x7f\r")
-        sess.wait_for("User >")
+        sess.wait_for_prompt()
         sess.write(b"exit\r")
         sess.proc.wait(timeout=5)
         sess.read_available(0.1)
@@ -239,7 +250,7 @@ def test_scenario_03_ctrl_j_inserts_newline() -> None:
     try:
         sess.wait_for("User >")
         sess.write(b"a\nb\r")
-        sess.wait_for("User >")
+        sess.wait_for_prompt()
         sess.write(b"exit\r")
         sess.proc.wait(timeout=5)
         sess.read_available(0.1)
@@ -256,7 +267,7 @@ def test_scenario_04_bracketed_paste_multiline() -> None:
     try:
         sess.wait_for("User >")
         sess.write(b"\x1b[200~l1\nl2\r\nl3\x1b[201~\r")
-        sess.wait_for("User >")
+        sess.wait_for_prompt()
         sess.write(b"exit\r")
         sess.proc.wait(timeout=5)
         sess.read_available(0.1)
