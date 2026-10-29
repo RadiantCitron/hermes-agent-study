@@ -36,7 +36,7 @@ from hermes_core.constants import (
     CLI_ROLLBACK_LINE_DELETE,
     CLI_ROLLBACK_LINE_RESTORE,
     CLI_ROLLBACK_LINE_SKIP,
-    CLI_ROLLBACK_MODEL_UNAWARE_NOTICE,
+    CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_ROLLBACK_NOTHING_NOTICE,
     CLI_ROLLBACK_PENDING_WARNING,
     CLI_ROLLBACK_PROMPT,
@@ -54,27 +54,36 @@ from hermes_core.constants import (
 from hermes_core.llm_client import OpenRouterClient
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver, is_approval_answer
-from hermes_core.tools.checkpoint import Checkpointer
+from hermes_core.tools.checkpoint import (
+    Checkpointer,
+    RollbackResult,
+    format_rollback_notice,
+)
 from hermes_core.tools.delegate_tool import register_delegate_tool
 from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 
 
-def _handle_rollback(tokens: list[str], checkpointer: Checkpointer | None) -> None:
-    """REPL의 /rollback 명령을 처리한다."""
+def _handle_rollback(
+    tokens: list[str], checkpointer: Checkpointer | None
+) -> Optional[RollbackResult]:
+    """REPL의 /rollback 명령을 처리한다.
+
+    되돌리기가 실행된 경우 RollbackResult를 반환하고, 취소·오류·미실행 시 None을 반환한다.
+    """
     if checkpointer is None:
         print(CLI_ROLLBACK_DISABLED_NOTICE)
-        return
+        return None
 
     if len(tokens) > 1:
         print(CLI_ROLLBACK_USAGE_NOTICE)
-        return
+        return None
 
     try:
         plan = checkpointer.plan_rollback()
         if not plan.items:
             print(CLI_ROLLBACK_NOTHING_NOTICE)
-            return
+            return None
 
         restore_count = sum(1 for item in plan.items if not item.will_skip)
         skip_count = sum(1 for item in plan.items if item.will_skip)
@@ -118,11 +127,11 @@ def _handle_rollback(tokens: list[str], checkpointer: Checkpointer | None) -> No
             answer = read_user_input(CLI_ROLLBACK_PROMPT, discard_typeahead=True)
         except (EOFError, KeyboardInterrupt):
             print(CLI_ROLLBACK_CANCELLED_NOTICE)
-            return
+            return None
 
         if not is_approval_answer(answer):
             print(CLI_ROLLBACK_CANCELLED_NOTICE)
-            return
+            return None
 
         result = checkpointer.execute_rollback(plan)
         for item in result.items:
@@ -144,9 +153,11 @@ def _handle_rollback(tokens: list[str], checkpointer: Checkpointer | None) -> No
             )
         )
         if result.rolled_back_count >= 1:
-            print(CLI_ROLLBACK_MODEL_UNAWARE_NOTICE)
+            print(CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE)
+        return result
     except Exception as e:
         print(CLI_ROLLBACK_ERROR_NOTICE.format(reason=str(e)))
+        return None
 
 
 def main() -> None:
@@ -325,6 +336,7 @@ def main() -> None:
     try:
         history = None
         checkpoint_refusal_notified = False
+        pending_rollbacks: list[RollbackResult] = []
         while True:
             try:
                 print()
@@ -343,15 +355,21 @@ def main() -> None:
 
             tokens = user_input.split()
             if tokens and tokens[0].lower() == "/rollback":
-                _handle_rollback(tokens, checkpointer)
+                rollback_res = _handle_rollback(tokens, checkpointer)
+                if rollback_res is not None:
+                    pending_rollbacks.append(rollback_res)
                 continue
 
             if checkpointer is not None:
                 checkpointer.begin_turn()
 
+            notice = format_rollback_notice(pending_rollbacks)
+            pending_rollbacks.clear()
+            message = f"{notice}\n\n{user_input}" if notice else user_input
+
             # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
             with hold_typeahead():
-                result = agent.run_conversation(user_input, conversation_history=history)
+                result = agent.run_conversation(message, conversation_history=history)
                 history = result["messages"]
                 if result.get("stopped_reason") == "llm_error":
                     err = result.get("error", {})

@@ -255,8 +255,8 @@ CLI_ROLLBACK_RESULT_RESTORED = "  restored  {rel_path}"
 CLI_ROLLBACK_RESULT_DELETED = "  deleted   {rel_path}"
 CLI_ROLLBACK_RESULT_SKIPPED = "  skipped   {rel_path} - {reason}"
 CLI_ROLLBACK_RESULT_SUMMARY = "Rolled back {rolled_back} file(s), skipped {skipped}."
-CLI_ROLLBACK_MODEL_UNAWARE_NOTICE = (
-    "The model does not know about this rollback. Ask it to re-read the changed files before continuing."
+CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE = (
+    "The model will be told about this rollback together with your next message."
 )
 CLI_ROLLBACK_ERROR_NOTICE = (
     "Rollback failed ({reason}). Some files may already have been restored; check the working directory."

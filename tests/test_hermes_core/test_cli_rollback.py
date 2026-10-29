@@ -29,7 +29,7 @@ from hermes_core.constants import (
     CLI_ROLLBACK_LINE_DELETE,
     CLI_ROLLBACK_LINE_RESTORE,
     CLI_ROLLBACK_LINE_SKIP,
-    CLI_ROLLBACK_MODEL_UNAWARE_NOTICE,
+    CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_ROLLBACK_NOTHING_NOTICE,
     CLI_ROLLBACK_PENDING_WARNING,
     CLI_ROLLBACK_PROMPT,
@@ -42,6 +42,7 @@ from hermes_core.constants import (
     OPENROUTER_API_KEY_ENV,
     get_default_workspace,
 )
+from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.checkpoint import (
     Checkpointer,
@@ -600,7 +601,7 @@ def test_scenario_11_rollback_basic_flow(
     assert CLI_ROLLBACK_RESULT_RESTORED.format(rel_path="old.txt") in captured.out
     assert CLI_ROLLBACK_RESULT_DELETED.format(rel_path="new.txt") in captured.out
     assert CLI_ROLLBACK_RESULT_SUMMARY.format(rolled_back=2, skipped=0) in captured.out
-    assert CLI_ROLLBACK_MODEL_UNAWARE_NOTICE in captured.out
+    assert CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE in captured.out
 
     # 모델 호출 횟수 (쓰기 턴의 3회뿐, /rollback은 모델 미호출)
     client = ScriptableClient.created_instances[0]
@@ -708,7 +709,7 @@ def test_scenario_13_exact_yes_validation(
     if should_rollback:
         assert not (ws / "new.txt").exists()
         assert (ws / "old.txt").read_text(encoding="utf-8") == "before"
-        assert CLI_ROLLBACK_MODEL_UNAWARE_NOTICE in captured.out
+        assert CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE in captured.out
     else:
         assert (ws / "new.txt").exists()
         assert (ws / "old.txt").read_text(encoding="utf-8") == "after"
@@ -837,7 +838,7 @@ def test_scenario_16_conflict_skip_and_partial_rollback(
     db.close()
 
     assert CLI_ROLLBACK_RESULT_SUMMARY.format(rolled_back=1, skipped=1) in captured.out
-    assert CLI_ROLLBACK_MODEL_UNAWARE_NOTICE in captured.out
+    assert CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE in captured.out
 
 
 def test_scenario_17_external_warning_on_terminal_or_subagent(
@@ -1042,7 +1043,7 @@ def test_scenario_18_mock_plan_display_and_execute(
         in captured.out
     )
     assert CLI_ROLLBACK_RESULT_SUMMARY.format(rolled_back=2, skipped=2) in captured.out
-    assert CLI_ROLLBACK_MODEL_UNAWARE_NOTICE in captured.out
+    assert CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE in captured.out
 
 
 def test_scenario_19_no_checkpoints_rollback_notice(
@@ -1195,4 +1196,397 @@ def test_scenario_rollback_prompt_passes_discard_typeahead(
     ]
     assert len(rollback_calls) == 1
     assert rollback_calls[0]["kwargs"].get("discard_typeahead") is True
+
+
+# =============================================================================
+# 로드맵 12 020 단계: CLI 배선 인수 테스트 (시나리오 1~12)
+# =============================================================================
+
+
+def test_rollback_notice_01_read_it_has_notice_and_deleted(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 1: go -> /rollback(y) -> read it -> exit.
+
+    read it에 대한 첫 모델 호출의 마지막 user 메시지에 알림이 붙어 있고,
+    deleted: new.txt 줄을 포함하며, \\n\\nread it으로 끝난다 (D-01).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    # call 0: go
+    # call 1: tool response
+    # call 2: read it
+    assert len(client.call_history) >= 3
+    read_it_call = client.call_history[2]
+    user_msgs = [m for m in read_it_call["messages"] if m.get("role") == "user"]
+    last_user_msg = user_msgs[-1]["content"]
+
+    assert last_user_msg.startswith("[Rollback notice - added by the CLI, not typed by the user]")
+    assert "  deleted: new.txt" in last_user_msg
+    assert last_user_msg.endswith("\n\nread it")
+
+
+def test_rollback_notice_02_ledger_content_matches_model_call(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 2: 원장 messages의 해당 user 행 content가 모델이 받은 글과 글자 그대로 같다 (D-03)."""
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    user_msgs_in_call = [m for m in client.call_history[2]["messages"] if m.get("role") == "user"]
+    model_received = user_msgs_in_call[-1]["content"]
+
+    # 원장 DB 조회
+    db_path = cli_test_env["hermes_home"] / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        user_rows = conn.execute(
+            "SELECT content FROM messages WHERE role = 'user' ORDER BY id ASC"
+        ).fetchall()
+        assert len(user_rows) == 2  # go, read it
+        ledger_received = user_rows[1]["content"]
+        assert ledger_received == model_received
+    finally:
+        conn.close()
+
+
+def test_rollback_notice_03_notice_sent_only_once(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 3: go -> /rollback(y) -> read it -> again -> exit.
+
+    again 호출의 마지막 user 메시지가 정확히 again이다 (알림은 한 번만).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+        MockLLMResponse(content="Done again"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "again", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    again_call = client.call_history[3]
+    user_msgs = [m for m in again_call["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "again"
+
+
+def test_rollback_notice_04_cancelled_rollback_no_notice(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 4: go -> /rollback(n) -> read it -> exit -> read it이 정확히 read it (취소)."""
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["n"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    read_it_call = client.call_history[2]
+    user_msgs = [m for m in read_it_call["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "read it"
+
+
+def test_rollback_notice_05_nothing_to_rollback_no_notice(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 5: /rollback(되돌릴 것 없음) -> hello -> exit -> hello가 정확히 hello."""
+    ScriptableClient.responses_by_instance[0] = [
+        MockLLMResponse(content="Hello there"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["/rollback", "hello", "exit"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    assert len(client.call_history) == 1
+    user_msgs = [m for m in client.call_history[0]["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "hello"
+
+
+def test_rollback_notice_06_all_skipped_no_notice(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 6: go -> 사람이 new.txt를 직접 고침 -> /rollback(y, 전부 건너뜀) -> read it -> exit.
+
+    read it이 그대로 가고 알림이 없다. 화면에 WILL_BE_TOLD 안내가 없다 (D-05).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+
+    def modify_new_txt():
+        (ws / "new.txt").write_text("externally modified", encoding="utf-8")
+        return "y"
+
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=[modify_new_txt],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+    captured = capsys.readouterr()
+
+    client = ScriptableClient.created_instances[0]
+    read_it_call = client.call_history[2]
+    user_msgs = [m for m in read_it_call["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "read it"
+    assert CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE not in captured.out
+
+
+def test_rollback_notice_07_cumulative_rollbacks(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 7: go(턴 1, a.txt) -> go2(턴 2, b.txt) -> /rollback(y) -> /rollback(y) -> read it -> exit.
+
+    알림이 한 번 붙고, Turn 2:가 Turn 1:보다 앞에 있다 (D-06).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="Created a.txt"),
+        make_write_file_response("c2", "b.txt", "content b"),
+        MockLLMResponse(content="Created b.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "go2", "/rollback", "/rollback", "read it", "exit"],
+        rollback_answers=["y", "y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    read_it_call = client.call_history[4]
+    user_msgs = [m for m in read_it_call["messages"] if m.get("role") == "user"]
+    last_user_msg = user_msgs[-1]["content"]
+
+    assert last_user_msg.endswith("\n\nread it")
+    idx_turn2 = last_user_msg.index("Turn 2:")
+    idx_turn1 = last_user_msg.index("Turn 1:")
+    assert idx_turn2 < idx_turn1
+
+
+def test_rollback_notice_08_exit_discards_pending(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 8: go -> /rollback(y) -> exit.
+
+    exit으로 정상 종료한다(user_exit). 되돌린 뒤 모델 호출 횟수가 늘지 않는다.
+    file_checkpoints 행은 rolled_back (D-06, 위험 5).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    # 모델 호출은 go 1턴(도구 호출 1회, 후속 응답 1회) 총 2회뿐
+    assert len(client.call_history) == 2
+
+    # 세션 종료 상태 확인
+    db_path = cli_test_env["hermes_home"] / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        session_row = conn.execute("SELECT end_reason FROM sessions ORDER BY started_at DESC LIMIT 1").fetchone()
+        assert session_row["end_reason"] == "user_exit"
+        cp_rows = conn.execute("SELECT status FROM file_checkpoints").fetchall()
+        assert len(cp_rows) == 1
+        assert cp_rows[0]["status"] == "rolled_back"
+    finally:
+        conn.close()
+
+
+def test_rollback_notice_09_empty_line_and_noop_rollback_do_not_consume(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 9: go -> /rollback(y) -> (빈 줄) -> /rollback(되돌릴 것 없음) -> read it -> exit.
+
+    알림이 read it에만 한 번 붙는다(빈 줄과 「없음」은 알림을 소비하지 않는다).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    read_it_call = client.call_history[2]
+    user_msgs = [m for m in read_it_call["messages"] if m.get("role") == "user"]
+    last_user_msg = user_msgs[-1]["content"]
+    assert last_user_msg.startswith("[Rollback notice - added by the CLI, not typed by the user]")
+    assert last_user_msg.endswith("\n\nread it")
+
+
+def test_rollback_notice_10_screen_notice_text(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 10: 화면에 CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE가 1번 나오고 UNAWARE 문구는 없다 (D-08)."""
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        MockLLMResponse(content="Done reading"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+    captured = capsys.readouterr()
+
+    assert captured.out.count(
+        "The model will be told about this rollback together with your next message."
+    ) == 1
+    assert "The model does not know about this rollback" not in captured.out
+
+
+def test_rollback_notice_11_no_checkpoints_flag(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 11: --no-checkpoints로 /rollback -> hello -> exit -> hello가 그대로 간다."""
+    ScriptableClient.responses_by_instance[0] = [
+        MockLLMResponse(content="Hello response"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["/rollback", "hello", "exit"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli", "--no-checkpoints"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    assert len(client.call_history) == 1
+    user_msgs = [m for m in client.call_history[0]["messages"] if m.get("role") == "user"]
+    assert user_msgs[-1]["content"] == "hello"
+
+
+def test_rollback_notice_12_llm_failure_clears_pending_does_not_repeat(
+    cli_test_env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    """시나리오 12: go -> /rollback(y) -> read it (LLMError 발생) -> again -> exit.
+
+    read it 요청에는 알림이 붙었다. again 요청의 마지막 user 메시지는 정확히 again이다.
+    (실패해도 두 번 보내지 않음, 위험 4).
+    """
+    ws = get_default_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    ScriptableClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "new.txt", "content"),
+        MockLLMResponse(content="Created new.txt"),
+        LLMError("api_error", "Simulated failure"),
+        MockLLMResponse(content="Recovered response"),
+    ]
+    fake_in = ScriptableInput(
+        user_inputs=["go", "/rollback", "read it", "again", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+    monkeypatch.setattr("sys.argv", ["hermes_core.cli"])
+
+    cli.main()
+
+    client = ScriptableClient.created_instances[0]
+    # call 0: go
+    # call 1: tool response
+    # call 2: read it (failed with LLMError)
+    # call 3: again
+    assert len(client.call_history) >= 4
+
+    read_it_call = client.call_history[2]
+    read_it_user = [m for m in read_it_call["messages"] if m.get("role") == "user"][-1]["content"]
+    assert read_it_user.startswith("[Rollback notice - added by the CLI, not typed by the user]")
+    assert read_it_user.endswith("\n\nread it")
+
+    again_call = client.call_history[3]
+    again_user = [m for m in again_call["messages"] if m.get("role") == "user"][-1]["content"]
+    assert again_user == "again"
 
