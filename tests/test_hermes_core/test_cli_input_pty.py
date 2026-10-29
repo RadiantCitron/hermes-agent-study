@@ -72,6 +72,7 @@ class PtySession:
             cwd=str(self.home),
         )
         self.accumulated = ""
+        self.cursor = 0  # 마지막으로 찾은 표지 바로 뒤. 한 번에 같이 읽힌 다음 표지를 놓치지 않는다
 
     def read_available(self, timeout: float = 0.05) -> str:
         """현재 마스터 버퍼에 도착해 있는 출력을 가능한 만큼 모두 읽는다."""
@@ -88,10 +89,15 @@ class PtySession:
                 break
         return self.accumulated
 
-    def wait_for(self, marker: str, timeout: float = 15.0) -> str:
-        """표지 문자열이 출력에 나타날 때까지 기다린다."""
+    def wait_for(self, marker: str, timeout: float = 15.0, from_last_match: bool = False) -> str:
+        """표지 문자열이 출력에 나타날 때까지 기다린다.
+
+        기본은 이 호출 이후에 새로 도착한 출력에서만 찾는다(prompt_toolkit이 같은 프롬프트를 다시 그리는
+        경우에 옛 출력을 새 프롬프트로 오인하지 않기 위해). `from_last_match=True`는 직전에 찾은 표지 바로
+        뒤부터 찾는다 — 앞선 대기가 한 번에 같이 읽어 버린 다음 표지를 놓치지 않으려는 용도다.
+        """
         deadline = time.time() + timeout
-        start_pos = len(self.accumulated)
+        start_pos = self.cursor if from_last_match else len(self.accumulated)
         while time.time() < deadline:
             r, _, _ = select.select([self.master], [], [], 0.05)
             if r:
@@ -100,11 +106,11 @@ class PtySession:
                     if not chunk:
                         break
                     self.accumulated += chunk.decode("utf-8", "replace")
-                    if marker in self.accumulated[start_pos:]:
-                        return self.accumulated
                 except OSError:
                     break
-            if marker in self.accumulated[start_pos:]:
+            pos = self.accumulated.find(marker, start_pos)
+            if pos != -1:
+                self.cursor = pos + len(marker)
                 return self.accumulated
         raise TimeoutError(f"Marker {marker!r} not found. Output tail: {self.accumulated[-300:]}")
 
