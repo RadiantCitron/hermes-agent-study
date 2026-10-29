@@ -23,13 +23,15 @@
 src/hermes_core/
   constants.py                      [변경] SKILLS_INDEX_* 상수 3개                        (010)
   agent/
-    prompt_builder.py               [변경] render_skills_index, build_system_prompt 인자  (010, 020, 030)
+    prompt_builder.py               [변경] render_skills_index(010), build_system_prompt 인자(020),
+                                           SKILLS_INDEX_HEADING/RULE, format_skills_index_section (030)
     agent.py                        [변경] skills_index 인자(기본 False), 인덱스 조립·주입  (020)
   cli.py                            [변경] --no-skills-index 플래그, 기본으로 skills_index 켜기 (025)
 tests/test_hermes_core/
   test_skills_index.py              [신규] 렌더링·정제·상한                               (010)
   test_agent_skills_index.py        [신규] 연동·고정·꺼짐 기본값·바이트 동일             (020)
-  test_cli_skills_index.py          [신규]                                              (025)
+  test_cli_skills_index.py          [신규] CLI 플래그·두 모드·위임 자식 제외              (025)
+  test_skills_index_section.py      [신규] 제목·규칙 문장·구획 위조 방어                  (030)
   test_skills_guidance.py           [무변경] 기존 600자·목록 미포함 시험 그대로 통과
   test_agent_e2e.py                 [변경] 인덱스 E2E 시나리오 추가 (기존 삭제 0줄)       (040)
 docs/작동원리/01-헤르메스코어-작동원리.md  [변경] 인덱스 영구 사실 동기화                   (040)
@@ -68,7 +70,10 @@ classDiagram
   class prompt_builder {
     +SKILLS_GUIDANCE
     +select_tools_guidance(tool_names) list
-    +render_skills_index(skills, max_entries, desc_max_chars, max_chars) str  %% [신규]
+    +SKILLS_INDEX_HEADING  %% [신규, 030]
+    +SKILLS_INDEX_RULE  %% [신규, 030]
+    +render_skills_index(skills, max_entries, desc_max_chars, max_chars) str  %% [신규, 010]
+    +format_skills_index_section(block) str  %% [신규, 030]
     +build_system_prompt(..., skills_index_block) str  %% [변경]
   }
   class skills_tool {
@@ -108,8 +113,8 @@ sequenceDiagram
   SK-->>A: [{name, description, path}, ...]
   A->>R: render_skills_index(목록, 상한 3개)
   R-->>A: 인덱스 블록 (정제·절삭, 초과 시 +N more)
-  A->>PB: 정체성, 도구 안내문, 인덱스 블록, 메모리, 지시문파일
-  PB-->>A: 시스템 프롬프트
+  A->>PB: 정체성, 도구 안내문, 인덱스 블록(순수 블록), 메모리, 지시문파일
+  PB-->>A: 시스템 프롬프트 (인덱스 블록 앞에 제목·규칙 문장을 붙여 구획으로)
   A->>DB: update_system_prompt (1회 저장)
   A->>M: 시스템 프롬프트 + 사용자 질문
   M-->>A: skill_view(release-procedure) 호출 (관찰 대상)
