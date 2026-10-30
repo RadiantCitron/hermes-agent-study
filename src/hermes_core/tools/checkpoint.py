@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from hermes_core.constants import (
     CHECKPOINT_LIMIT_ERROR_MESSAGE,
@@ -28,6 +28,15 @@ from hermes_core.constants import (
     CHECKPOINT_STATUS_SKIPPED,
     CHECKPOINT_TOOL_NAMES,
     FILE_MAX_BYTES,
+    INTERRUPT_NOTICE_BEGIN,
+    INTERRUPT_NOTICE_END,
+    INTERRUPT_NOTICE_INSTRUCTION,
+    INTERRUPT_NOTICE_INTRO,
+    INTERRUPT_NOTICE_LINE_APPLIED,
+    INTERRUPT_NOTICE_LINE_FAILED,
+    INTERRUPT_NOTICE_LINE_PENDING,
+    INTERRUPT_NOTICE_MAX_PATHS,
+    INTERRUPT_NOTICE_MORE_LINE,
     ROLLBACK_NOTICE_BEGIN,
     ROLLBACK_NOTICE_END,
     ROLLBACK_NOTICE_INSTRUCTION,
@@ -101,6 +110,22 @@ class RollbackResult:
     rolled_back_count: int
     skipped_count: int
     items: tuple[RollbackItemResult, ...]
+
+
+@dataclass(frozen=True)
+class InterruptedItem:
+    """취소된 턴의 단일 파일 변경 상태 항목."""
+
+    rel_path: str
+    status: str  # "applied" | "pending" | "failed"
+
+
+@dataclass(frozen=True)
+class InterruptedTurn:
+    """취소된 턴의 파일 변경 항목 묶음."""
+
+    turn_index: int
+    items: tuple[InterruptedItem, ...]
 
 
 class Checkpointer:
@@ -636,6 +661,32 @@ class Checkpointer:
             items=tuple(item_results),
         )
 
+    def collect_interrupted_turn(
+        self, turn_index: Optional[int] = None
+    ) -> Optional[InterruptedTurn]:
+        """취소된 턴의 파일 변경 기록을 수집한다.
+
+        turn_index가 지정되지 않으면 self.turn_index를 사용한다.
+        상태가 applied, pending, failed인 행만 id 오름차순으로 InterruptedItem으로 만든다.
+        해당 행이 0건이면 None을 반환한다. (skipped, rolled_back 행은 제외)
+        파일 시스템이나 DB를 수정하지 않는다.
+        """
+        idx = self.turn_index if turn_index is None else turn_index
+        rows = self.db.get_file_checkpoints(self.session_id, turn_index=idx)
+        target_statuses = (
+            CHECKPOINT_STATUS_APPLIED,
+            CHECKPOINT_STATUS_PENDING,
+            CHECKPOINT_STATUS_FAILED,
+        )
+        items = [
+            InterruptedItem(rel_path=row["rel_path"], status=row["status"])
+            for row in rows
+            if row["status"] in target_statuses
+        ]
+        if not items:
+            return None
+        return InterruptedTurn(turn_index=idx, items=tuple(items))
+
 
 def _escape_control(s: str) -> str:
     """문자열 내 제어·서식 문자를 repr 규칙에 따라 눈에 보이는 역슬래시 표기로 치환한다."""
@@ -724,3 +775,82 @@ def format_rollback_notice(results: Sequence[RollbackResult]) -> Optional[str]:
     lines.append(ROLLBACK_NOTICE_END)
 
     return "\n".join(lines)
+
+
+def format_interrupt_notice(turn: InterruptedTurn) -> Optional[str]:
+    """취소된 턴의 파일 변경 기록을 바탕으로 모델에게 전달할 고정 형식의 알림 글을 생성한다.
+
+    - 항목이 0개면 None을 반환한다.
+    - 같은 (status, rel_path) 중복은 첫 번째만 남긴다 (입력 순서 보존).
+    - 전체 경로 줄 수가 상한(INTERRUPT_NOTICE_MAX_PATHS)을 초과하면 초과분을 생략하고 MORE 줄을 덧붙인다.
+    - rel_path는 _escape_control로 이스케이프한다.
+    - 턴 번호는 포함하지 않는다.
+    - 순수 함수로서 입력을 변경하지 않는다.
+    """
+    if not turn.items:
+        return None
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[InterruptedItem] = []
+    for item in turn.items:
+        key = (item.status, item.rel_path)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+
+    if not deduped:
+        return None
+
+    lines: list[str] = [
+        INTERRUPT_NOTICE_BEGIN,
+        INTERRUPT_NOTICE_INTRO,
+    ]
+
+    total_paths = len(deduped)
+    for item in deduped[:INTERRUPT_NOTICE_MAX_PATHS]:
+        safe_rel_path = _escape_control(item.rel_path)
+        if item.status == CHECKPOINT_STATUS_APPLIED:
+            lines.append(INTERRUPT_NOTICE_LINE_APPLIED.format(rel_path=safe_rel_path))
+        elif item.status == CHECKPOINT_STATUS_PENDING:
+            lines.append(INTERRUPT_NOTICE_LINE_PENDING.format(rel_path=safe_rel_path))
+        elif item.status == CHECKPOINT_STATUS_FAILED:
+            lines.append(INTERRUPT_NOTICE_LINE_FAILED.format(rel_path=safe_rel_path))
+
+    if total_paths > INTERRUPT_NOTICE_MAX_PATHS:
+        overflow_count = total_paths - INTERRUPT_NOTICE_MAX_PATHS
+        lines.append(INTERRUPT_NOTICE_MORE_LINE.format(count=overflow_count))
+
+    lines.append(INTERRUPT_NOTICE_INSTRUCTION)
+    lines.append(INTERRUPT_NOTICE_END)
+
+    return "\n".join(lines)
+
+
+def format_pending_notices(
+    items: Sequence[Union[RollbackResult, InterruptedTurn]],
+) -> Optional[str]:
+    """보류 목록의 되돌리기 결과 및 턴 취소 알림을 순서대로 블록화하여 하나의 텍스트로 합친다."""
+    blocks: list[str] = []
+    current_rollbacks: list[RollbackResult] = []
+
+    def flush_rollbacks() -> None:
+        if current_rollbacks:
+            text = format_rollback_notice(current_rollbacks)
+            if text:
+                blocks.append(text)
+            current_rollbacks.clear()
+
+    for item in items:
+        if isinstance(item, RollbackResult):
+            current_rollbacks.append(item)
+        elif isinstance(item, InterruptedTurn):
+            flush_rollbacks()
+            text = format_interrupt_notice(item)
+            if text:
+                blocks.append(text)
+
+    flush_rollbacks()
+
+    if not blocks:
+        return None
+    return "\n\n".join(blocks)

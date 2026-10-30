@@ -28,6 +28,7 @@ from hermes_core.constants import (
     CLI_CHECKPOINT_DISABLED_NOTICE,
     CLI_CHECKPOINT_ENABLED_NOTICE,
     CLI_CHECKPOINT_REFUSED_NOTICE,
+    CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_MULTILINE_HINT,
     CLI_ROLLBACK_CANCELLED_NOTICE,
     CLI_ROLLBACK_DISABLED_NOTICE,
@@ -62,7 +63,9 @@ from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver, is_approval_answer
 from hermes_core.tools.checkpoint import (
     Checkpointer,
+    InterruptedTurn,
     RollbackResult,
+    format_pending_notices,
     format_rollback_notice,
 )
 from hermes_core.tools.delegate_tool import register_delegate_tool
@@ -363,7 +366,7 @@ def main() -> None:
     try:
         history = None
         checkpoint_refusal_notified = False
-        pending_rollbacks: list[RollbackResult] = []
+        pending_notices: list[RollbackResult | InterruptedTurn] = []
         while True:
             try:
                 print()
@@ -389,15 +392,15 @@ def main() -> None:
             if tokens and tokens[0].lower() == "/rollback":
                 rollback_res = _handle_rollback(tokens, checkpointer)
                 if rollback_res is not None:
-                    pending_rollbacks.append(rollback_res)
+                    pending_notices.append(rollback_res)
                 continue
 
             if checkpointer is not None:
                 checkpointer.begin_turn()
 
-            notice = format_rollback_notice(pending_rollbacks)
-            delivered = list(pending_rollbacks)
-            pending_rollbacks.clear()
+            notice = format_pending_notices(pending_notices)
+            delivered = list(pending_notices)
+            pending_notices.clear()
             message = f"{notice}\n\n{user_input}" if notice else user_input
 
             # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
@@ -414,7 +417,16 @@ def main() -> None:
                         print(f"\nAssistant: {result['final_response']}")
             except KeyboardInterrupt:
                 print(f"\n{CLI_TURN_CANCELLED_NOTICE}")
-                pending_rollbacks[:0] = delivered
+                pending_notices[:0] = delivered
+                if checkpointer is not None:
+                    try:
+                        interrupted = checkpointer.collect_interrupted_turn()
+                    except Exception as e:
+                        logger.warning("collect_interrupted_turn failed: %s", e)
+                        interrupted = None
+                    if interrupted is not None:
+                        pending_notices.append(interrupted)
+                        print(CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE)
                 continue
 
             if checkpointer is not None and not checkpoint_refusal_notified:

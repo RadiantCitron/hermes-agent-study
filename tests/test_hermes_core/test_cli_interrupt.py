@@ -12,6 +12,7 @@ import pytest
 from hermes_core import cli
 from hermes_core.agent.agent import MockLLMResponse
 from hermes_core.constants import (
+    CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_ROLLBACK_PROMPT,
     CLI_TURN_CANCELLED_NOTICE,
     OPENROUTER_API_KEY_ENV,
@@ -19,6 +20,8 @@ from hermes_core.constants import (
 )
 from hermes_core.llm_client import LLMResponse
 from hermes_core.session_db import SessionDB
+from hermes_core.tools import dispatcher
+from hermes_core.tools.checkpoint import Checkpointer
 
 
 class DummyMockOpenRouterClient:
@@ -385,6 +388,21 @@ def make_write_file_response(call_id: str, path: str, content: str) -> MockLLMRe
     )
 
 
+def make_read_file_response(call_id: str, path: str) -> MockLLMResponse:
+    """read_file 도구 호출 LLM 응답 생성."""
+    return MockLLMResponse(
+        content=None,
+        tool_calls=[{
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps({"path": path}),
+            },
+        }],
+    )
+
+
 def test_scenario_020_01_cancel_on_keyboard_interrupt_in_agent_run(
     cli_interrupt_env: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -612,3 +630,314 @@ def test_scenario_020_09_runtime_error_in_model_propagates(
     assert row is not None
     assert row["end_reason"] == "error"
     db.close()
+
+
+# =============================================================================
+# 로드맵 13 / 구현지시서 030: 취소 알림 CLI 시나리오 C1~C11
+# =============================================================================
+
+U1_REFERENCE_TEXT = (
+    "[Interruption notice - added by the CLI, not typed by the user]\n"
+    "The user pressed Ctrl+C and cancelled the request that came before this message. That request was removed from this conversation, but it may already have changed these files:\n"
+    "  changed: a.txt\n"
+    "Changes made by terminal commands are not tracked. Do not continue that request unless the user asks again. Re-read a file before editing it.\n"
+    "[End of interruption notice]"
+)
+
+
+def test_scenario_030_c01_notice_attached_to_next_message(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1: go -> read it -> exit, 취소된 턴의 파일 변경 알림이 다음 user 메시지 앞에 붙음."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 3
+    third_messages = client.call_history[2]["messages"]
+    last_user_msg = third_messages[-1]["content"]
+
+    assert last_user_msg == f"{U1_REFERENCE_TEXT}\n\nread it"
+    assert not any("go" in str(m.get("content")) for m in third_messages)
+
+
+def test_scenario_030_c02_screen_notice_printed_once(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """C2: 취소 시 화면에 알림 고지 문구가 정확히 1회 출력됨."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE) == 1
+
+
+def test_scenario_030_c03_notice_consumed_only_once(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C3: 알림은 한 번만 실리고 그 다음 턴(again)에서는 실리지 않음."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+        MockLLMResponse(content="ok2"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "again", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 4
+    fourth_messages = client.call_history[3]["messages"]
+    assert fourth_messages[-1]["content"] == "again"
+
+
+def test_scenario_030_c04_message_in_db_matches_model_message(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C4: 원장 messages에 기록된 user 행의 content도 모델이 받은 본문과 정확히 일치."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    row = db._conn.execute(
+        "SELECT content FROM messages WHERE role = 'user' AND content LIKE '%read it%'"
+    ).fetchone()
+    assert row is not None
+    assert row["content"] == f"{U1_REFERENCE_TEXT}\n\nread it"
+    db.close()
+
+
+def test_scenario_030_c05_rollback_and_interrupt_notices_ordered(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C5: 롤백 알림과 취소 알림이 함께 보류된 경우 [Rollback notice]가 [Interruption notice]보다 앞에 옴."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+        make_write_file_response("c2", "b.txt", "content b"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "go2", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 5
+    fifth_messages = client.call_history[4]["messages"]
+    last_user_msg = fifth_messages[-1]["content"]
+
+    assert "[Rollback notice" in last_user_msg
+    assert "[Interruption notice" in last_user_msg
+    rb_pos = last_user_msg.index("[Rollback notice")
+    it_pos = last_user_msg.index("[Interruption notice")
+    assert rb_pos < it_pos
+    assert "\n\n[Interruption notice" in last_user_msg
+
+
+def test_scenario_030_c06_consecutive_cancels_restore_notice_once(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C6: 연속 취소 시 첫 번째 취소의 알림이 되돌려져 한 번만 전달되고 두 번째 취소된 go2는 포함되지 않음."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "go2", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 4
+    fourth_messages = client.call_history[3]["messages"]
+    last_user_msg = fourth_messages[-1]["content"]
+
+    assert last_user_msg.count("[Interruption notice - added by the CLI, not typed by the user]") == 1
+    assert "  changed: a.txt" in last_user_msg
+    assert not any("go2" in str(m.get("content")) for m in fourth_messages)
+
+
+def test_scenario_030_c07_interrupt_after_write_records_applied(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C7: 도구가 파일을 쓴 뒤 KeyboardInterrupt 발생 시 applied 상태 및 changed 알림."""
+    orig_tool = dispatcher.write_file_tool
+
+    def write_then_interrupt(**kwargs: Any) -> str:
+        orig_tool(**kwargs)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(dispatcher, "write_file_tool", write_then_interrupt)
+
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "x.txt", "content x"),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    cp_row = db._conn.execute("SELECT status FROM file_checkpoints WHERE rel_path = 'x.txt'").fetchone()
+    assert cp_row is not None
+    assert cp_row["status"] == "applied"
+    db.close()
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 2
+    msg = client.call_history[1]["messages"][-1]["content"]
+    assert "  changed: x.txt" in msg
+
+
+def test_scenario_030_c08_interrupt_before_write_records_failed(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C8: 도구가 쓰기 전에 KeyboardInterrupt 발생 시 failed 상태 및 write failed 알림."""
+    def interrupt_before_write(**kwargs: Any) -> str:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(dispatcher, "write_file_tool", interrupt_before_write)
+
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "x.txt", "content x"),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    cp_row = db._conn.execute("SELECT status FROM file_checkpoints WHERE rel_path = 'x.txt'").fetchone()
+    assert cp_row is not None
+    assert cp_row["status"] == "failed"
+    db.close()
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 2
+    msg = client.call_history[1]["messages"][-1]["content"]
+    assert "  write failed (the file may be unchanged): x.txt" in msg
+
+
+def test_scenario_030_c09_finalize_interrupt_leaves_pending(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C9: Checkpointer.finalize에서 KeyboardInterrupt 발생 시 pending 잔존 및 unknown 알림."""
+    def failing_finalize(self: Any, *args: Any, **kwargs: Any) -> str:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(Checkpointer, "finalize", failing_finalize)
+
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "x.txt", "content x"),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "read it", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    cp_row = db._conn.execute("SELECT status FROM file_checkpoints WHERE rel_path = 'x.txt'").fetchone()
+    assert cp_row is not None
+    assert cp_row["status"] == "pending"
+    db.close()
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 2
+    msg = client.call_history[1]["messages"][-1]["content"]
+    assert "  unknown (interrupted while writing; it may or may not be changed): x.txt" in msg
+
+
+def test_scenario_030_c10_no_checkpoints_no_notice(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """C10: --no-checkpoints 모드에서는 파일 변경 후 취소되어도 모델 알림 및 화면 안내 없음."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "again", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch, "--no-checkpoints")
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 3
+    third_messages = client.call_history[2]["messages"]
+    assert third_messages[-1]["content"] == "again"
+
+    out = capsys.readouterr().out
+    assert CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE not in out
+
+
+def test_scenario_030_c11_read_only_tool_cancel_no_notice(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """C11: 읽기 도구만 호출한 뒤 취소된 경우 파일 변경 기록이 없으므로 알림 및 화면 안내 없음."""
+    ws = get_default_workspace()
+    (ws / "existing.txt").write_text("sample content", encoding="utf-8")
+
+    InterruptingClient.responses_by_instance[0] = [
+        make_read_file_response("c1", "existing.txt"),
+        KeyboardInterrupt(),
+        MockLLMResponse(content="ok"),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "again", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    client = InterruptingClient.created_instances[0]
+    assert len(client.call_history) == 3
+    third_messages = client.call_history[2]["messages"]
+    assert third_messages[-1]["content"] == "again"
+
+    out = capsys.readouterr().out
+    assert CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE not in out

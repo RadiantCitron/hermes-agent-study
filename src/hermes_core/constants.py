@@ -285,6 +285,28 @@ ROLLBACK_NOTICE_INSTRUCTION = (
 )
 ROLLBACK_NOTICE_MAX_PATHS = 20
 
+# 취소 모델 알림 관련 상수 (13 로드맵)
+INTERRUPT_NOTICE_BEGIN = "[Interruption notice - added by the CLI, not typed by the user]"
+INTERRUPT_NOTICE_END = "[End of interruption notice]"
+INTERRUPT_NOTICE_INTRO = (
+    "The user pressed Ctrl+C and cancelled the request that came before this message. "
+    "That request was removed from this conversation, but it may already have changed these files:"
+)
+INTERRUPT_NOTICE_LINE_APPLIED = "  changed: {rel_path}"
+INTERRUPT_NOTICE_LINE_PENDING = (
+    "  unknown (interrupted while writing; it may or may not be changed): {rel_path}"
+)
+INTERRUPT_NOTICE_LINE_FAILED = "  write failed (the file may be unchanged): {rel_path}"
+INTERRUPT_NOTICE_MORE_LINE = "  ... and {count} more file(s)"
+INTERRUPT_NOTICE_INSTRUCTION = (
+    "Changes made by terminal commands are not tracked. "
+    "Do not continue that request unless the user asks again. Re-read a file before editing it."
+)
+INTERRUPT_NOTICE_MAX_PATHS = 20
+CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE = (
+    "The model will be told which files may have changed together with your next message."
+)
+
 
 # =============================================================================
 # 승인 흐름 관련 상수
