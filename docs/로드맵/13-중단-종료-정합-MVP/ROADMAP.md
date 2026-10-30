@@ -72,7 +72,8 @@ classDiagram
   }
   class InterruptNotice {
     <<function>>
-    format_interrupt_notice(rows) str
+    format_interrupt_notice(turn) str
+    format_pending_notices(items) str
   }
   class SessionDB {
     end_session(id, reason)
@@ -172,7 +173,8 @@ flowchart TD
 ### 6-3. 취소 알림 (030)
 - 그 턴의 `file_checkpoints` 행(`applied`·`pending`·`failed`)이 1건 이상이면 알림 글을 만들어 보류 목록에 넣는다.
 - 터미널 명령은 추적하지 않는다. 표지는 12번 롤백 알림, `SUMMARY_PREFIX`와 겹치지 않는다.
-- 롤백 알림과 취소 알림은 일어난 순서대로 한 번에 붙인다.
+- 롤백 알림과 취소 알림은 일어난 순서대로 한 번에 붙인다. 보류 목록은 `RollbackResult`와 `InterruptedTurn`을 섞어 담고(030 확정), `format_pending_notices`가 연속한 롤백 결과끼리 묶어 기존 `format_rollback_notice`에 넘긴다(12 함수는 수정하지 않음).
+- 취소 알림 글에는 턴 번호를 쓰지 않는다(모델이 턴 번호를 모른다).
 
 ### 6-4. 12번 한계 처리 (040)
 - 한계 4: `execute_rollback`이 중간 예외에서도 부분 결과(여기까지 되돌림, 나머지는 실패 사유)를 돌려준다.
