@@ -8,6 +8,7 @@
 """
 
 import argparse
+import logging
 import os
 from pathlib import Path
 import sys
@@ -48,6 +49,10 @@ from hermes_core.constants import (
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
     OPENROUTER_API_KEY_ENV,
+    SESSION_END_EOF,
+    SESSION_END_ERROR,
+    SESSION_END_USER_EXIT,
+    SESSION_END_USER_INTERRUPT,
     get_default_workspace,
     get_hermes_home,
 )
@@ -62,6 +67,26 @@ from hermes_core.tools.checkpoint import (
 from hermes_core.tools.delegate_tool import register_delegate_tool
 from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
+
+logger = logging.getLogger(__name__)
+
+
+def _close_session(session_db: SessionDB, session_id: str, end_reason: str) -> None:
+    """세션에 종료 사유를 한 번만 남긴다. 이미 끝난 세션은 건드리지 않는다."""
+    try:
+        session = session_db.get_session(session_id)
+        if session is None:
+            return
+        if session.get("end_reason"):
+            return
+        session_db.end_session(session_id, end_reason)
+    except Exception as e:
+        logger.warning(
+            "Failed to close session %s with end_reason '%s': %s",
+            session_id,
+            end_reason,
+            e,
+        )
 
 
 def _handle_rollback(
@@ -333,6 +358,7 @@ def main() -> None:
         print("Mock session finished cleanly.")
         return
 
+    session_end_reason = SESSION_END_ERROR
     try:
         history = None
         checkpoint_refusal_notified = False
@@ -341,7 +367,12 @@ def main() -> None:
             try:
                 print()
                 user_input = read_user_input().strip()
-            except (EOFError, KeyboardInterrupt):
+            except KeyboardInterrupt:
+                session_end_reason = SESSION_END_USER_INTERRUPT
+                print("\nExiting session...")
+                break
+            except EOFError:
+                session_end_reason = SESSION_END_EOF
                 print("\nExiting session...")
                 break
 
@@ -349,7 +380,7 @@ def main() -> None:
                 continue
 
             if user_input.lower() in ("exit", "quit"):
-                agent.session_db.end_session(agent.session_id, "user_exit")
+                session_end_reason = SESSION_END_USER_EXIT
                 print("Session saved and closed. Goodbye!")
                 break
 
@@ -392,6 +423,7 @@ def main() -> None:
                     print(CLI_CHECKPOINT_REFUSED_NOTICE)
                     checkpoint_refusal_notified = True
     finally:
+        _close_session(agent.session_db, agent.session_id, session_end_reason)
         agent.session_db.close()
 
 

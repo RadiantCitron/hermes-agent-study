@@ -379,6 +379,16 @@ CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE = (
 # 체크포인트 거부 원인 뒤에 붙는 대처 문구
 CHECKPOINT_REFUSED_HINT = " Tell the user and do not repeat the same write."
 
+# =============================================================================
+# 세션 종료 사유 어휘 (13 로드맵)
+# =============================================================================
+
+SESSION_END_USER_EXIT = "user_exit"
+SESSION_END_USER_INTERRUPT = "user_interrupt"
+SESSION_END_EOF = "eof"
+SESSION_END_ERROR = "error"
+
+
 
 
 
