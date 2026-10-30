@@ -262,6 +262,11 @@ CLI_ROLLBACK_ERROR_NOTICE = (
     "Rollback failed ({reason}). Some files may already have been restored; check the working directory."
 )
 
+# 턴 취소 화면 안내 상수 (13 로드맵)
+CLI_TURN_CANCELLED_NOTICE = (
+    "Request cancelled. It was dropped from the conversation; the session continues."
+)
+
 # 롤백 모델 알림 관련 상수 (12 로드맵)
 ROLLBACK_NOTICE_BEGIN = "[Rollback notice - added by the CLI, not typed by the user]"
 ROLLBACK_NOTICE_END = "[End of rollback notice]"

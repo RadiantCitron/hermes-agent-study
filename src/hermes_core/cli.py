@@ -46,6 +46,7 @@ from hermes_core.constants import (
     CLI_ROLLBACK_RESULT_SKIPPED,
     CLI_ROLLBACK_RESULT_SUMMARY,
     CLI_ROLLBACK_USAGE_NOTICE,
+    CLI_TURN_CANCELLED_NOTICE,
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
     OPENROUTER_API_KEY_ENV,
@@ -395,20 +396,26 @@ def main() -> None:
                 checkpointer.begin_turn()
 
             notice = format_rollback_notice(pending_rollbacks)
+            delivered = list(pending_rollbacks)
             pending_rollbacks.clear()
             message = f"{notice}\n\n{user_input}" if notice else user_input
 
             # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
-            with hold_typeahead():
-                result = agent.run_conversation(message, conversation_history=history)
-                history = result["messages"]
-                if result.get("stopped_reason") == "llm_error":
-                    err = result.get("error", {})
-                    kind = err.get("kind", "unknown")
-                    msg = err.get("message", "Unknown error")
-                    print(f"\nModel call failed ({kind}): {msg}")
-                else:
-                    print(f"\nAssistant: {result['final_response']}")
+            try:
+                with hold_typeahead():
+                    result = agent.run_conversation(message, conversation_history=history)
+                    history = result["messages"]
+                    if result.get("stopped_reason") == "llm_error":
+                        err = result.get("error", {})
+                        kind = err.get("kind", "unknown")
+                        msg = err.get("message", "Unknown error")
+                        print(f"\nModel call failed ({kind}): {msg}")
+                    else:
+                        print(f"\nAssistant: {result['final_response']}")
+            except KeyboardInterrupt:
+                print(f"\n{CLI_TURN_CANCELLED_NOTICE}")
+                pending_rollbacks[:0] = delivered
+                continue
 
             if checkpointer is not None and not checkpoint_refusal_notified:
                 messages = result.get("messages", [])

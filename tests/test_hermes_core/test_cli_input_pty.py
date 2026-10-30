@@ -382,12 +382,15 @@ def test_scenario_13_typeahead_korean_backspace_during_processing() -> None:
 
 
 def test_scenario_14_ctrl_c_during_processing_restores_terminal() -> None:
-    """계획 014 #10: 처리 중 Ctrl+C로 프로세스가 중단되고, 종료 뒤 터미널의 줄 입력 모드 플래그가 복원되어 있다."""
+    """계획 014 #10 / 로드맵 13-020: 처리 중 Ctrl+C는 턴 취소 후 프롬프트로 복귀하며, 프롬프트에서 Ctrl+C 시 종료 뒤 플래그가 복원되어 있다."""
     sess = PtySession(think_delay=THINK_DELAY)
     try:
         sess.wait_for("User >")
         sess.write(b"hello\r")
         sess.wait_for(THINKING_MARKER)
+        sess.write(b"\x03")
+        sess.wait_for("Request cancelled.")
+        sess.wait_for("User >")
         sess.write(b"\x03")
         sess.wait_exit()
 

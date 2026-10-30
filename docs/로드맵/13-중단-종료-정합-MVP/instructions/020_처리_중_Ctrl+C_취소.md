@@ -51,10 +51,11 @@
 - `src/hermes_core/cli.py`: 1-1, 1-2
 - `src/hermes_core/constants.py`: 1-3
 - `tests/test_hermes_core/test_cli_interrupt.py`: 010의 파일에 아래 시나리오 추가
+- `tests/test_hermes_core/test_cli_input_pty.py`: 시나리오 14를 13-020 동작(처리 중 Ctrl+C는 턴 취소 후 프롬프트 복귀, 프롬프트에서 재차 Ctrl+C 시 종료)에 맞게 갱신 (사용자 승인)
 - `docs/로드맵/13-중단-종료-정합-MVP/ROADMAP.md`: §4·§6 정정(이 지시서 작성과 같은 커밋에서 반영 완료)
 - `docs/로드맵/13-중단-종료-정합-MVP/README.md`: 020 상태와 실행 기록
 
-> **사전 점검**: `agent/`, `session_db.py`, `tools/`, `cli_input.py`는 수정하지 않는다. 기존 시험 변경은 0건이어야 한다. 착수 전 010이 `Done`이고 `_close_session`이 있는지 확인한다.
+> **사전 점검**: `agent/`, `session_db.py`, `tools/`, `cli_input.py`는 수정하지 않는다. 착수 전 010이 `Done`이고 `_close_session`이 있는지 확인한다.
 
 ---
 
@@ -86,7 +87,7 @@
 ## 4. 검증 기준 (Done 조건)
 
 - 시나리오 1~9 전부 통과.
-- 기존 시험은 한 줄도 바꾸지 않는다(`git diff -- tests/`는 `test_cli_interrupt.py`만).
+- `git diff -- tests/`에 `test_cli_interrupt.py`와 `test_cli_input_pty.py`(시나리오 14 갱신)만 포함.
 - 전체 회귀 통과: 착수 시점 기준선 + 신규 9건. `-n 4` 5회 연속, `-m pty` 직렬.
 - `git diff -- src/`에 `cli.py`, `constants.py`만 포함. `agent.py`·`session_db.py` 변경 0.
 - 대시보드 020 `Done`, 실행 기록.
