@@ -20,6 +20,8 @@ from typing import Optional, Sequence, Union
 
 from hermes_core.constants import (
     CHECKPOINT_LIMIT_ERROR_MESSAGE,
+    CHECKPOINT_ROLLBACK_ABORTED_HERE_REASON,
+    CHECKPOINT_ROLLBACK_NOT_REACHED_REASON,
     CHECKPOINT_SESSION_BYTES_LIMIT,
     CHECKPOINT_STATUS_APPLIED,
     CHECKPOINT_STATUS_FAILED,
@@ -110,6 +112,7 @@ class RollbackResult:
     rolled_back_count: int
     skipped_count: int
     items: tuple[RollbackItemResult, ...]
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -498,65 +501,30 @@ class Checkpointer:
         rolled_back_count = 0
         skipped_count = 0
         item_results = []
+        error: Optional[str] = None
 
-        for item in plan.items:
-            if item.will_skip:
-                self.db.update_file_checkpoint(
-                    item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=item.skip_reason
-                )
-                skipped_count += 1
-                item_results.append(
-                    RollbackItemResult(
-                        checkpoint_id=item.checkpoint_id,
-                        rel_path=item.rel_path,
-                        action="skipped",
-                        status=CHECKPOINT_STATUS_SKIPPED,
-                        reason=item.skip_reason,
+        try:
+            for item in plan.items:
+                if item.will_skip:
+                    self.db.update_file_checkpoint(
+                        item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=item.skip_reason
                     )
-                )
-                continue
-
-            target_path = resolved_ws / item.rel_path
-            resolved_path, err = check_write_path(item.rel_path, resolved_ws)
-            if err or resolved_path is None:
-                reason = f"복원 직전 경로 검사 실패 ({err})"
-                self.db.update_file_checkpoint(
-                    item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
-                )
-                skipped_count += 1
-                item_results.append(
-                    RollbackItemResult(
-                        checkpoint_id=item.checkpoint_id,
-                        rel_path=item.rel_path,
-                        action="skipped",
-                        status=CHECKPOINT_STATUS_SKIPPED,
-                        reason=reason,
+                    skipped_count += 1
+                    item_results.append(
+                        RollbackItemResult(
+                            checkpoint_id=item.checkpoint_id,
+                            rel_path=item.rel_path,
+                            action="skipped",
+                            status=CHECKPOINT_STATUS_SKIPPED,
+                            reason=item.skip_reason,
+                        )
                     )
-                )
-                continue
+                    continue
 
-            if not resolved_path.exists():
-                reason = "복원 직전 충돌(파일 부재)"
-                self.db.update_file_checkpoint(
-                    item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
-                )
-                skipped_count += 1
-                item_results.append(
-                    RollbackItemResult(
-                        checkpoint_id=item.checkpoint_id,
-                        rel_path=item.rel_path,
-                        action="skipped",
-                        status=CHECKPOINT_STATUS_SKIPPED,
-                        reason=reason,
-                    )
-                )
-                continue
-
-            try:
-                curr_bytes = resolved_path.read_bytes()
-                curr_sha = hashlib.sha256(curr_bytes).hexdigest()
-                if curr_sha != item.after_sha256:
-                    reason = "복원 직전 충돌(외부 변경 감지)"
+                target_path = resolved_ws / item.rel_path
+                resolved_path, err = check_write_path(item.rel_path, resolved_ws)
+                if err or resolved_path is None:
+                    reason = f"복원 직전 경로 검사 실패 ({err})"
                     self.db.update_file_checkpoint(
                         item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
                     )
@@ -571,59 +539,45 @@ class Checkpointer:
                         )
                     )
                     continue
-            except Exception as e:
-                reason = f"복원 직전 파일 읽기 실패 ({e})"
-                self.db.update_file_checkpoint(
-                    item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
-                )
-                skipped_count += 1
-                item_results.append(
-                    RollbackItemResult(
-                        checkpoint_id=item.checkpoint_id,
-                        rel_path=item.rel_path,
-                        action="skipped",
-                        status=CHECKPOINT_STATUS_SKIPPED,
-                        reason=reason,
-                    )
-                )
-                continue
 
-            # 복원 실행
-            if item.before_exists:
+                if not resolved_path.exists():
+                    reason = "복원 직전 충돌(파일 부재)"
+                    self.db.update_file_checkpoint(
+                        item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
+                    )
+                    skipped_count += 1
+                    item_results.append(
+                        RollbackItemResult(
+                            checkpoint_id=item.checkpoint_id,
+                            rel_path=item.rel_path,
+                            action="skipped",
+                            status=CHECKPOINT_STATUS_SKIPPED,
+                            reason=reason,
+                        )
+                    )
+                    continue
+
                 try:
-                    st_mode = resolved_path.stat().st_mode
-                    parent_dir = resolved_path.parent
-                    parent_dir.mkdir(parents=True, exist_ok=True)
-                    with tempfile.NamedTemporaryFile(
-                        "w", dir=parent_dir, delete=False, encoding="utf-8"
-                    ) as tf:
-                        tf.write(item.before_content if item.before_content is not None else "")
-                        temp_name = tf.name
-                    os.chmod(temp_name, st_mode)
-                    os.replace(temp_name, resolved_path)
-                    action = "restored"
-                except Exception as e:
-                    reason = f"복원 쓰기 실패 ({e})"
-                    self.db.update_file_checkpoint(
-                        item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
-                    )
-                    skipped_count += 1
-                    item_results.append(
-                        RollbackItemResult(
-                            checkpoint_id=item.checkpoint_id,
-                            rel_path=item.rel_path,
-                            action="skipped",
-                            status=CHECKPOINT_STATUS_SKIPPED,
-                            reason=reason,
+                    curr_bytes = resolved_path.read_bytes()
+                    curr_sha = hashlib.sha256(curr_bytes).hexdigest()
+                    if curr_sha != item.after_sha256:
+                        reason = "복원 직전 충돌(외부 변경 감지)"
+                        self.db.update_file_checkpoint(
+                            item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
                         )
-                    )
-                    continue
-            else:
-                try:
-                    resolved_path.unlink(missing_ok=True)
-                    action = "deleted"
+                        skipped_count += 1
+                        item_results.append(
+                            RollbackItemResult(
+                                checkpoint_id=item.checkpoint_id,
+                                rel_path=item.rel_path,
+                                action="skipped",
+                                status=CHECKPOINT_STATUS_SKIPPED,
+                                reason=reason,
+                            )
+                        )
+                        continue
                 except Exception as e:
-                    reason = f"복원 삭제 실패 ({e})"
+                    reason = f"복원 직전 파일 읽기 실패 ({e})"
                     self.db.update_file_checkpoint(
                         item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
                     )
@@ -639,19 +593,88 @@ class Checkpointer:
                     )
                     continue
 
-            self.db.update_file_checkpoint(
-                item.checkpoint_id, CHECKPOINT_STATUS_ROLLED_BACK, reason="되돌림"
-            )
-            rolled_back_count += 1
-            item_results.append(
-                RollbackItemResult(
-                    checkpoint_id=item.checkpoint_id,
-                    rel_path=item.rel_path,
-                    action=action,
-                    status=CHECKPOINT_STATUS_ROLLED_BACK,
-                    reason="되돌림",
+                # 복원 실행
+                if item.before_exists:
+                    try:
+                        st_mode = resolved_path.stat().st_mode
+                        parent_dir = resolved_path.parent
+                        parent_dir.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(
+                            "w", dir=parent_dir, delete=False, encoding="utf-8"
+                        ) as tf:
+                            tf.write(item.before_content if item.before_content is not None else "")
+                            temp_name = tf.name
+                        os.chmod(temp_name, st_mode)
+                        os.replace(temp_name, resolved_path)
+                        action = "restored"
+                    except Exception as e:
+                        reason = f"복원 쓰기 실패 ({e})"
+                        self.db.update_file_checkpoint(
+                            item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
+                        )
+                        skipped_count += 1
+                        item_results.append(
+                            RollbackItemResult(
+                                checkpoint_id=item.checkpoint_id,
+                                rel_path=item.rel_path,
+                                action="skipped",
+                                status=CHECKPOINT_STATUS_SKIPPED,
+                                reason=reason,
+                            )
+                        )
+                        continue
+                else:
+                    try:
+                        resolved_path.unlink(missing_ok=True)
+                        action = "deleted"
+                    except Exception as e:
+                        reason = f"복원 삭제 실패 ({e})"
+                        self.db.update_file_checkpoint(
+                            item.checkpoint_id, CHECKPOINT_STATUS_SKIPPED, reason=reason
+                        )
+                        skipped_count += 1
+                        item_results.append(
+                            RollbackItemResult(
+                                checkpoint_id=item.checkpoint_id,
+                                rel_path=item.rel_path,
+                                action="skipped",
+                                status=CHECKPOINT_STATUS_SKIPPED,
+                                reason=reason,
+                            )
+                        )
+                        continue
+
+                self.db.update_file_checkpoint(
+                    item.checkpoint_id, CHECKPOINT_STATUS_ROLLED_BACK, reason="되돌림"
                 )
-            )
+                rolled_back_count += 1
+                item_results.append(
+                    RollbackItemResult(
+                        checkpoint_id=item.checkpoint_id,
+                        rel_path=item.rel_path,
+                        action=action,
+                        status=CHECKPOINT_STATUS_ROLLED_BACK,
+                        reason="되돌림",
+                    )
+                )
+        except Exception as e:
+            error = str(e)
+            aborted_idx = len(item_results)
+            for i, rem_item in enumerate(plan.items[aborted_idx:]):
+                if i == 0:
+                    r_reason = CHECKPOINT_ROLLBACK_ABORTED_HERE_REASON.format(error=error)
+                else:
+                    r_reason = CHECKPOINT_ROLLBACK_NOT_REACHED_REASON
+                skipped_count += 1
+                item_results.append(
+                    RollbackItemResult(
+                        checkpoint_id=rem_item.checkpoint_id,
+                        rel_path=rem_item.rel_path,
+                        action="skipped",
+                        status=CHECKPOINT_STATUS_SKIPPED,
+                        reason=r_reason,
+                    )
+                )
 
         return RollbackResult(
             session_id=self.session_id,
@@ -659,6 +682,7 @@ class Checkpointer:
             rolled_back_count=rolled_back_count,
             skipped_count=skipped_count,
             items=tuple(item_results),
+            error=error,
         )
 
     def collect_interrupted_turn(

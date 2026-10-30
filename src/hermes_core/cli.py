@@ -30,6 +30,7 @@ from hermes_core.constants import (
     CLI_CHECKPOINT_REFUSED_NOTICE,
     CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_MULTILINE_HINT,
+    CLI_ROLLBACK_ABORTED_NOTICE,
     CLI_ROLLBACK_CANCELLED_NOTICE,
     CLI_ROLLBACK_DISABLED_NOTICE,
     CLI_ROLLBACK_ERROR_NOTICE,
@@ -48,6 +49,7 @@ from hermes_core.constants import (
     CLI_ROLLBACK_RESULT_SUMMARY,
     CLI_ROLLBACK_USAGE_NOTICE,
     CLI_TURN_CANCELLED_NOTICE,
+    CLI_UNSENT_NOTICE_ON_EXIT,
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
     OPENROUTER_API_KEY_ENV,
@@ -181,6 +183,8 @@ def _handle_rollback(
                 skipped=result.skipped_count,
             )
         )
+        if result.error:
+            print(CLI_ROLLBACK_ABORTED_NOTICE.format(reason=result.error))
         if result.rolled_back_count >= 1:
             print(CLI_ROLLBACK_MODEL_WILL_BE_TOLD_NOTICE)
         return result
@@ -363,10 +367,10 @@ def main() -> None:
         return
 
     session_end_reason = SESSION_END_ERROR
+    pending_notices: list[RollbackResult | InterruptedTurn] = []
     try:
         history = None
         checkpoint_refusal_notified = False
-        pending_notices: list[RollbackResult | InterruptedTurn] = []
         while True:
             try:
                 print()
@@ -442,6 +446,8 @@ def main() -> None:
                     print(CLI_CHECKPOINT_REFUSED_NOTICE)
                     checkpoint_refusal_notified = True
     finally:
+        if format_pending_notices(pending_notices) is not None:
+            print(CLI_UNSENT_NOTICE_ON_EXIT)
         _close_session(agent.session_db, agent.session_id, session_end_reason)
         agent.session_db.close()
 

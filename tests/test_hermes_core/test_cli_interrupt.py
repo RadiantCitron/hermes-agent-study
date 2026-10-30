@@ -13,8 +13,10 @@ from hermes_core import cli
 from hermes_core.agent.agent import MockLLMResponse
 from hermes_core.constants import (
     CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
+    CLI_ROLLBACK_ABORTED_NOTICE,
     CLI_ROLLBACK_PROMPT,
     CLI_TURN_CANCELLED_NOTICE,
+    CLI_UNSENT_NOTICE_ON_EXIT,
     OPENROUTER_API_KEY_ENV,
     get_default_workspace,
 )
@@ -915,6 +917,253 @@ def test_scenario_030_c10_no_checkpoints_no_notice(
     assert CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE not in out
 
 
+# =============================================================================
+# 로드맵 13 / 구현지시서 040: 12번 한계 정리 CLI 시나리오 F1~F7
+# =============================================================================
+
+
+def test_scenario_040_f1_partial_rollback_cli_notice_and_subsequent_model_notice(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1: go(세 파일 작성) -> /rollback(y, 2번째 갱신 실패) -> read it -> exit.
+
+    화면에 stopped early가 1번 나오고, read it 메시지에 deleted와 2개 skipped가 포함됨.
+    """
+    InterruptingClient.responses_by_instance[0] = [
+        # 1턴: 세 파일을 순차 생성하는 write_file 3회 + done
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "a.txt", "content": "content a"}),
+                },
+            }],
+        ),
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c2",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "b.txt", "content": "content b"}),
+                },
+            }],
+        ),
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c3",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "c.txt", "content": "content c"}),
+                },
+            }],
+        ),
+        MockLLMResponse(content="done"),
+        # 2턴: read it에 대한 응답
+        MockLLMResponse(content="ok"),
+    ]
+
+    orig_update = SessionDB.update_file_checkpoint
+    rolled_back_call_count = 0
+
+    def mock_update(self: SessionDB, cid: int, status: str, **kwargs: Any) -> None:
+        nonlocal rolled_back_call_count
+        if status == "rolled_back":
+            rolled_back_call_count += 1
+            if rolled_back_call_count == 2:
+                raise RuntimeError("disk full")
+        return orig_update(self, cid, status, **kwargs)
+
+    monkeypatch.setattr(SessionDB, "update_file_checkpoint", mock_update)
+
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    expected_notice = CLI_ROLLBACK_ABORTED_NOTICE.format(reason="disk full")
+    assert out.count(expected_notice) == 1
+
+    client = InterruptingClient.created_instances[0]
+    # 마지막 호출(read it 턴)
+    last_user_msg = client.call_history[-1]["messages"][-1]["content"]
+    assert last_user_msg.startswith("[Rollback notice")
+    assert "  deleted: c.txt" in last_user_msg
+    assert "  skipped (your change is still in this file): b.txt - 롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 (disk full)" in last_user_msg
+    assert "  skipped (your change is still in this file): a.txt - 앞선 항목의 오류로 롤백이 중단되어 처리되지 않음" in last_user_msg
+    assert last_user_msg.endswith("\n\nread it")
+
+
+def test_scenario_040_f2_normal_rollback_no_stopped_early(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2: 정상 롤백(go -> /rollback(y) -> exit) 시 화면에 stopped early가 없다."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert "stopped early" not in out
+
+
+def test_scenario_040_f3_session_exit_with_pending_notice_shows_note(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F3: go(a.txt 생성) -> /rollback(y) -> exit 시 Note: 가 정확히 1번 나오고 end_reason은 user_exit."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+    client = InterruptingClient.created_instances[0]
+    # 모델 호출은 1턴(도구 호출 1회 + done 1회 = 총 2회)만 발생했고, 롤백 이후 모델 호출은 늘지 않음
+    assert len(client.call_history) == 2
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    sess_row = db._conn.execute("SELECT end_reason FROM sessions LIMIT 1").fetchone()
+    assert sess_row is not None
+    assert sess_row["end_reason"] == "user_exit"
+
+    cp_row = db._conn.execute("SELECT status FROM file_checkpoints WHERE rel_path = 'a.txt'").fetchone()
+    assert cp_row is not None
+    assert cp_row["status"] == "rolled_back"
+    db.close()
+
+
+def test_scenario_040_f4_cancelled_rollback_prompt_no_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F4: go -> /rollback(n, 취소) -> exit 시 보류 알림이 없으므로 Note: 가 없다."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["n"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert CLI_UNSENT_NOTICE_ON_EXIT not in out
+
+
+def test_scenario_040_f5_prompt_keyboard_interrupt_shows_note_and_user_interrupt(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F5: go -> /rollback(y) -> 프롬프트에서 KeyboardInterrupt 시 Note: 1번 나오고 end_reason은 user_interrupt."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", KeyboardInterrupt()],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    sess_row = db._conn.execute("SELECT end_reason FROM sessions LIMIT 1").fetchone()
+    assert sess_row is not None
+    assert sess_row["end_reason"] == "user_interrupt"
+    db.close()
+
+
+def test_scenario_040_f6_interrupted_turn_before_delivered_shows_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F6: go -> exit / 모델: write_file(a.txt) -> KeyboardInterrupt(취소).
+
+    취소 알림이 전달되기 전에 세션이 종료되므로 Note: 가 1번 나온다.
+    """
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+
+def test_scenario_040_f7_zero_rolled_back_items_shows_no_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F7: go(a.txt) -> 외부 변경 감지 -> /rollback(전부 건너뜀) -> exit 시 보류 알림이 없어 Note: 가 없다."""
+    ws = get_default_workspace()
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+
+    def modify_externally_and_answer() -> str:
+        (ws / "a.txt").write_text("external change", encoding="utf-8")
+        return "y"
+
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=[modify_externally_and_answer],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert CLI_UNSENT_NOTICE_ON_EXIT not in out
+
+
 def test_scenario_030_c11_read_only_tool_cancel_no_notice(
     cli_interrupt_env: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -941,3 +1190,250 @@ def test_scenario_030_c11_read_only_tool_cancel_no_notice(
 
     out = capsys.readouterr().out
     assert CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE not in out
+
+
+# =============================================================================
+# 로드맵 13 / 구현지시서 040: 12번 한계 정리 CLI 시나리오 F1~F7
+# =============================================================================
+
+
+def test_scenario_040_f1_partial_rollback_cli_notice_and_subsequent_model_notice(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1: go(세 파일 작성) -> /rollback(y, 2번째 갱신 실패) -> read it -> exit.
+
+    화면에 stopped early가 1번 나오고, read it 메시지에 deleted와 2개 skipped가 포함됨.
+    """
+    InterruptingClient.responses_by_instance[0] = [
+        # 1턴: 세 파일을 순차 생성하는 write_file 3회 + done
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "a.txt", "content": "content a"}),
+                },
+            }],
+        ),
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c2",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "b.txt", "content": "content b"}),
+                },
+            }],
+        ),
+        MockLLMResponse(
+            content=None,
+            tool_calls=[{
+                "id": "c3",
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json.dumps({"path": "c.txt", "content": "content c"}),
+                },
+            }],
+        ),
+        MockLLMResponse(content="done"),
+        # 2턴: read it에 대한 응답
+        MockLLMResponse(content="ok"),
+    ]
+
+    orig_update = SessionDB.update_file_checkpoint
+    rolled_back_call_count = 0
+
+    def mock_update(self: SessionDB, cid: int, status: str, **kwargs: Any) -> None:
+        nonlocal rolled_back_call_count
+        if status == "rolled_back":
+            rolled_back_call_count += 1
+            if rolled_back_call_count == 2:
+                raise RuntimeError("disk full")
+        return orig_update(self, cid, status, **kwargs)
+
+    monkeypatch.setattr(SessionDB, "update_file_checkpoint", mock_update)
+
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "read it", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    expected_notice = CLI_ROLLBACK_ABORTED_NOTICE.format(reason="disk full")
+    assert out.count(expected_notice) == 1
+
+    client = InterruptingClient.created_instances[0]
+    # 마지막 호출(read it 턴)
+    last_user_msg = client.call_history[-1]["messages"][-1]["content"]
+    assert last_user_msg.startswith("[Rollback notice")
+    assert "  deleted: c.txt" in last_user_msg
+    assert "  skipped (your change is still in this file): b.txt - 롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 (disk full)" in last_user_msg
+    assert "  skipped (your change is still in this file): a.txt - 앞선 항목의 오류로 롤백이 중단되어 처리되지 않음" in last_user_msg
+    assert last_user_msg.endswith("\n\nread it")
+
+
+def test_scenario_040_f2_normal_rollback_no_stopped_early(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F2: 정상 롤백(go -> /rollback(y) -> exit) 시 화면에 stopped early가 없다."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert "stopped early" not in out
+
+
+def test_scenario_040_f3_session_exit_with_pending_notice_shows_note(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F3: go(a.txt 생성) -> /rollback(y) -> exit 시 Note: 가 정확히 1번 나오고 end_reason은 user_exit."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+    client = InterruptingClient.created_instances[0]
+    # 모델 호출은 1턴(도구 호출 1회 + done 1회 = 총 2회)만 발생했고, 롤백 이후 모델 호출은 늘지 않음
+    assert len(client.call_history) == 2
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    sess_row = db._conn.execute("SELECT end_reason FROM sessions LIMIT 1").fetchone()
+    assert sess_row is not None
+    assert sess_row["end_reason"] == "user_exit"
+
+    cp_row = db._conn.execute("SELECT status FROM file_checkpoints WHERE rel_path = 'a.txt'").fetchone()
+    assert cp_row is not None
+    assert cp_row["status"] == "rolled_back"
+    db.close()
+
+
+def test_scenario_040_f4_cancelled_rollback_prompt_no_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F4: go -> /rollback(n, 취소) -> exit 시 보류 알림이 없으므로 Note: 가 없다."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=["n"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert CLI_UNSENT_NOTICE_ON_EXIT not in out
+
+
+def test_scenario_040_f5_prompt_keyboard_interrupt_shows_note_and_user_interrupt(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F5: go -> /rollback(y) -> 프롬프트에서 KeyboardInterrupt 시 Note: 1번 나오고 end_reason은 user_interrupt."""
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", KeyboardInterrupt()],
+        rollback_answers=["y"],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+    db = SessionDB(cli_interrupt_env["hermes_home"] / "state.db")
+    sess_row = db._conn.execute("SELECT end_reason FROM sessions LIMIT 1").fetchone()
+    assert sess_row is not None
+    assert sess_row["end_reason"] == "user_interrupt"
+    db.close()
+
+
+def test_scenario_040_f6_interrupted_turn_before_delivered_shows_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F6: go -> exit / 모델: write_file(a.txt) -> KeyboardInterrupt(취소).
+
+    취소 알림이 전달되기 전에 세션이 종료되므로 Note: 가 1번 나온다.
+    """
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        KeyboardInterrupt(),
+    ]
+    fake_in = ScriptableInterruptInput(user_inputs=["go", "exit"])
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert out.count(CLI_UNSENT_NOTICE_ON_EXIT) == 1
+
+
+def test_scenario_040_f7_zero_rolled_back_items_shows_no_note_on_exit(
+    cli_interrupt_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F7: go(a.txt) -> 외부 변경 감지 -> /rollback(전부 건너뜀) -> exit 시 보류 알림이 없어 Note: 가 없다."""
+    ws = get_default_workspace()
+    InterruptingClient.responses_by_instance[0] = [
+        make_write_file_response("c1", "a.txt", "content a"),
+        MockLLMResponse(content="done"),
+    ]
+
+    def modify_externally_and_answer() -> str:
+        (ws / "a.txt").write_text("external change", encoding="utf-8")
+        return "y"
+
+    fake_in = ScriptableInterruptInput(
+        user_inputs=["go", "/rollback", "exit"],
+        rollback_answers=[modify_externally_and_answer],
+    )
+    monkeypatch.setattr(cli, "read_user_input", fake_in)
+
+    _run_cli(monkeypatch)
+
+    out = capsys.readouterr().out
+    assert CLI_UNSENT_NOTICE_ON_EXIT not in out

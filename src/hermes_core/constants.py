@@ -307,6 +307,18 @@ CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE = (
     "The model will be told which files may have changed together with your next message."
 )
 
+# 롤백 부분 결과 및 세션 종료 안내 관련 상수 (13 로드맵)
+CHECKPOINT_ROLLBACK_ABORTED_HERE_REASON = "롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 ({error})"
+CHECKPOINT_ROLLBACK_NOT_REACHED_REASON = "앞선 항목의 오류로 롤백이 중단되어 처리되지 않음"
+CLI_ROLLBACK_ABORTED_NOTICE = (
+    "Rollback stopped early because of an error ({reason}). "
+    "Items not processed stay as they were; run /rollback again to retry them."
+)
+CLI_UNSENT_NOTICE_ON_EXIT = (
+    "Note: the session ended before the model was told about your recent rollback or cancelled request. "
+    "The file changes themselves stay recorded in the checkpoint ledger."
+)
+
 
 # =============================================================================
 # 승인 흐름 관련 상수

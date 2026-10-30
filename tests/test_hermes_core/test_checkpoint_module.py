@@ -1373,3 +1373,196 @@ def test_interrupt_notice_u12_collect_interrupted_turn_empty_or_only_skipped_rol
     db.update_file_checkpoint(cid2, "rolled_back")
 
     assert cp.collect_interrupted_turn(1) is None
+
+
+def test_rollback_partial_e1_and_e2_second_update_fails(test_env):
+    """E1 & E2: 두 번째 롤백 갱신 실패 시 부분 결과 반환 및 DB 원장 무결성 보존."""
+    db, sid, ws = test_env
+    cp = Checkpointer(db, sid, ws)
+    cp.begin_turn(1)
+
+    # 한 턴 동안 a.txt, b.txt, c.txt를 write_file로 새로 만든다
+    c1 = cp.record_before("write_file", "a.txt")
+    (ws / "a.txt").write_text("aaa", encoding="utf-8")
+    cp.finalize(c1, "write_file", "a.txt")
+
+    c2 = cp.record_before("write_file", "b.txt")
+    (ws / "b.txt").write_text("bbb", encoding="utf-8")
+    cp.finalize(c2, "write_file", "b.txt")
+
+    c3 = cp.record_before("write_file", "c.txt")
+    (ws / "c.txt").write_text("ccc", encoding="utf-8")
+    cp.finalize(c3, "write_file", "c.txt")
+
+    plan = cp.plan_rollback()
+    assert plan is not None
+    assert len(plan.items) == 3
+    # 역순 처리: c.txt -> b.txt -> a.txt
+    assert [item.rel_path for item in plan.items] == ["c.txt", "b.txt", "a.txt"]
+
+    orig_update = db.update_file_checkpoint
+    rolled_back_call_count = 0
+
+    def mock_update(cid, status, **kwargs):
+        nonlocal rolled_back_call_count
+        if status == "rolled_back":
+            rolled_back_call_count += 1
+            if rolled_back_call_count == 2:
+                raise RuntimeError("disk full")
+        return orig_update(cid, status, **kwargs)
+
+    db.update_file_checkpoint = mock_update
+
+    # E1: execute_rollback(plan)
+    res = cp.execute_rollback(plan)
+    assert res is not None
+    assert res.rolled_back_count == 1
+    assert res.skipped_count == 2
+    assert res.error == "disk full"
+    assert len(res.items) == 3
+
+    assert res.items[0].rel_path == "c.txt"
+    assert res.items[0].action == "deleted"
+    assert res.items[0].status == "rolled_back"
+
+    assert res.items[1].rel_path == "b.txt"
+    assert res.items[1].action == "skipped"
+    assert res.items[1].status == "skipped"
+    assert res.items[1].reason == "롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 (disk full)"
+
+    assert res.items[2].rel_path == "a.txt"
+    assert res.items[2].action == "skipped"
+    assert res.items[2].status == "skipped"
+    assert res.items[2].reason == "앞선 항목의 오류로 롤백이 중단되어 처리되지 않음"
+
+    # 디스크 검증: c.txt 없음, b.txt 없음(삭제 후 갱신 실패), a.txt 남아 있음
+    assert not (ws / "c.txt").exists()
+    assert not (ws / "b.txt").exists()
+    assert (ws / "a.txt").exists()
+
+    # E2: 직후 원장 행 검증
+    db.update_file_checkpoint = orig_update
+    checkpoints = {cp_row["rel_path"]: cp_row for cp_row in db.get_file_checkpoints(sid, turn_index=1)}
+    assert checkpoints["c.txt"]["status"] == "rolled_back"
+    assert checkpoints["b.txt"]["status"] == "applied"
+    assert checkpoints["a.txt"]["status"] == "applied"
+
+
+def test_rollback_partial_e3_first_update_fails(test_env):
+    """E3: 첫 번째 갱신부터 실패 시 모든 항목 skipped, rolled_back_count 0."""
+    db, sid, ws = test_env
+    cp = Checkpointer(db, sid, ws)
+    cp.begin_turn(1)
+
+    c1 = cp.record_before("write_file", "a.txt")
+    (ws / "a.txt").write_text("aaa", encoding="utf-8")
+    cp.finalize(c1, "write_file", "a.txt")
+
+    c2 = cp.record_before("write_file", "b.txt")
+    (ws / "b.txt").write_text("bbb", encoding="utf-8")
+    cp.finalize(c2, "write_file", "b.txt")
+
+    c3 = cp.record_before("write_file", "c.txt")
+    (ws / "c.txt").write_text("ccc", encoding="utf-8")
+    cp.finalize(c3, "write_file", "c.txt")
+
+    plan = cp.plan_rollback()
+    assert plan is not None
+
+    orig_update = db.update_file_checkpoint
+
+    def mock_update(cid, status, **kwargs):
+        if status == "rolled_back":
+            raise RuntimeError("disk full")
+        return orig_update(cid, status, **kwargs)
+
+    db.update_file_checkpoint = mock_update
+
+    res = cp.execute_rollback(plan)
+    assert res.rolled_back_count == 0
+    assert res.skipped_count == 3
+    assert res.error == "disk full"
+    assert res.items[0].rel_path == "c.txt"
+    assert res.items[0].status == "skipped"
+    assert res.items[0].reason == "롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 (disk full)"
+    assert res.items[1].rel_path == "b.txt"
+    assert res.items[1].status == "skipped"
+    assert res.items[1].reason == "앞선 항목의 오류로 롤백이 중단되어 처리되지 않음"
+    assert res.items[2].rel_path == "a.txt"
+    assert res.items[2].status == "skipped"
+    assert res.items[2].reason == "앞선 항목의 오류로 롤백이 중단되어 처리되지 않음"
+
+
+def test_rollback_partial_e4_normal_rollback_no_error(test_env):
+    """E4: 오류 없는 정상 롤백 시 error is None, rolled_back_count 3, skipped_count 0."""
+    db, sid, ws = test_env
+    cp = Checkpointer(db, sid, ws)
+    cp.begin_turn(1)
+
+    c1 = cp.record_before("write_file", "a.txt")
+    (ws / "a.txt").write_text("aaa", encoding="utf-8")
+    cp.finalize(c1, "write_file", "a.txt")
+
+    c2 = cp.record_before("write_file", "b.txt")
+    (ws / "b.txt").write_text("bbb", encoding="utf-8")
+    cp.finalize(c2, "write_file", "b.txt")
+
+    c3 = cp.record_before("write_file", "c.txt")
+    (ws / "c.txt").write_text("ccc", encoding="utf-8")
+    cp.finalize(c3, "write_file", "c.txt")
+
+    plan = cp.plan_rollback()
+    res = cp.execute_rollback(plan)
+    assert res.error is None
+    assert res.rolled_back_count == 3
+    assert res.skipped_count == 0
+
+
+def test_rollback_partial_e5_notice_formatting(test_env):
+    """E5: E1의 결과를 format_rollback_notice에 넣었을 때 텍스트 구성 검증."""
+    db, sid, ws = test_env
+    cp = Checkpointer(db, sid, ws)
+    cp.begin_turn(1)
+
+    c1 = cp.record_before("write_file", "a.txt")
+    (ws / "a.txt").write_text("aaa", encoding="utf-8")
+    cp.finalize(c1, "write_file", "a.txt")
+
+    c2 = cp.record_before("write_file", "b.txt")
+    (ws / "b.txt").write_text("bbb", encoding="utf-8")
+    cp.finalize(c2, "write_file", "b.txt")
+
+    c3 = cp.record_before("write_file", "c.txt")
+    (ws / "c.txt").write_text("ccc", encoding="utf-8")
+    cp.finalize(c3, "write_file", "c.txt")
+
+    plan = cp.plan_rollback()
+
+    orig_update = db.update_file_checkpoint
+    rolled_back_call_count = 0
+
+    def mock_update(cid, status, **kwargs):
+        nonlocal rolled_back_call_count
+        if status == "rolled_back":
+            rolled_back_call_count += 1
+            if rolled_back_call_count == 2:
+                raise RuntimeError("disk full")
+        return orig_update(cid, status, **kwargs)
+
+    db.update_file_checkpoint = mock_update
+    res = cp.execute_rollback(plan)
+
+    notice = format_rollback_notice([res])
+    assert notice is not None
+
+    line_del = "  deleted: c.txt"
+    line_skip_b = "  skipped (your change is still in this file): b.txt - 롤백 중 오류로 중단됨, 파일이 복원됐는지 알 수 없음 (disk full)"
+    line_skip_a = "  skipped (your change is still in this file): a.txt - 앞선 항목의 오류로 롤백이 중단되어 처리되지 않음"
+
+    assert line_del in notice
+    assert line_skip_b in notice
+    assert line_skip_a in notice
+    idx_del = notice.index(line_del)
+    idx_b = notice.index(line_skip_b)
+    idx_a = notice.index(line_skip_a)
+    assert idx_del < idx_b < idx_a
