@@ -4,7 +4,7 @@
 > **대시보드**: [README.md](README.md)  
 > **의도(Why)**: [WHY.md](WHY.md) · **승인된 계획**: [PLAN.md](PLAN.md) · **근거 결정**: [ADR-0013](../../adr/0013-중단_종료_정합_MVP_범위와_결정.md)  
 > **기준 코드**: `main` `edfa894` (12 `Closed`)  
-> **이름에 대해**: 아래 함수·상수 이름은 **잠정**이다. 지시서에서 코드와 대조해 확정한다.
+> **이름에 대해**: 010~040을 거치며 `_close_session`, `InterruptedTurn`, `format_pending_notices`, `RollbackResult.error`, `CLI_*` 상수가 정본 코드로 확정되었다.
 
 ---
 

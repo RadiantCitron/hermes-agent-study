@@ -98,4 +98,6 @@
 
 ## 변경 기록
 
-(4단계 착수 전까지 없음)
+- **2026-10-30 (050 단계)**:
+  - 010~040 구현을 거치며 잠정 표기였던 구현 식별자 확정: 단일 종료 기록 함수 `_close_session`, 취소 턴 데이터 구조 `InterruptedTurn` 및 알림 결합 `format_pending_notices`, 롤백 부분 결과 `RollbackResult.error`, 상수 어휘 `SESSION_END_*`·`CLI_TURN_CANCELLED_NOTICE`·`CLI_INTERRUPT_*`·`CLI_UNSENT_NOTICE_ON_EXIT` 등.
+  - §6 미확인 항목 중 「진행 중이던 모델 호출의 기록 방식」 해소: 050 E2E 시험(G2)을 통해 모델을 부르던 도중 취소된 호출도 `llm_calls`에 요청 전문(`request_json`)은 남고 상태 코드(`status_code`)와 에러 종류(`error_kind`)는 `NULL`로 정상 기록됨을 실측으로 확정.
