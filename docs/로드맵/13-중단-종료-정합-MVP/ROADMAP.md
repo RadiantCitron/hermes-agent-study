@@ -128,7 +128,7 @@ flowchart TD
 |---|---|---|
 | `cli.py` 메인 루프 | 변경 | 종료 지점, 처리 구간의 `KeyboardInterrupt`, 보류 알림. 기존 `exit`·`/rollback`·빈 줄 처리 순서는 유지 |
 | `session_db.py` `end_session` | 무변경 | 위임 자식도 호출한다(`delegate_tool.py:144`). 덮어쓰기 방지는 `cli.py`의 `_close_session`(010 확정)에 두어 자식 경로에 영향이 없다 |
-| `checkpoint.py` | 추가·변경 | 취소 알림 글(순수 함수 추가), `execute_rollback` 부분 결과(040). 계획·`finalize` 로직은 무변경 |
+| `checkpoint.py` | 추가·변경 | 취소 알림 글(순수 함수 추가), `execute_rollback`의 `try/except`와 `RollbackResult.error`(040, 기본값 있는 필드라 기존 생성 코드 영향 없음). 계획·`finalize` 로직은 무변경 |
 | `dispatcher.py` `finalize` | 무변경 | 도구 실행 중 `Ctrl+C`는 이미 확정한다. 시험으로 고정만 한다 |
 | `agent.py`·압축·시스템 프롬프트 | 무변경 | 취소 처리는 CLI 쪽에서 한다 |
 | 원장 스키마·체크포인트 전이표·승인 결정 어휘 | 무변경 | 새 표·상태 없음. `end_reason`은 기존 자유 텍스트 칸 |
@@ -177,8 +177,8 @@ flowchart TD
 - 취소 알림 글에는 턴 번호를 쓰지 않는다(모델이 턴 번호를 모른다).
 
 ### 6-4. 12번 한계 처리 (040)
-- 한계 4: `execute_rollback`이 중간 예외에서도 부분 결과(여기까지 되돌림, 나머지는 실패 사유)를 돌려준다.
-- 한계 2: 보류 알림이 남은 채 종료하면 화면에 한 줄 안내만 한다. 원장은 늘리지 않는다.
+- 한계 4: 항목별 오류는 이미 `skipped`로 잡힌다(`checkpoint.py:530-600`). 새는 것은 복원 뒤 원장 갱신 실패 같은 그 밖의 예외다. 이때 `execute_rollback`이 루프 전체를 `try/except Exception`으로 감싸 여기까지의 결과 + 남은 항목 `skipped`(원장 행은 갱신하지 않아 재시도 가능)를 돌려주고 `RollbackResult.error`에 사유를 담는다(040 확정). 복원 0건이면 알림이 없고, 롤백 실행 도중 `Ctrl+C`는 범위 밖이다.
+- 한계 2: 보류 알림이 남은 채 종료하면 `finally`에서 화면에 한 줄 안내만 한다(알림이 실제로 만들어질 때만). 원장은 늘리지 않는다.
 
 ### 6-5. 원본과 다른 점 (의도적, 원본은 읽기 전용 조사)
 
