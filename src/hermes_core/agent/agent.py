@@ -49,7 +49,7 @@ from hermes_core.constants import (
 )
 from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
-from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
+from hermes_core.tools.dispatcher import ToolCall, ToolDispatcher, create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 from hermes_core.tools.skills_tool import discover_skills
 
@@ -323,6 +323,7 @@ class HermesAgent:
         self,
         tool_calls: list[dict[str, Any]],
         messages: list[dict[str, Any]],
+        scope: Optional[TurnScope] = None,
     ) -> None:
         """assistant_message의 tool_calls를 실행하고 결과를 messages에 append."""
         for tc in tool_calls:
@@ -334,16 +335,18 @@ class HermesAgent:
             self._emit(EVENT_TOOL_CALL, name=func_name, arguments=args_str)
 
             args, parse_error = _parse_tool_arguments(args_str)
-            if parse_error is None:
-                # 디스패처 단일 진입로 실행
-                result_str = self.dispatcher.handle_function_call(func_name, args)
-            else:
-                # 읽지 못한 인자로는 도구를 부르지 않고, 사유를 모델에게 돌려줘 스스로 고치게 한다.
+            if parse_error is not None:
                 logger.warning("Invalid JSON arguments for tool '%s': %s", func_name, parse_error)
-                result_str = json.dumps(
-                    {"success": False, "error": f"Invalid JSON arguments for tool '{func_name}': {parse_error}"},
-                    ensure_ascii=False,
-                )
+
+            call = ToolCall(
+                name=func_name,
+                args=args or {},
+                task_id=call_id,
+                scope=scope,
+                raw_arguments=args_str if isinstance(args_str, str) else None,
+                parse_error=parse_error,
+            )
+            result_str = self.dispatcher.dispatch(call)
 
             # messages에 추가 (Strict Role Alternation)
             tool_msg = {
@@ -466,7 +469,7 @@ class HermesAgent:
 
             # 도구 호출이 있으면 실행 후 루프 계속
             if resp.tool_calls:
-                self._execute_tool_calls(resp.tool_calls, messages)
+                self._execute_tool_calls(resp.tool_calls, messages, scope=scope)
                 self.hooks.run(AFTER_TOOL_CALLS, ctx, on_error=self._on_hook_error)
                 if ctx.stop_reason is not None:
                     stopped_reason = ctx.stop_reason

@@ -98,6 +98,8 @@ class ToolCall:
     args: dict[str, Any]
     task_id: Optional[str] = None
     scope: Optional[TurnScope] = None
+    raw_arguments: Optional[str] = None
+    parse_error: Optional[str] = None
 
 
 ToolMiddleware = Callable[[ToolCall, Callable[[ToolCall], str]], str]
@@ -129,6 +131,12 @@ class ToolDispatcher:
         function_name = call.name
         function_args = call.args
 
+        if call.parse_error is not None:
+            return json.dumps(
+                {"success": False, "error": f"Invalid JSON arguments for tool '{function_name}': {call.parse_error}"},
+                ensure_ascii=False,
+            )
+
         handler = self._handlers.get(function_name)
         if not handler:
             return json.dumps(
@@ -156,37 +164,39 @@ class ToolDispatcher:
                 ensure_ascii=False,
             )
 
+    def dispatch(self, call: ToolCall) -> str:
+        """단일 도구 실행 진입로. 미들웨어 체인을 거쳐 도구를 호출하고 결과를 문자열로 반환."""
+        def _make_chain(index: int) -> Callable[[ToolCall], str]:
+            if index >= len(self._middlewares):
+                return self._execute
+            mw = self._middlewares[index]
+            next_fn = _make_chain(index + 1)
+            return lambda c: mw(c, next_fn)
+
+        chain = _make_chain(0)
+        try:
+            result = chain(call)
+        except Exception as e:
+            return json.dumps(
+                {"success": False, "error": f"Tool '{call.name}' failed: {str(e)}"},
+                ensure_ascii=False,
+            )
+
+        if not isinstance(result, str):
+            return json.dumps(
+                {"success": False, "error": f"Tool '{call.name}' middleware returned a non-string result."},
+                ensure_ascii=False,
+            )
+        return result
+
     def handle_function_call(
         self,
         function_name: str,
         function_args: dict[str, Any],
         task_id: Optional[str] = None,
     ) -> str:
-        """단일 도구 실행 진입로. 미들웨어 체인을 거쳐 도구를 호출하고 결과를 문자열로 반환."""
-        initial_call = ToolCall(name=function_name, args=function_args, task_id=task_id)
-
-        def _make_chain(index: int) -> Callable[[ToolCall], str]:
-            if index >= len(self._middlewares):
-                return self._execute
-            mw = self._middlewares[index]
-            next_fn = _make_chain(index + 1)
-            return lambda call: mw(call, next_fn)
-
-        chain = _make_chain(0)
-        try:
-            result = chain(initial_call)
-        except Exception as e:
-            return json.dumps(
-                {"success": False, "error": f"Tool '{function_name}' failed: {str(e)}"},
-                ensure_ascii=False,
-            )
-
-        if not isinstance(result, str):
-            return json.dumps(
-                {"success": False, "error": f"Tool '{function_name}' middleware returned a non-string result."},
-                ensure_ascii=False,
-            )
-        return result
+        """단일 도구 실행 진입로 호환 메서드. dispatch로 위임한다."""
+        return self.dispatch(ToolCall(name=function_name, args=function_args, task_id=task_id))
 
 
 _DEFAULT_TOOL_NAMES = (
