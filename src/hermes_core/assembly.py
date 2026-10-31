@@ -212,3 +212,37 @@ def run_child_session(
 def create_child_runner() -> ChildRunnerPort:
     """기본 자식 실행기(run_child_session)를 반환한다."""
     return run_child_session
+
+
+def register_delegate_if_enabled(
+    agent: Any,
+    settings: Settings,
+    *,
+    mock: bool,
+    llm_client_factory: Callable[[], Any],
+) -> bool:
+    """설정에 따라 에이전트 디스패처에 위임 도구(delegate_task)를 등록한다 (S-4).
+
+    Args:
+        agent: HermesAgent 또는 디스패처/세션DB를 보유한 에이전트 객체
+        settings: 로드된 Settings 스냅샷
+        mock: 오프라인 목(Mock) 실행 여부
+        llm_client_factory: 자식 에이전트용 LLM 클라이언트 팩토리
+
+    Returns:
+        bool: 위임 도구가 성공적으로 등록되었으면 True, 건너뛰었으면 False
+    """
+    if mock or not settings.delegate:
+        return False
+
+    from hermes_core.tools.delegate_tool import register_delegate_tool
+
+    register_delegate_tool(
+        agent.dispatcher,
+        session_db=agent.session_db,
+        parent_session_id=agent.session_id,
+        llm_client_factory=llm_client_factory,
+        child_runner=run_child_session,
+    )
+    return True
+

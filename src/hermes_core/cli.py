@@ -12,11 +12,15 @@ import logging
 import os
 from pathlib import Path
 import sys
-from typing import Optional
+from typing import Optional, Union
 import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
-from hermes_core.assembly import apply_runtime_settings, create_agent
+from hermes_core.assembly import (
+    apply_runtime_settings,
+    create_agent,
+    register_delegate_if_enabled,
+)
 from hermes_core.control import (
     ControlPanel,
     DisableExtension,
@@ -93,7 +97,6 @@ from hermes_core.tools.checkpoint import (
     format_pending_notices,
     format_rollback_notice,
 )
-from hermes_core.tools.delegate_tool import register_delegate_tool
 from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 
@@ -289,6 +292,40 @@ def _handle_ctl(tokens: list[str], panel: ControlPanel) -> None:
     print(CLI_CTL_UNKNOWN_SUBCOMMAND.format(subcommand=tokens[1]))
 
 
+def _dispatch_slash_command(
+    tokens: list[str],
+    *,
+    checkpointer: Optional[Checkpointer],
+    panel: ControlPanel,
+    pending_notices: list[Union[RollbackResult, InterruptedTurn]],
+) -> bool:
+    """슬래시 명령(/rollback, /ctl)을 라우팅한다 (S-4).
+
+    Args:
+        tokens: 공백으로 분리된 사용자 입력 토큰 목록
+        checkpointer: 파일 체크포인터 인스턴스 (없으면 None)
+        panel: 제어판 인스턴스
+        pending_notices: 다음 턴 모델에게 전달할 보류 알림 목록
+
+    Returns:
+        bool: 슬래시 명령을 처리했으면 True, 일반 대화 입력이면 False
+    """
+    if not tokens:
+        return False
+
+    cmd = tokens[0].lower()
+    if cmd == "/rollback":
+        rollback_res = _handle_rollback(tokens, checkpointer)
+        if rollback_res is not None:
+            pending_notices.append(rollback_res)
+        return True
+
+    if cmd == "/ctl":
+        _handle_ctl(tokens, panel)
+        return True
+
+    return False
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hermes Agent Terminal CLI")
@@ -483,13 +520,12 @@ def main() -> None:
         apply_settings_fn=apply_runtime_settings,
     )
 
-    if not args.mock and settings.delegate:
-        register_delegate_tool(
-            agent.dispatcher,
-            session_db=agent.session_db,
-            parent_session_id=agent.session_id,
-            llm_client_factory=lambda: OpenRouterClient(api_key=api_key, model=model),
-        )
+    delegated = register_delegate_if_enabled(
+        agent,
+        settings,
+        mock=args.mock,
+        llm_client_factory=lambda: OpenRouterClient(api_key=api_key, model=model),
+    )
 
     print("=" * 60)
     print(f"🤖 Hermes Core CLI Started (Session: {agent.session_id[:8]}...)")
@@ -512,7 +548,7 @@ def main() -> None:
     else:
         print(f"🚀 Running in REAL mode (Model: {agent.model}).")
         print(f"📁 Working directory: {os.getcwd()}")
-    if not args.mock and settings.delegate:
+    if delegated:
         print("Delegation enabled (delegate_task).")
     if not settings.skills_index:
         print("Skills index disabled (--no-skills-index).")
@@ -566,17 +602,18 @@ def main() -> None:
                 break
 
             tokens = user_input.split()
-            if tokens and tokens[0].lower() == "/rollback":
-                rollback_res = _handle_rollback(tokens, checkpointer)
-                if rollback_res is not None:
-                    pending_notices.append(rollback_res)
+            if _dispatch_slash_command(
+                tokens,
+                checkpointer=checkpointer,
+                panel=panel,
+                pending_notices=pending_notices,
+            ):
                 continue
 
-            if tokens and tokens[0].lower() == "/ctl":
-                _handle_ctl(tokens, panel)
-                continue
-
-            panel.apply_pending()
+            try:
+                panel.apply_pending()
+            except Exception as e:
+                logger.warning("apply_pending failed: %s", e)
 
             if checkpointer is not None:
                 checkpointer.begin_turn()
@@ -586,9 +623,13 @@ def main() -> None:
             pending_notices.clear()
             message = f"{notice}\n\n{user_input}" if notice else user_input
 
-            last_active_msg_id = agent.session_db.get_last_active_message_id(
-                agent.session_id
-            )
+            try:
+                last_active_msg_id = agent.session_db.get_last_active_message_id(
+                    agent.session_id
+                )
+            except Exception as e:
+                logger.warning("get_last_active_message_id failed: %s", e)
+                last_active_msg_id = 0
             # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
             try:
                 with hold_typeahead():
@@ -610,6 +651,7 @@ def main() -> None:
                     agent.session_db.deactivate_messages_after(
                         agent.session_id, last_active_msg_id
                     )
+                    history = agent.load_conversation_history()
                 except Exception as e:
                     logger.warning("deactivate_messages_after failed: %s", e)
                 if checkpointer is not None:
