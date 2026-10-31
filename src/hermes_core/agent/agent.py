@@ -134,6 +134,7 @@ class HermesAgent:
         source: str = "cli",
         skip_memory: bool = False,
         skip_context_files: bool = False,
+        resume: bool = False,
         skills_index: bool = False,
     ):
         self.system_message = system_message
@@ -147,6 +148,7 @@ class HermesAgent:
         self.source = source
         self.skip_memory = skip_memory
         self.skip_context_files = skip_context_files
+        self.resume = resume
         self.skills_index = skills_index
 
         # 스킬 인덱스 블록 캐시 (세션 중 불변 고정)
@@ -189,18 +191,28 @@ class HermesAgent:
         if not self.skip_memory:
             self.memory_store.load_from_disk()
 
-        # 세션 DB 레코드 생성
-        self.session_db.create_session(
-            session_id=self.session_id,
-            source=self.source,
-            model=self.model,
-            mode=self.mode,
-            system_prompt=None,
-            parent_session_id=self.parent_session_id,
-        )
-
-        # 시스템 프롬프트 캐시 변수 (Prompt Caching 보존)
-        self._cached_system_prompt: Optional[str] = None
+        # 세션 DB 레코드 생성 또는 기존 세션 재개
+        if self.resume:
+            existing = self.session_db.get_session(self.session_id)
+            if existing is None:
+                raise ValueError(
+                    f"Cannot resume session '{self.session_id}': session does not exist."
+                )
+            self.session_db.reopen_session(self.session_id)
+            saved_prompt = existing.get("system_prompt")
+            self._cached_system_prompt = (
+                saved_prompt if isinstance(saved_prompt, str) and saved_prompt else None
+            )
+        else:
+            self.session_db.create_session(
+                session_id=self.session_id,
+                source=self.source,
+                model=self.model,
+                mode=self.mode,
+                system_prompt=None,
+                parent_session_id=self.parent_session_id,
+            )
+            self._cached_system_prompt = None
 
     def _resolve_skills_index_block(self, tool_names: Collection[str]) -> str:
         """스킬 인덱스 블록을 1회 렌더링하여 보관하고 반환 (세션 중 불변 고정).
@@ -270,6 +282,14 @@ class HermesAgent:
         self._cached_system_prompt = assembled
         self.session_db.update_system_prompt(self.session_id, assembled)
         return assembled
+
+    def load_conversation_history(self) -> Optional[list[dict[str, Any]]]:
+        """원장의 활성(active=1) 메시지를 읽어 run_conversation에 넘길 conversation_history 목록([system, ...])으로 반환한다. 활성 메시지가 없으면 None."""
+        active_msgs = self.session_db.get_messages_as_conversation(self.session_id)
+        if not active_msgs:
+            return None
+        sys_prompt = self._build_system_prompt()
+        return [{"role": "system", "content": sys_prompt}, *active_msgs]
 
     def _execute_tool_calls(
         self,

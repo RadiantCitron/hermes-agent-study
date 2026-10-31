@@ -2,8 +2,11 @@
 
 import pytest
 
+from hermes_core.agent.agent import HermesAgent
 from hermes_core.constants import SUMMARY_END_MARKER, SUMMARY_PREFIX
 from hermes_core.session_db import SessionDB
+from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
+from hermes_core.tools.memory_tool import MemoryStore
 
 
 def test_scenario_01_last_active_id_empty_session():
@@ -261,3 +264,262 @@ def test_scenario_12_fts_search_after_deactivation():
     results_after = db.search_messages("아나콘다")
     assert len(results_after) >= 1
     assert any(r["session_id"] == sid for r in results_after)
+
+
+def test_scenario_13_checkpointer_restore_empty_session():
+    """시나리오 13: 체크포인트가 0건인 세션에서 Checkpointer.restore_from_db() 호출."""
+    db = SessionDB(":memory:")
+    sid = db.create_session("sess-1")
+    cp = Checkpointer(db, sid)
+
+    restored_turn = cp.restore_from_db()
+    assert restored_turn == 0
+    assert cp.turn_index == 0
+    assert cp._session_before_bytes == 0
+    assert cp._turn_start_times == {}
+    assert cp.turn_started_at == 0.0
+
+
+def test_scenario_14_checkpointer_restore_and_begin_turn_continuity(tmp_path):
+    """시나리오 14: 세션 1의 체크포인트 복원 후 새 turn_index 단조 증가 (가정 E)."""
+    db = SessionDB(":memory:")
+    sid = db.create_session("sess-1")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    f_a = ws / "a.txt"
+    f_a.write_text("0123456789")  # 10 bytes
+
+    # 턴 1: a.txt 수정
+    cp1 = Checkpointer(db, sid, workspace=ws)
+    t1 = cp1.begin_turn()
+    cid1 = cp1.record_before("write_file", "a.txt")
+    f_a.write_text("updated content")
+    cp1.finalize(cid1, "write_file", "a.txt", result_success=True)
+
+    # 턴 2: b.txt 신규 생성
+    t2 = cp1.begin_turn()
+    cid2 = cp1.record_before("write_file", "b.txt")
+    (ws / "b.txt").write_text("new file")
+    cp1.finalize(cid2, "write_file", "b.txt", result_success=True)
+
+    # 새 Checkpointer 인스턴스로 복원
+    cp2 = Checkpointer(db, sid, workspace=ws)
+    restored = cp2.restore_from_db()
+    assert restored == 2
+    assert cp2._session_before_bytes == 10
+    assert set(cp2._turn_start_times.keys()) == {1, 2}
+
+    # 다음 begin_turn()은 3이어야 함
+    t3 = cp2.begin_turn()
+    assert t3 == 3
+
+
+def test_scenario_15_cross_session_rollback(tmp_path):
+    """시나리오 15: 세션 간 /rollback (가정 D, 12 한계 1)."""
+    db = SessionDB(":memory:")
+    sid = db.create_session("sess-1")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    f_a = ws / "a.txt"
+    f_a.write_text("v1")
+
+    # 세션 1 턴 1
+    cp1 = Checkpointer(db, sid, workspace=ws)
+    cp1.begin_turn()
+    cid1 = cp1.record_before("write_file", "a.txt")
+    f_a.write_text("v2")
+    cp1.finalize(cid1, "write_file", "a.txt", result_success=True)
+
+    # 세션 1 턴 2
+    cp1.begin_turn()
+    cid2 = cp1.record_before("write_file", "b.txt")
+    f_b = ws / "b.txt"
+    f_b.write_text("new")
+    cp1.finalize(cid2, "write_file", "b.txt", result_success=True)
+    db.end_session(sid, "user_exit")
+
+    # 새 세션 인스턴스로 재개하여 롤백 연속 2회 실행
+    cp2 = Checkpointer(db, sid, workspace=ws)
+    cp2.restore_from_db()
+
+    # 1회차 롤백: 턴 2 (b.txt 삭제)
+    plan1 = cp2.plan_rollback()
+    assert plan1 is not None
+    assert plan1.turn_index == 2
+    res1 = cp2.execute_rollback(plan1)
+    assert res1.rolled_back_count == 1
+    assert not f_b.exists()
+
+    # 2회차 롤백: 턴 1 (a.txt "v1" 복원)
+    plan2 = cp2.plan_rollback()
+    assert plan2 is not None
+    assert plan2.turn_index == 1
+    res2 = cp2.execute_rollback(plan2)
+    assert res2.rolled_back_count == 1
+    assert f_a.read_text() == "v1"
+
+
+def test_scenario_16_checkpointer_budget_restoration(tmp_path):
+    """시나리오 16: 복원된 누적 바이트 예산 초과 시 CheckpointLimitError 발생."""
+    db = SessionDB(":memory:")
+    sid = db.create_session("sess-1")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    f1 = ws / "f1.txt"
+    f1.write_text("x" * 80)
+
+    cp1 = Checkpointer(db, sid, workspace=ws, bytes_limit=100)
+    cp1.begin_turn()
+    cid1 = cp1.record_before("write_file", "f1.txt")
+    cp1.finalize(cid1, "write_file", "f1.txt", result_success=True)
+
+    # 새 Checkpointer로 복원
+    cp2 = Checkpointer(db, sid, workspace=ws, bytes_limit=100)
+    cp2.restore_from_db()
+    assert cp2._session_before_bytes == 80
+
+    # 새 턴에서 30바이트 파일 record_before 시도 (80 + 30 > 100)
+    cp2.begin_turn()
+    f2 = ws / "f2.txt"
+    f2.write_text("y" * 30)
+
+    with pytest.raises(CheckpointLimitError):
+        cp2.record_before("write_file", "f2.txt")
+
+
+def test_scenario_17_resume_non_existent_session_raises_value_error():
+    """시나리오 17: 존재하지 않는 session_id로 resume=True 호출 시 ValueError."""
+    db = SessionDB(":memory:")
+    with pytest.raises(ValueError, match="Cannot resume session"):
+        HermesAgent(session_id="no-such-session", session_db=db, resume=True)
+
+
+def test_scenario_18_resume_preserves_system_prompt_snapshot_and_reopens(tmp_path):
+    """시나리오 18: reopen_session 확인 및 디스크 MEMORY.md 변경에도 원래 system_prompt 스냅샷 보존 (가정 C, F)."""
+    db = SessionDB(":memory:")
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    mem_file = mem_dir / "MEMORY.md"
+    mem_file.write_text("- 초기 기억 내용", encoding="utf-8")
+    store1 = MemoryStore(memory_dir=mem_dir)
+
+    sid = "sess-prompt-test"
+    agent1 = HermesAgent(
+        session_id=sid,
+        session_db=db,
+        memory_store=store1,
+        skip_context_files=True,
+    )
+    prompt1 = agent1._build_system_prompt()
+    assert "초기 기억 내용" in prompt1
+    db.end_session(sid, "user_exit")
+
+    # 디스크의 기억 내용 수정
+    mem_file.write_text("- 완전히 바뀐 기억 내용", encoding="utf-8")
+    store2 = MemoryStore(memory_dir=mem_dir)
+
+    # resume=True로 세션 재개
+    agent2 = HermesAgent(
+        session_id=sid,
+        session_db=db,
+        memory_store=store2,
+        skip_context_files=True,
+        resume=True,
+    )
+
+    # DB의 세션이 다시 열렸는지 확인 (ended_at is None)
+    sess_rec = db.get_session(sid)
+    assert sess_rec is not None
+    assert sess_rec["ended_at"] is None
+    assert sess_rec["end_reason"] is None
+
+    # system_prompt는 바뀐 기억이 아니라 원래 스냅샷 그대로 보존
+    prompt2 = agent2._build_system_prompt()
+    assert prompt2 == prompt1
+    assert "초기 기억 내용" in prompt2
+    assert "완전히 바뀐 기억 내용" not in prompt2
+
+
+def test_scenario_19_resume_conversation_continuity():
+    """시나리오 19: agent2.load_conversation_history() 후 run_conversation 연속 대화."""
+    db = SessionDB(":memory:")
+    sid = "sess-conv-test"
+
+    # 세션 1: 1턴 완료
+    agent1 = HermesAgent(session_id=sid, session_db=db, skip_context_files=True)
+    agent1.run_conversation("hello")
+    db.end_session(sid, "user_exit")
+
+    # 세션 2: 재개 후 load_conversation_history
+    agent2 = HermesAgent(
+        session_id=sid, session_db=db, skip_context_files=True, resume=True
+    )
+    history = agent2.load_conversation_history()
+    assert history is not None
+    assert len(history) >= 3
+    assert history[0]["role"] == "system"
+    assert history[1]["role"] == "user"
+    assert history[1]["content"] == "hello"
+    assert history[2]["role"] == "assistant"
+
+    # 이어서 2턴 대화 실행
+    res2 = agent2.run_conversation("second", conversation_history=history)
+    assert res2 is not None
+
+    # 원장에도 연속적으로 쌓였는지 확인
+    conv = db.get_messages_as_conversation(sid)
+    assert [m["content"] for m in conv[:2]] == ["hello", history[2]["content"]]
+    assert conv[-1]["role"] == "assistant"
+
+
+def test_scenario_20_resume_ignores_deactivated_messages():
+    """시나리오 20: 취소되어 deactivate된 메시지는 load_conversation_history에 미포함."""
+    db = SessionDB(":memory:")
+    sid = "sess-deact-test"
+
+    agent1 = HermesAgent(session_id=sid, session_db=db, skip_context_files=True)
+    m1 = db.append_message(sid, "user", "turn 1 user")
+    m2 = db.append_message(sid, "assistant", "turn 1 assistant")
+
+    # 턴 2 도중 추가된 미완성 메시지
+    db.append_message(sid, "user", "turn 2 cancelled user")
+    db.append_message(sid, "assistant", "turn 2 cancelled assistant")
+
+    # 턴 1 이후 비활성화
+    db.deactivate_messages_after(sid, m2)
+    db.end_session(sid, "user_exit")
+
+    agent2 = HermesAgent(
+        session_id=sid, session_db=db, skip_context_files=True, resume=True
+    )
+    history = agent2.load_conversation_history()
+    assert history is not None
+    contents = [m.get("content") for m in history]
+    assert "turn 1 user" in contents
+    assert "turn 1 assistant" in contents
+    assert "turn 2 cancelled user" not in contents
+    assert "turn 2 cancelled assistant" not in contents
+
+
+def test_scenario_21_resume_empty_session_handles_delayed_system_prompt():
+    """시나리오 21: 빈 세션(메시지 0건) 재개 시 load_conversation_history는 None이고 첫 대화 시 조립 성공 (위험 5)."""
+    db = SessionDB(":memory:")
+    sid = "sess-empty-test"
+
+    # 빈 세션 생성 후 바로 닫음
+    db.create_session(sid, source="cli")
+    db.end_session(sid, "user_exit")
+
+    agent = HermesAgent(
+        session_id=sid, session_db=db, skip_context_files=True, resume=True
+    )
+    assert agent.load_conversation_history() is None
+
+    # 첫 턴 실행 시 정상적으로 시스템 프롬프트 조립 및 대화 성공
+    res = agent.run_conversation("first message")
+    assert res is not None
+
+    sess = db.get_session(sid)
+    assert sess is not None
+    assert sess["system_prompt"] is not None
+

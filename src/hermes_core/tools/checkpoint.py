@@ -152,6 +152,35 @@ class Checkpointer:
         self._turn_start_times: dict[int, float] = {}
         self._session_before_bytes = 0
 
+    def restore_from_db(self) -> int:
+        """DB의 file_checkpoints 원장에서 기존 세션의 마지막 turn_index, 누적 바이트, 턴별 시작 시각을 복원하고 복원된 turn_index를 반환한다."""
+        rows = self.db.get_file_checkpoints(self.session_id)
+        if not rows:
+            self.turn_index = 0
+            self.turn_started_at = 0.0
+            self._turn_start_times = {}
+            self._session_before_bytes = 0
+            return 0
+
+        self.turn_index = max(r["turn_index"] for r in rows)
+        self._session_before_bytes = sum(
+            len(r["before_content"].encode("utf-8"))
+            for r in rows
+            if r["before_exists"] and isinstance(r["before_content"], str)
+        )
+        turn_times: dict[int, float] = {}
+        for r in rows:
+            t = r["turn_index"]
+            c = float(r["created_at"] or 0.0)
+            if t in turn_times:
+                turn_times[t] = min(turn_times[t], c)
+            else:
+                turn_times[t] = c
+
+        self._turn_start_times = turn_times
+        self.turn_started_at = self._turn_start_times.get(self.turn_index, 0.0)
+        return self.turn_index
+
     def begin_turn(self, turn_index: Optional[int] = None) -> int:
         """턴 경계를 설정하고 시작 시각을 기록한다."""
         if turn_index is not None:
