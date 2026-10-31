@@ -44,6 +44,7 @@ src/hermes_core/
   agent/loop_guard.py      # 변경 (020) import 경로만 kernel로
   agent/compression_hook.py# 변경 (020) import 경로만 kernel로
   tools/dispatcher.py      # 변경 (020) ToolCall을 kernel에서 import(재수출 유지)
+  cli.py                   # 변경 (010) typing.Optional import 1줄
   llm_client.py            # 변경 (030) LLMError를 kernel에서 import(이름 유지)
 tests/
   test_architecture/       # 신규 (010) 의존 방향 래칫 시험, 주석 해석 시험
@@ -205,7 +206,7 @@ sequenceDiagram
 ## 6. 설계 결정 상세
 
 ### 6-1. 010 아키텍처 안전망
-- `agent.py`에 `from collections.abc import Callable` 추가.
+- `agent.py`에 `Callable`, `cli.py`에 `Optional` import 추가(전수 탐침에서 `get_type_hints` 실패는 이 두 결함의 3건뿐).
 - 의존 방향 시험: `src/hermes_core/**/*.py`를 `ast`로 읽어 `import`·`from ... import`의 대상 모듈을 모은다. 규칙 R1(`kernel/` 고립), R2(`cli`·`cli_input`은 누구도 import 금지), R3(`tools/` → `agent/` 금지), 그리고 지금 문서로만 있는 「`extensions/contract.py`는 `hermes_core`를 import하지 않는다」를 검사한다.
 - 010 시점 부채 목록(2026-10-31 확인): R3 위반 `tools/delegate_tool.py` → `hermes_core.agent.agent`, `hermes_core.agent.prompt_builder` 2건. R1·R2는 0건(`kernel/` 없음, CLI를 import하는 모듈 없음). 실제 목록은 010 실행 때 시험이 뽑은 결과로 확정한다.
 - 래칫: 새 위반 → 실패. 목록에 있으나 사라진 위반 → 「목록에서 지워라」 실패.
