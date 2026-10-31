@@ -32,6 +32,8 @@ class TurnContext:
     run_state: dict[str, Any] = field(default_factory=dict)
     stop_reason: Optional[str] = None
     scope: TurnScope = field(default=None)  # type: ignore[assignment]
+    _live_messages: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    _replace_fn: Optional[Callable[..., None]] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.scope is None:
@@ -56,6 +58,18 @@ class TurnContext:
     def request_stop(self, reason: str) -> None:
         """턴 루프 중단을 요청한다. 먼저 요청된 이유가 유지된다."""
         self.scope.request_stop(reason)
+
+    def replace_transcript(
+        self,
+        new_messages: list[dict[str, Any]],
+        *,
+        summary_index: Optional[int] = None,
+        usage: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """세션 DB 원장 압축과 활성 대화 교체를 원자적으로 수행하는 단일 창구."""
+        if self._replace_fn is None:
+            raise RuntimeError("replace_transcript is not available in this context.")
+        self._replace_fn(new_messages, summary_index=summary_index, usage=usage)
 
 
 TurnHook = Callable[[TurnContext], None]
@@ -83,12 +97,12 @@ class HookRegistry:
         if point not in self._hooks:
             raise ValueError(f"Unknown hook point '{point}'. Must be one of {HOOK_POINTS}")
 
+        live_source = ctx._live_messages if ctx._live_messages is not None else ctx.messages
+
         for hook in self._hooks[point]:
-            # 시스템 메시지 보존 검사를 위해 스냅샷 캡처
-            has_system = bool(ctx.messages and ctx.messages[0].get("role") == "system")
-            system_role = ctx.messages[0].get("role") if has_system else None
-            system_content = ctx.messages[0].get("content") if has_system else None
-            system_snapshot = copy.deepcopy(ctx.messages[0]) if has_system else None
+            # 훅 호출 직전 대화 복사본 생성 및 비교용 복사본 보관
+            ctx.messages = copy.deepcopy(live_source)
+            comparison = copy.deepcopy(live_source)
 
             try:
                 hook(ctx)
@@ -102,22 +116,27 @@ class HookRegistry:
                     except Exception as err_callback_exc:
                         logger.warning("on_error callback failed: %s", err_callback_exc)
 
-            # 시스템 메시지 무결성 사후 검증
-            if has_system:
+            # 훅 실행 후 대화 변조 사후 검증
+            # replace_transcript가 호출된 경우 comparison도 live_source로 맞춰졌을 수 있으므로 대조
+            if ctx.messages != comparison:
+                has_comp_sys = bool(comparison and comparison[0].get("role") == "system")
+                comp_sys_role = comparison[0].get("role") if has_comp_sys else None
+                comp_sys_content = comparison[0].get("content") if has_comp_sys else None
+
                 current_first = ctx.messages[0] if ctx.messages else None
                 first_role = current_first.get("role") if current_first else None
                 first_content = current_first.get("content") if current_first else None
 
-                if first_role != system_role or first_content != system_content:
-                    # 변조되거나 삭제되었으면 원래 스냅샷으로 복원
-                    if first_role != "system":
-                        ctx.messages.insert(0, copy.deepcopy(system_snapshot))
-                    else:
-                        ctx.messages[0] = copy.deepcopy(system_snapshot)
-
+                if has_comp_sys and (first_role != comp_sys_role or first_content != comp_sys_content):
                     err = ValueError("system message modified by hook")
-                    if on_error:
-                        try:
-                            on_error(point, hook, err)
-                        except Exception as err_callback_exc:
-                            logger.warning("on_error callback failed: %s", err_callback_exc)
+                else:
+                    err = ValueError("transcript modified outside replace_transcript")
+
+                if on_error:
+                    try:
+                        on_error(point, hook, err)
+                    except Exception as err_callback_exc:
+                        logger.warning("on_error callback failed: %s", err_callback_exc)
+
+        # 훅 실행 종료 후 ctx.messages를 실제 대화와 동기화
+        ctx.messages = live_source

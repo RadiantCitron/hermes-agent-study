@@ -319,6 +319,45 @@ class HermesAgent:
         logger.warning("Hook '%s' at '%s' failed: %s", hook_name, point, exc)
         self._emit(EVENT_HOOK_ERROR, point=point, hook=hook_name, error=str(exc))
 
+    def _replace_transcript(
+        self,
+        messages: list[dict[str, Any]],
+        new_messages: list[dict[str, Any]],
+        *,
+        summary_index: Optional[int] = None,
+        usage: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """대화 교체 및 세션 DB 원장 압축 단일 진입로."""
+        if not new_messages:
+            raise ValueError("new_messages cannot be empty.")
+        if not messages:
+            raise ValueError("active transcript cannot be empty.")
+
+        first_orig = messages[0]
+        first_new = new_messages[0]
+        if first_new.get("role") != first_orig.get("role") or first_new.get("content") != first_orig.get("content"):
+            raise ValueError("system message modified by replace_transcript")
+
+        # 세션 DB 원장 압축 (실패 시 예외 전파되어 메모리 메시지는 불변 유지)
+        self.session_db.archive_and_compact(
+            self.session_id,
+            new_messages[1:],
+            summary_index=summary_index,
+        )
+
+        # 원장 압축 성공 시에만 메모리 목록 원자적 교체
+        messages[:] = new_messages
+        self._last_input_tokens = None
+        self._last_message_count = None
+
+        if usage and isinstance(usage, dict):
+            in_tok = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            out_tok = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+            if in_tok or out_tok:
+                self.session_db.update_token_counts(
+                    self.session_id, input_tokens=in_tok, output_tokens=out_tok
+                )
+
     def _execute_tool_calls(
         self,
         tool_calls: list[dict[str, Any]],
@@ -404,6 +443,10 @@ class HermesAgent:
             iteration=0,
             session_id=self.session_id,
             scope=scope,
+            _live_messages=messages,
+            _replace_fn=lambda new_msgs, summary_index=None, usage=None: self._replace_transcript(
+                messages, new_msgs, summary_index=summary_index, usage=usage
+            ),
         )
 
         while iterations < self.max_iterations:

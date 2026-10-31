@@ -114,15 +114,11 @@ class CompressionHook:
                         break
 
                 try:
-                    agent.session_db.archive_and_compact(
-                        agent.session_id,
-                        db_new_msgs,
+                    ctx.replace_transcript(
+                        comp_res.messages,
                         summary_index=summary_idx,
+                        usage=comp_res.usage,
                     )
-                    # DB 기록 성공 시에만 메모리 목록 원자적 교체
-                    messages[:] = comp_res.messages
-                    agent._last_input_tokens = None
-                    agent._last_message_count = None
                     agent._rejected_at_tokens = None
                     comp_stats["count"] += 1
                     if comp_res.used_fallback:
@@ -131,13 +127,6 @@ class CompressionHook:
                         "compression",
                         {"count": comp_stats["count"], "fallback": comp_stats["fallback"]},
                     )
-                    if comp_res.usage:
-                        in_tok = comp_res.usage.get("prompt_tokens") or comp_res.usage.get("input_tokens") or 0
-                        out_tok = comp_res.usage.get("completion_tokens") or comp_res.usage.get("output_tokens") or 0
-                        if in_tok or out_tok:
-                            agent.session_db.update_token_counts(
-                                agent.session_id, input_tokens=in_tok, output_tokens=out_tok
-                            )
                     logger.info(
                         "[Compression] Session %s compressed: %d -> %d tokens (fallback=%s)",
                         agent.session_id,

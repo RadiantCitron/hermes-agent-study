@@ -93,9 +93,10 @@ def test_h2_execution_order_preserved(tmp_path: Path):
     assert order_log == ["h1", "h2"]
 
 
-def test_h3_inplace_message_modification_reflected_in_llm_call(tmp_path: Path):
-    """H3: 훅이 ctx.messages에 추가한 메시지가 LLM 호출 시 반영."""
-    agent, _ = _create_hook_test_agent(tmp_path, [LLMResponse(content="done")])
+def test_h3_hook_append_not_reflected_and_reported(tmp_path: Path):
+    """H3: 훅이 ctx.messages에 추가한 메시지는 무시되고 hook_error로 보고됨."""
+    events: list[AgentEvent] = []
+    agent, db = _create_hook_test_agent(tmp_path, [LLMResponse(content="done")], event_sink=events.append)
 
     def add_hint_hook(ctx: TurnContext) -> None:
         ctx.messages.append({"role": "user", "content": "hint"})
@@ -103,8 +104,18 @@ def test_h3_inplace_message_modification_reflected_in_llm_call(tmp_path: Path):
     agent.hooks.register(BEFORE_LLM, add_hint_hook)
     agent.run_conversation("test")
 
+    # LLM에 전달된 메시지의 마지막은 원래 사용자 메시지(hint 아님)
     last_call = agent.llm_client.call_history[-1]
-    assert last_call["messages"][-1] == {"role": "user", "content": "hint"}
+    assert last_call["messages"][-1] == {"role": "user", "content": "test"}
+
+    # 원장 messages 표에 hint 행 없음
+    db_msgs = db.get_messages(agent.session_id)
+    assert not any(m["content"] == "hint" for m in db_msgs)
+
+    # hook_error 이벤트 검증
+    hook_err_events = [e for e in events if e.kind == EVENT_HOOK_ERROR]
+    assert len(hook_err_events) == 1
+    assert "transcript modified outside replace_transcript" in hook_err_events[0].data["error"]
 
 
 def test_h4_system_message_content_tampering_restored(tmp_path: Path, caplog: pytest.LogCaptureFixture):
@@ -380,7 +391,19 @@ def test_g5_compression_max_per_run_bound(tmp_path: Path):
 
 def test_g6_run_conversation_lines_and_no_direct_compression_calls():
     """G6: agent.py의 run_conversation 내부에 직접 압축 함수 호출이 없음."""
-    agent_code = (Path(__file__).parents[2] / "src" / "hermes_core" / "agent" / "agent.py").read_text(encoding="utf-8")
-    assert "compress_messages" not in agent_code
-    assert "archive_and_compact" not in agent_code
-    assert "split_for_compression" not in agent_code
+    import ast
+
+    agent_path = Path(__file__).parents[2] / "src" / "hermes_core" / "agent" / "agent.py"
+    source = agent_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    run_conv_source = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_conversation":
+            run_conv_source = ast.get_source_segment(source, node)
+            break
+
+    assert run_conv_source is not None, "run_conversation function not found in agent.py"
+    assert "compress_messages" not in run_conv_source
+    assert "archive_and_compact" not in run_conv_source
+    assert "split_for_compression" not in run_conv_source
