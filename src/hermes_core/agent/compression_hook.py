@@ -25,7 +25,6 @@ from hermes_core.agent.context_budget import (
     may_retry_after_reject,
     should_compress,
 )
-from hermes_core.agent.turn_hooks import BEFORE_LLM, TurnContext
 from hermes_core.constants import (
     COMPRESSION_HEAD_MESSAGES,
     COMPRESSION_MAX_PER_RUN,
@@ -33,7 +32,8 @@ from hermes_core.constants import (
     SUMMARY_END_MARKER,
     SUMMARY_PREFIX,
 )
-from hermes_core.extensions.contract import ExtensionHost
+from hermes_core.kernel.contract import ExtensionHost
+from hermes_core.kernel.turn_hooks import BEFORE_LLM, TurnContext
 
 logger = logging.getLogger(__name__)
 

@@ -6,25 +6,15 @@
 - 차이점: 원본의 콜백 인자들을 단일 불변 객체(AgentEvent)로 묶어 전달한다.
 """
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from typing import Any
+from hermes_core.kernel.events import (
+    EVENT_EXTENSION_ERROR,
+    EVENT_HOOK_ERROR,
+    EVENT_TOOL_CALL,
+    AgentEvent,
+    EventSink,
+)
 
-EVENT_TOOL_CALL = "tool_call"
-EVENT_HOOK_ERROR = "hook_error"
-EVENT_EXTENSION_ERROR = "extension_error"
 EVENT_LOOP_GUARD = "loop_guard"
-
-
-@dataclass(frozen=True)
-class AgentEvent:
-    """에이전트 실행 중 발생하는 단일 이벤트 데이터 클래스."""
-
-    kind: str
-    data: Mapping[str, Any] = field(default_factory=dict)
-
-
-EventSink = Callable[[AgentEvent], None]
 
 
 class ConsoleEventSink:
@@ -35,3 +25,14 @@ class ConsoleEventSink:
             name = event.data.get("name", "")
             arguments = event.data.get("arguments", "")
             print(f"  [Tool Call] {name}({arguments})")
+
+
+__all__ = [
+    "AgentEvent",
+    "ConsoleEventSink",
+    "EVENT_EXTENSION_ERROR",
+    "EVENT_HOOK_ERROR",
+    "EVENT_LOOP_GUARD",
+    "EVENT_TOOL_CALL",
+    "EventSink",
+]

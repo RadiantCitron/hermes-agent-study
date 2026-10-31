@@ -20,8 +20,8 @@ from hermes_core.constants import (
     LOOP_GUARD_WARN_THRESHOLD,
     LOOP_GUARD_WARNING_MESSAGE,
 )
-from hermes_core.extensions.contract import ExtensionHost, MiddlewarePhase
-from hermes_core.tools.dispatcher import ToolCall
+from hermes_core.kernel.contract import ExtensionHost, MiddlewarePhase
+from hermes_core.kernel.tool_call import ToolCall
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,6 @@
 """
 
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
 import json
 import logging
 from typing import Any, Optional
@@ -20,12 +19,12 @@ from hermes_core.constants import (
     CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE,
     CHILD_TOOL_NAMES,
 )
-from hermes_core.extensions.contract import (
+from hermes_core.kernel.contract import (
     FailurePolicy,
     MiddlewarePhase,
     PHASE_FAILURE_POLICY,
-    TurnScope,
 )
+from hermes_core.kernel.tool_call import ToolCall, ToolMiddleware
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
@@ -95,21 +94,6 @@ def _validate_arguments(schema: dict[str, Any], args: Any) -> Optional[str]:
         if "enum" in spec and value not in spec["enum"]:
             return f"argument '{name}' must be one of {spec['enum']}"
     return None
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    """도구 호출 요청 데이터 클래스."""
-
-    name: str
-    args: dict[str, Any]
-    task_id: Optional[str] = None
-    scope: Optional[TurnScope] = None
-    raw_arguments: Optional[str] = None
-    parse_error: Optional[str] = None
-
-
-ToolMiddleware = Callable[[ToolCall, Callable[[ToolCall], str]], str]
 
 
 class ToolDispatcher:

@@ -21,14 +21,7 @@ import uuid
 
 from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
 from hermes_core.agent.loop_guard import LoopGuardExtension
-from hermes_core.agent.events import (
-    EVENT_EXTENSION_ERROR,
-    EVENT_HOOK_ERROR,
-    EVENT_TOOL_CALL,
-    AgentEvent,
-    ConsoleEventSink,
-    EventSink,
-)
+from hermes_core.agent.events import ConsoleEventSink
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     build_context_files_prompt,
@@ -36,20 +29,28 @@ from hermes_core.agent.prompt_builder import (
     render_skills_index,
     select_tools_guidance,
 )
-from hermes_core.agent.turn_hooks import (
+from hermes_core.kernel.events import (
+    EVENT_EXTENSION_ERROR,
+    EVENT_HOOK_ERROR,
+    EVENT_TOOL_CALL,
+    AgentEvent,
+    EventSink,
+)
+from hermes_core.kernel.turn_hooks import (
     AFTER_TOOL_CALLS,
     BEFORE_LLM,
     HookRegistry,
     TurnContext,
     TurnHook,
 )
-from hermes_core.extensions.contract import (
+from hermes_core.kernel.contract import (
     Extension,
     ExtensionHost,
     ExtensionRecord,
     MiddlewarePhase,
     TurnScope,
 )
+from hermes_core.kernel.tool_call import ToolCall
 from hermes_core.constants import (
     COMPRESSION_THRESHOLD_RATIO,
     CONTEXT_WINDOW_TOKENS,
@@ -57,7 +58,7 @@ from hermes_core.constants import (
 )
 from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
-from hermes_core.tools.dispatcher import ToolCall, ToolDispatcher, create_default_dispatcher
+from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 from hermes_core.tools.skills_tool import discover_skills
 
