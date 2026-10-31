@@ -26,6 +26,11 @@ from hermes_core.constants import (
     SEARCH_MAX_LINE_CHARS,
     SEARCH_MAX_MATCHES,
 )
+from hermes_core.tools.file_domain import (
+    apply_text_patch,
+    match_text_lines,
+    slice_lines_with_numbers,
+)
 from hermes_core.tools.path_guard import (
     check_path,
     check_write_path,
@@ -180,81 +185,19 @@ def read_file_tool(
     except UnicodeDecodeError as e:
         return _failure(f"File '{path}' is not valid UTF-8: {e}")
 
-    if not text:
-        lines: list[str] = []
-    else:
-        split_lines = text.split("\n")
-        if split_lines and split_lines[-1] == "":
-            split_lines.pop()
-        lines = [line[:-1] if line.endswith("\r") else line for line in split_lines]
-
-    total_lines = len(lines)
-    if total_lines == 0:
-        if offset > 1:
-            return _failure(f"offset {offset} is beyond end of file (0 lines).")
-        return json.dumps(
-            {
-                "success": True,
-                "content": "",
-                "total_lines": 0,
-                "offset": offset,
-                "lines_returned": 0,
-                "truncated": False,
-                "next_offset": None,
-            },
-            ensure_ascii=False,
+    try:
+        slice_result = slice_lines_with_numbers(
+            text,
+            offset=offset,
+            limit=limit,
+            max_chars=FILE_READ_MAX_CHARS,
         )
-
-    if offset > total_lines:
-        return _failure(f"offset {offset} is beyond end of file ({total_lines} lines).")
-
-    start_idx = offset - 1
-    target_lines = lines[start_idx : start_idx + limit]
-
-    selected: list[str] = []
-    current_chars = 0
-    truncated = False
-    next_offset: Optional[int] = None
-
-    for i, raw_line in enumerate(target_lines):
-        line_num = offset + i
-        formatted = f"{line_num}|{raw_line}"
-        needed = len(formatted) if not selected else (current_chars + 1 + len(formatted))
-
-        if needed <= FILE_READ_MAX_CHARS:
-            selected.append(formatted)
-            current_chars = needed
-        else:
-            truncated = True
-            if not selected:
-                truncated_line = formatted[:FILE_READ_MAX_CHARS]
-                selected.append(truncated_line)
-                if line_num < total_lines:
-                    next_offset = line_num + 1
-                else:
-                    next_offset = None
-            else:
-                next_offset = line_num
-            break
-
-    if not truncated:
-        last_read_line_num = offset + len(selected) - 1
-        if last_read_line_num < total_lines:
-            truncated = True
-            next_offset = last_read_line_num + 1
-        else:
-            next_offset = None
-
-    content = "\n".join(selected)
+    except ValueError as e:
+        return _failure(str(e))
 
     result = {
         "success": True,
-        "content": content,
-        "total_lines": total_lines,
-        "offset": offset,
-        "lines_returned": len(selected),
-        "truncated": truncated,
-        "next_offset": next_offset,
+        **slice_result.to_dict(),
     }
     return json.dumps(result, ensure_ascii=False)
 
@@ -366,33 +309,17 @@ def patch_tool(
     except UnicodeDecodeError as e:
         return _failure(f"File '{path}' is not valid UTF-8: {e}")
 
-    if not old_string:
-        return _failure("old_string must not be empty.")
-
-    if old_string == new_string:
-        return _failure("old_string and new_string must differ.")
-
-    count = text.count(old_string)
-    if count == 0:
-        return _failure(f"old_string not found in file: '{path}'")
-
-    if count > 1 and not replace_all:
-        return _failure(
-            f"old_string found {count} times; make it unique or set replace_all=True: '{path}'"
+    try:
+        patch_result = apply_text_patch(
+            text,
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all,
+            max_bytes=FILE_MAX_BYTES,
+            file_path=path,
         )
-
-    if replace_all:
-        new_text = text.replace(old_string, new_string)
-        replacements = count
-    else:
-        new_text = text.replace(old_string, new_string, 1)
-        replacements = 1
-
-    encoded_new = new_text.encode("utf-8")
-    if len(encoded_new) > FILE_MAX_BYTES:
-        return _failure(
-            f"Patch result too large ({len(encoded_new)} bytes > {FILE_MAX_BYTES} bytes limit): '{path}'"
-        )
+    except ValueError as e:
+        return _failure(str(e))
 
     # 원본 파일 권한 보존
     original_mode = stat.S_IMODE(target_path.stat().st_mode)
@@ -405,7 +332,7 @@ def patch_tool(
             dir=str(target_path.parent),
         )
         os.chmod(tmp_path_str, original_mode)
-        os.write(tmp_fd, encoded_new)
+        os.write(tmp_fd, patch_result.encoded_bytes)
         os.fsync(tmp_fd)
         os.close(tmp_fd)
         tmp_fd = None
@@ -428,9 +355,9 @@ def patch_tool(
     result = {
         "success": True,
         "path": rel_path,
-        "replacements": replacements,
-        "chars_before": len(text),
-        "chars_after": len(new_text),
+        "replacements": patch_result.replacements,
+        "chars_before": patch_result.chars_before,
+        "chars_after": patch_result.chars_after,
     }
     return json.dumps(result, ensure_ascii=False)
 
@@ -608,21 +535,18 @@ def search_files_tool(
             except UnicodeDecodeError:
                 continue
 
-            lines = [ln.rstrip("\r") for ln in text_content.split("\n")]
             file_truncated = False
-            for line_num, line in enumerate(lines, start=1):
-                is_match = (compiled_re.search(line) is not None) if compiled_re else (pattern in line)
-                if is_match:
-                    if len(matches) >= SEARCH_MAX_MATCHES:
-                        truncated = True
-                        file_truncated = True
-                        break
-                    preview = (
-                        line[:SEARCH_MAX_LINE_CHARS] + "..."
-                        if len(line) > SEARCH_MAX_LINE_CHARS
-                        else line
-                    )
-                    matches.append({"path": rel_str, "line": line_num, "content": preview})
+            for line_num, preview in match_text_lines(
+                text_content,
+                pattern=pattern,
+                compiled_re=compiled_re,
+                max_line_chars=SEARCH_MAX_LINE_CHARS,
+            ):
+                if len(matches) >= SEARCH_MAX_MATCHES:
+                    truncated = True
+                    file_truncated = True
+                    break
+                matches.append({"path": rel_str, "line": line_num, "content": preview})
 
             if file_truncated:
                 break
