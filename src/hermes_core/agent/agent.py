@@ -5,7 +5,9 @@
 """
 
 from collections.abc import Callable, Collection, Iterable
+import copy
 from dataclasses import dataclass
+import functools
 import logging
 from typing import Any, Optional
 import uuid
@@ -86,6 +88,57 @@ class MockLLMClient:
         resp = self.responses[self._index]
         self._index += 1
         return resp
+
+
+EVENT_EXTENSION_TRIPPED = "extension_tripped"
+
+
+@dataclass(frozen=True)
+class ExtensionStatus:
+    """설치된 확장의 켜짐 여부, 연속 실패 수, 차단 상태(읽기 전용)."""
+
+    name: str
+    enabled: bool
+    consecutive_failures: int
+    tripped: bool
+
+
+def _gate_middleware(
+    agent: "HermesAgent",
+    name: str,
+    middleware: Callable[..., Any],
+) -> Callable[..., Any]:
+    @functools.wraps(middleware)
+    def gated(call: Any, next_fn: Callable[..., Any]) -> Any:
+        if not agent._extension_enabled.get(name, True):
+            return next_fn(call)
+        result = middleware(call, next_fn)
+        agent._extension_succeeded(name)
+        return result
+
+    if getattr(middleware, "__name__", None) is None:
+        gated.__name__ = type(middleware).__name__
+    return gated
+
+
+def _gate_turn_hook(
+    agent: "HermesAgent",
+    name: str,
+    hook: Callable[..., Any],
+) -> Callable[..., Any]:
+    @functools.wraps(hook)
+    def gated(ctx: Any) -> None:
+        if not agent._extension_enabled.get(name, True):
+            return None
+        before = copy.deepcopy(ctx.messages)
+        hook(ctx)
+        if ctx.messages == before:
+            agent._extension_succeeded(name)
+        return None
+
+    if getattr(hook, "__name__", None) is None:
+        gated.__name__ = type(hook).__name__
+    return gated
 
 
 # =============================================================================
@@ -216,6 +269,10 @@ class HermesAgent:
         self._installed_extensions: list[Extension] = []
         self._extension_registrations: list[dict[str, Any]] = []
         self._extension_failures: dict[str, int] = {}
+        self._extension_enabled: dict[str, bool] = {}
+        self._extension_consecutive_failures: dict[str, int] = {}
+        self._extension_tripped: dict[str, bool] = {}
+        self._breaker_threshold: int = 0
         self._hook_to_extension: dict[int, str] = {}
 
         # 확장 설치
@@ -253,6 +310,9 @@ class HermesAgent:
             raise ValueError(f"Extension '{ext.name}' is already installed.")
 
         self._installed_extensions.append(ext)
+        self._extension_enabled[ext.name] = True
+        self._extension_consecutive_failures[ext.name] = 0
+        self._extension_tripped[ext.name] = False
         host = _ExtensionHost(self, ext.name)
         ext.install(host)
 
@@ -268,11 +328,62 @@ class HermesAgent:
             records.append(ExtensionRecord(name=name, kind=kind, slot=slot, failures=failures))
         return tuple(records)
 
+    def _extension_succeeded(self, name: str) -> None:
+        """확장이 성공적으로 실행되었을 때 연속 실패 수를 0으로 초기화한다."""
+        self._extension_consecutive_failures[name] = 0
+
     def _on_extension_error(self, name: str, slot: str, exc: Exception) -> None:
         """확장 실패 처리 및 집계."""
         self._extension_failures[name] = self._extension_failures.get(name, 0) + 1
         logger.warning("Extension '%s' failed at slot '%s': %s", name, slot, exc)
         self._emit(EVENT_EXTENSION_ERROR, name=name, slot=slot, error=str(exc))
+
+        consec = self._extension_consecutive_failures.get(name, 0) + 1
+        self._extension_consecutive_failures[name] = consec
+        if (
+            self._breaker_threshold > 0
+            and self._extension_enabled.get(name, True)
+            and consec >= self._breaker_threshold
+        ):
+            self._extension_enabled[name] = False
+            self._extension_tripped[name] = True
+            logger.warning(
+                "Extension '%s' tripped circuit breaker after %d consecutive failures.",
+                name,
+                consec,
+            )
+            self._emit(EVENT_EXTENSION_TRIPPED, name=name, failures=consec)
+
+    def set_extension_enabled(self, name: str, enabled: bool) -> None:
+        """확장의 켜짐/꺼짐 상태를 변경한다."""
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a bool.")
+        if not any(e.name == name for e in self._installed_extensions):
+            raise ValueError(f"Unknown extension '{name}'.")
+        self._extension_enabled[name] = enabled
+        if enabled:
+            self._extension_consecutive_failures[name] = 0
+            self._extension_tripped[name] = False
+        else:
+            self._extension_tripped[name] = False
+
+    def extension_status(self) -> tuple[ExtensionStatus, ...]:
+        """설치된 확장의 상태 목록을 설치 순서대로 반환한다."""
+        return tuple(
+            ExtensionStatus(
+                name=ext.name,
+                enabled=self._extension_enabled.get(ext.name, True),
+                consecutive_failures=self._extension_consecutive_failures.get(ext.name, 0),
+                tripped=self._extension_tripped.get(ext.name, False),
+            )
+            for ext in self._installed_extensions
+        )
+
+    def set_extension_breaker(self, threshold: int) -> None:
+        """차단기 임계값을 설정한다 (0 = 차단기 비활성화)."""
+        if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 0:
+            raise ValueError("threshold must be an integer >= 0.")
+        self._breaker_threshold = threshold
 
     def _resolve_skills_index_block(self, tool_names: Collection[str]) -> str:
         """스킬 인덱스 블록을 1회 렌더링하여 보관하고 반환 (세션 중 불변 고정).
@@ -416,8 +527,9 @@ class _ExtensionHost:
         phase: MiddlewarePhase,
         middleware: Callable[..., Any],
     ) -> None:
+        gated = _gate_middleware(self._agent, self._extension_name, middleware)
         self._agent.dispatcher.add_middleware(
-            middleware,
+            gated,
             phase=phase,
             name=self._extension_name,
         )
@@ -432,8 +544,9 @@ class _ExtensionHost:
         point: str,
         hook: Callable[..., Any],
     ) -> None:
-        self._agent.hooks.register(point, hook, name=self._extension_name)
-        self._agent._hook_to_extension[id(hook)] = self._extension_name
+        gated = _gate_turn_hook(self._agent, self._extension_name, hook)
+        self._agent.hooks.register(point, gated, name=self._extension_name)
+        self._agent._hook_to_extension[id(gated)] = self._extension_name
         self._agent._extension_registrations.append({
             "name": self._extension_name,
             "kind": "turn_hook",

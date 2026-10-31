@@ -15,6 +15,7 @@ from hermes_core.kernel.events import (
 )
 
 EVENT_LOOP_GUARD = "loop_guard"
+EVENT_EXTENSION_TRIPPED = "extension_tripped"
 
 
 class ConsoleEventSink:
@@ -31,6 +32,7 @@ __all__ = [
     "AgentEvent",
     "ConsoleEventSink",
     "EVENT_EXTENSION_ERROR",
+    "EVENT_EXTENSION_TRIPPED",
     "EVENT_HOOK_ERROR",
     "EVENT_LOOP_GUARD",
     "EVENT_TOOL_CALL",

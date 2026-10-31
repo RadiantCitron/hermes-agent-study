@@ -190,6 +190,23 @@ def test_scenario_03_extension_views_grouping_and_failures(tmp_path: Path) -> No
         kinds=("turn_hook", "tool_middleware"),
         slots=("before_llm", "after_tool_calls", "GUARD"),
         total_failures=2,
+        enabled=True,
+        consecutive_failures=2,
+        tripped=False,
+    )
+
+    # 차단된 확장의 스냅샷 반영 확인
+    agent.set_extension_breaker(3)
+    agent._on_extension_error("multi", "before_llm", RuntimeError("boom 3"))
+    snap_c = build_snapshot(agent, loaded)
+    assert snap_c.extensions[2] == ExtensionView(
+        name="multi",
+        kinds=("turn_hook", "tool_middleware"),
+        slots=("before_llm", "after_tool_calls", "GUARD"),
+        total_failures=3,
+        enabled=False,
+        consecutive_failures=3,
+        tripped=True,
     )
 
 

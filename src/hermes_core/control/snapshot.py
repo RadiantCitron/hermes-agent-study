@@ -49,6 +49,9 @@ class ExtensionView:
     kinds: tuple[str, ...]
     slots: tuple[str, ...]
     total_failures: int
+    enabled: bool = True
+    consecutive_failures: int = 0
+    tripped: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,12 @@ def build_snapshot(
         )
 
     # 2. 확장 뷰 조립 (이름별 최초 등장 순서 유지, kinds/slots 중복 제거)
+    status_fn = getattr(agent, "extension_status", None)
+    status_by_name: dict[str, Any] = {}
+    if callable(status_fn):
+        for st in status_fn():
+            status_by_name[st.name] = st
+
     groups: dict[str, _ExtensionGroup] = {}
     for rec in getattr(agent, "extensions", ()):
         name = str(getattr(rec, "name", ""))
@@ -117,15 +126,31 @@ def build_snapshot(
             group.slots.append(slot)
         group.failures = failures
 
-    extension_views = tuple(
-        ExtensionView(
-            name=grp.name,
-            kinds=tuple(grp.kinds),
-            slots=tuple(grp.slots),
-            total_failures=grp.failures,
-        )
-        for grp in groups.values()
-    )
+    ext_views: list[ExtensionView] = []
+    for grp in groups.values():
+        st = status_by_name.get(grp.name)
+        if st is not None:
+            ext_views.append(
+                ExtensionView(
+                    name=grp.name,
+                    kinds=tuple(grp.kinds),
+                    slots=tuple(grp.slots),
+                    total_failures=grp.failures,
+                    enabled=bool(st.enabled),
+                    consecutive_failures=int(st.consecutive_failures),
+                    tripped=bool(st.tripped),
+                )
+            )
+        else:
+            ext_views.append(
+                ExtensionView(
+                    name=grp.name,
+                    kinds=tuple(grp.kinds),
+                    slots=tuple(grp.slots),
+                    total_failures=grp.failures,
+                )
+            )
+    extension_views = tuple(ext_views)
 
     # 3. 세션 및 토큰 수 조회
     session_id = str(getattr(agent, "session_id", ""))
@@ -166,7 +191,9 @@ def render_snapshot(snapshot: ControlSnapshot) -> str:
         for ext in snapshot.extensions:
             kinds_str = ", ".join(ext.kinds)
             slots_str = ", ".join(ext.slots)
-            lines.append(f"  {ext.name} (kinds: {kinds_str} | slots: {slots_str} | failures={ext.total_failures})")
+            lines.append(
+                f"  {ext.name} (kinds: {kinds_str} | slots: {slots_str} | enabled={ext.enabled} | failures={ext.total_failures} | consecutive={ext.consecutive_failures} | tripped={ext.tripped})"
+            )
 
     rendered = "\n".join(lines)
     return mask_secrets(rendered)

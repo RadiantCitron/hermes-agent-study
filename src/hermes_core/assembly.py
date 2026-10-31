@@ -70,6 +70,7 @@ def create_agent(settings: Settings, **parts: Any) -> Any:
         )
 
     agent = HermesAgent(**kwargs)
+    agent.set_extension_breaker(settings.breaker_threshold)
     return agent
 
 
