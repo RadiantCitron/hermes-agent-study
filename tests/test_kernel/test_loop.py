@@ -803,7 +803,7 @@ def test_scenario_14_scope_report_and_reserved_keys() -> None:
 
 
 def test_scenario_15_token_estimate_update_rules() -> None:
-    """시나리오 15: 토큰 추정값 갱신 규칙."""
+    """시나리오 15: 토큰 추정값 갱신 규칙. (050: 세션 토큰 합계 누적은 조립 지점의 미들웨어로 옮겨, 미들웨어 없이 부른 커널은 기록하지 않는다)"""
     # (a) input_tokens 100, output_tokens 7
     store_a = FakeStore()
     est_a = TokenEstimate()
@@ -820,7 +820,7 @@ def test_scenario_15_token_estimate_update_rules() -> None:
         event_sink=None,
         on_hook_error=lambda p, h, e: None,
     )
-    assert any(r == ("tokens", "s1", 100, 7) for r in store_a.records)
+    assert not any(r[0] == "tokens" for r in store_a.records)
     assert est_a == TokenEstimate(100, 2)
 
     # (b) input 0, output 0
@@ -858,7 +858,7 @@ def test_scenario_15_token_estimate_update_rules() -> None:
         event_sink=None,
         on_hook_error=lambda p, h, e: None,
     )
-    assert any(r == ("tokens", "s1", 0, 4) for r in store_c.records)
+    assert not any(r[0] == "tokens" for r in store_c.records)
     assert est_c == TokenEstimate()
 
     # (d) usage 속성 없음

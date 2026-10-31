@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from hermes_core.kernel.tool_call import ToolCall
@@ -32,6 +33,18 @@ class LLMReply(Protocol):
 
     content: Optional[str]
     tool_calls: Optional[list[dict[str, Any]]]
+
+
+@runtime_checkable
+class CallRecordable(Protocol):
+    """호출 기록을 스스로 만들 수 있는 LLM 어댑터.
+
+    기록 내용(상태 코드·지연 시간·키를 가린 요청)은 어댑터만 안다.
+    커널 루프는 이 계약을 쓰지 않고, 조립 지점이 기록처를 연결할 때 쓴다.
+    """
+
+    def set_call_recorder(self, fn: Callable[[dict[str, Any]], None]) -> None:
+        ...
 
 
 @runtime_checkable

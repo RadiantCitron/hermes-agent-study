@@ -10,7 +10,12 @@ import logging
 from typing import Any, Optional
 import uuid
 
-from hermes_core.assembly import compression_config_of, default_extensions
+from hermes_core.assembly import (
+    compression_config_of,
+    connect_call_recorder,
+    default_extensions,
+    default_llm_middlewares,
+)
 from hermes_core.agent.events import ConsoleEventSink
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
@@ -177,11 +182,7 @@ class HermesAgent:
         else:
             self.mode = "real"
 
-        # 콜백 레코더 등록
-        if hasattr(self.llm_client, "set_call_recorder") and callable(getattr(self.llm_client, "set_call_recorder")):
-            self.llm_client.set_call_recorder(
-                lambda record: self.session_db.record_llm_call(session_id=self.session_id, **record)
-            )
+        connect_call_recorder(self)
 
         # 메모리 디스크 로드 및 동결 스냅샷 캡처 (skip_memory=True면 생략)
         if not self.skip_memory:
@@ -396,6 +397,7 @@ class HermesAgent:
             scope=scope,
             estimate=self._token_estimate,
             max_iterations=self.max_iterations,
+            llm_middlewares=default_llm_middlewares(self.session_db),
             event_sink=self.event_sink,
             on_hook_error=self._on_hook_error,
             logger=logger,

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import logging
 from typing import Any, Optional
@@ -13,6 +13,11 @@ import uuid
 
 from hermes_core.kernel.contract import TurnScope
 from hermes_core.kernel.events import EVENT_TOOL_CALL, EventSink, emit_event
+from hermes_core.kernel.llm_pipeline import (
+    LLMMiddleware,
+    LLMRequest,
+    build_llm_chain,
+)
 from hermes_core.kernel.ports import LLMError, LLMPort, ToolExecutor, TranscriptStore
 from hermes_core.kernel.tool_call import ToolCall
 from hermes_core.kernel.transcript import (
@@ -138,6 +143,7 @@ def run_turn(
     scope: TurnScope,
     estimate: TokenEstimate,
     max_iterations: int,
+    llm_middlewares: Sequence[LLMMiddleware] = (),
     event_sink: Optional[EventSink],
     on_hook_error: Callable[[str, Any, Exception], None],
     logger: Optional[logging.Logger] = None,
@@ -178,6 +184,8 @@ def run_turn(
         ),
     )
 
+    call_llm = build_llm_chain(llm, llm_middlewares)
+
     while iterations < max_iterations:
         iterations += 1
 
@@ -199,9 +207,12 @@ def run_turn(
         msgs_len_before_call = len(messages)
 
         try:
-            resp = llm.chat_completion(
-                messages=messages,
-                tools=schema_list,
+            resp = call_llm(
+                LLMRequest(
+                    messages=messages,
+                    tools=schema_list,
+                    scope=scope,
+                )
             )
         except LLMError as e:
             active_logger.warning("LLM call failed with error: %s", e)
@@ -213,11 +224,6 @@ def run_turn(
         usage = getattr(resp, "usage", None)
         if usage and isinstance(usage, dict):
             in_tok = usage.get("input_tokens") or 0
-            out_tok = usage.get("output_tokens") or 0
-            if in_tok or out_tok:
-                store.update_token_counts(
-                    scope.session_id, input_tokens=in_tok, output_tokens=out_tok
-                )
             if in_tok:
                 estimate.input_tokens = in_tok
                 estimate.message_count = msgs_len_before_call

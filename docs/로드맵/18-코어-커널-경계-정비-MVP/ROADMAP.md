@@ -32,11 +32,11 @@ src/hermes_core/
     turn_hooks.py          # 신규 (020) ← agent/turn_hooks.py 본문 이동
     tool_call.py           # 신규 (020) ← tools/dispatcher.py의 ToolCall·ToolMiddleware 이동
     events.py              # 신규 (020) ← agent/events.py의 AgentEvent·EventSink·코어 이벤트 종류 3개 이동
-    ports.py               # 신규 (030) LLM·대화 기록·도구 실행 포트(Protocol), LLMError
+    ports.py               # 신규 (030) LLM·대화 기록·도구 실행 포트(Protocol), LLMError, (050) CallRecordable
     transcript.py          # 신규 (030) 대화 불변식 한 곳(시스템 메시지 불변·도구 결과 메시지·인자 해석)
     loop.py                # 신규 (030) 턴 루프 run_turn
-    llm_pipeline.py        # 신규 (050) LLM 미들웨어 체인
-  assembly.py              # 신규 (040) default_extensions·compression_config_of, (050) 기본 LLM 미들웨어
+    llm_pipeline.py        # 신규 (050) LLM 미들웨어 체인 (LLMRequest·LLMNext·LLMMiddleware·build_llm_chain)
+  assembly.py              # 신규 (040) default_extensions·compression_config_of, (050) usage_ledger_middleware·default_llm_middlewares·connect_call_recorder
   extensions/contract.py   # 변경 (020) 재수출만 남김 (호환 층 목록)
   agent/__init__.py        # 변경 (040) 지연 import (PEP 562)
   agent/turn_hooks.py      # 변경 (020) 재수출만 남김 (호환 층 목록)
@@ -116,6 +116,10 @@ classDiagram
     get_tools_schema()
     dispatch(call) str
   }
+  class CallRecordable {
+    <<Protocol>>
+    set_call_recorder(fn)
+  }
   class HermesAgent {
     <<파사드>>
     _token_estimate: TokenEstimate
@@ -131,6 +135,7 @@ classDiagram
   SessionDB ..|> TranscriptStore
   ToolDispatcher ..|> ToolExecutor
   OpenRouterClient ..|> LLMPort
+  OpenRouterClient ..|> CallRecordable
 ```
 
 - 포트는 구조적 타입(`typing.Protocol`)이라 `SessionDB`·`ToolDispatcher`·`OpenRouterClient`·`MockLLMClient`는 상속 없이 메서드 모양만 맞으면 된다. 포트의 메서드 이름은 지금 어댑터의 이름을 그대로 쓴다(어댑터 클래스 신설 불필요).
@@ -159,7 +164,7 @@ sequenceDiagram
   RT-->>AG: 결과 사전 (추정값은 estimate 객체 제자리 갱신)
 ```
 
-- 050 전에는 「LLM 체인」 자리에 LLM 포트를 직접 부른다.
+- 050에서는 「LLM 체인」(`build_llm_chain`)을 거쳐 LLM 포트를 부르며, 사용량 누적 미들웨어가 응답을 받아 원장에 누적한다.
 - 정지 사유 확인 시점(before_llm 뒤, after_tool_calls 뒤)과 원장 기록 시점(assistant는 도구 실행 전, tool은 호출마다 즉시)은 지금과 같다.
 - 직전 토큰 추정값은 파사드가 소유한 `TokenEstimate` 객체를 커널이 제자리에서 갱신하여, 중간 예외로 중단되어도 즉시 반영을 보존한다.
 
@@ -173,7 +178,7 @@ sequenceDiagram
 | 020 | 계약 4모듈 위치, 구 경로는 재수출 | 클래스 객체 동일성(재수출은 같은 객체를 가리킴 → `isinstance`·`Enum` 비교 무변경), 기존 시험 import 경로 |
 | 030 | 루프 본문 위치, 포트 정의, 대화 규칙 모듈, `LLMError` 정의 위치 | `HermesAgent` 생성자·`run_conversation` 인자와 반환 키, 시험이 읽는 내부 속성, 원장 기록 순서, 정지 확인 시점 |
 | 040 | 기본 확장 목록 위치, `extensions` 인자 추가 | 기본 설치 순서(압축 → `LoopGuard`), `extensions` 등록 목록(`agent.extensions`)의 내용 |
-| 050 | 사용량 누적·호출 기록 코드 위치 | 원장 `llm_calls` 행과 세션 토큰 합계 값, 압축이 보는 직전 토큰 추정값 |
+| 050 | 사용량 누적 코드 위치, 호출 기록 연결 위치 | 원장 `llm_calls` 행과 세션 토큰 합계 값, 압축이 보는 직전 토큰 추정값 |
 
 - 어느 단계도 바꾸지 않는 것: 도구 구현(`tools/*_tool.py`, `file_tools.py`), 상태 DB 스키마(`SCHEMA_VERSION`), CLI 동작과 출력, 프롬프트 조립, 압축 알고리즘(`compression.py`·`context_budget.py`), 체크포인트·승인.
 
@@ -240,8 +245,9 @@ sequenceDiagram
 - 의존 방향 시험에 규칙 R5 추가: 기본 기능 확장 모듈(`FEATURE_EXTENSION_MODULES`)을 import하는 `src` 모듈은 오직 `hermes_core.assembly`뿐이다. 시나리오 11이 목록 누락을 방지한다.
 
 ### 6-5. 050 LLM 호출 단일 입구
-- `kernel/llm_pipeline.py`: `LLMMiddleware = Callable[[LLMRequest, Callable[[LLMRequest], LLMResponse]], LLMResponse]`, 등록 순서대로 감싸는 체인.
-- 첫 소비자(조립 지점이 등록): ① 세션 토큰 합계 누적(`update_token_counts`), ② 호출 기록(`record_llm_call`). ②는 현재 `OpenRouterClient`가 콜백으로 넘기는 기록 내용(지연 시간 등)을 쓰므로, 미들웨어로 옮길 수 있는 범위와 클라이언트에 남길 범위를 050 지시서에서 코드 대조 후 확정한다(**미확인**).
+- `kernel/llm_pipeline.py`: `LLMMiddleware = Callable[[LLMRequest, LLMNext], LLMReply]`, 등록 순서대로 감싸는 체인(`build_llm_chain`).
+- 첫 소비자(조립 지점이 등록): 세션 토큰 합계 누적(`usage_ledger_middleware`).
+- 호출 기록 연결: ADR D-08 보완(`852d5ea`)에 따라 어댑터 안의 기록 작성은 그대로 두고 연결만 조립 지점(`assembly.connect_call_recorder`)으로 옮긴다. 조건은 `kernel/ports.CallRecordable`.
 - 루프에 남는 것: 응답 `usage`로 직전 토큰 추정값 갱신(압축이 쓰는 턴 데이터).
 - `ExtensionHost`에 LLM 미들웨어 창구는 열지 않는다(ADR-0018 D-08).
 
