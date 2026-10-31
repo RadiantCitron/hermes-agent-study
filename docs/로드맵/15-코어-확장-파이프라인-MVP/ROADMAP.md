@@ -25,7 +25,7 @@ src/hermes_core/
     events.py             # 신규: AgentEvent, EventSink, ConsoleEventSink (010)
     turn_hooks.py         # 신규: TurnContext, HookRegistry, 훅 지점 이름 (030)
     compression_hook.py   # 신규: CompressionHook (압축 판정·실행·원장 반영) (030)
-    agent.py              # 변경: event_sink·hooks 주입, print → 이벤트, 압축 블록 → before_llm 호출 (010·030)
+    agent.py              # 변경: event_sink 인자·hooks 속성 추가, print → 이벤트, 압축 블록 → before_llm 호출 (010·030)
   tools/
     dispatcher.py         # 변경: ToolCall, add_middleware, 체인 호출 (020)
 tests/test_hermes_core/
@@ -145,7 +145,7 @@ sequenceDiagram
 
 | 대상 | 영향 | 근거 |
 |---|---|---|
-| `agent/agent.py` | `event_sink`·`hooks` 인자 추가, `print` 제거, 압축 블록(`378-468`)을 훅 호출로 교체 | 인자 기본값이 현재 동작을 재현한다(기본 sink는 같은 문자열을 `print`, 기본 레지스트리는 압축 훅을 담음). 기존 속성 `_last_input_tokens`·`_rejected_at_tokens`·`_last_message_count`는 읽기·쓰기 호환을 유지한다 |
+| `agent/agent.py` | `event_sink` 인자와 `hooks` 속성 추가, `print` 제거, 압축 블록(`378-468`)을 훅 호출로 교체 | 인자 기본값이 현재 동작을 재현한다(기본 sink는 같은 문자열을 `print`, 기본 레지스트리는 압축 훅을 담음). 기존 속성 `_last_input_tokens`·`_rejected_at_tokens`·`_last_message_count`는 읽기·쓰기 호환을 유지한다 |
 | `tools/dispatcher.py` | `add_middleware`와 체인 호출 추가 | 미들웨어 0개일 때 안쪽 실행이 현재 코드와 같은 순서(조회→검증→실행)와 같은 오류 JSON을 낸다 |
 | 신규 `events.py`·`turn_hooks.py`·`compression_hook.py` | 추가만 | 기존 모듈이 이들을 부르는 방향만 생긴다 |
 | `cli.py`·`session_db.py`·`llm_client.py`·`compression.py`·`context_budget.py`·각 도구 | 무변경 | 압축 알고리즘·장부·도구 로직은 호출 방식만 바뀌고 내용은 그대로다. `cli.py`는 `HermesAgent(...)` 기본값을 쓰므로 수정이 필요 없다(**미확인**: 010·030에서 `cli.py` 무수정 확인) |
@@ -200,7 +200,7 @@ sequenceDiagram
 - `run_conversation`은 `BEFORE_LLM` 지점에서 `run`을 부르고, 도구 실행이 끝난 뒤 `AFTER_TOOL_CALLS`를 부른다. 한 지점 실행 뒤 `ctx.stop_reason`이 있으면 반복을 끝내고 그 값을 `stopped_reason`으로 쓴다.
 - `compression_hook.py`의 `CompressionHook(agent)`가 현재 `agent.py:378-468`의 블록을 그대로 옮긴다: 판정(`should_compress`·`may_retry_after_reject`) → `compress_messages` → `archive_and_compact` 성공 시에만 `messages[:] = ...` → 토큰 추정 상태 초기화 → 사용량 반영. 호출 시점에 `agent`의 `llm_client`·`context_window_tokens`·`compression_threshold_ratio`·`compression_enabled`를 읽는다. 시도·성공·폴백 횟수는 `ctx.run_state["compression"]`에 쌓고, `run_conversation`이 마지막에 현재와 같은 형식으로 `result["compression"]`을 만든다.
 - 토큰 추정 상태(`_last_input_tokens`, `_last_message_count`, `_rejected_at_tokens`)는 에이전트가 계속 소유하며(루프의 usage 처리가 갱신), 훅이 읽고 갱신한다. 기존 시험이 직접 읽으므로 속성 이름과 의미를 바꾸지 않는다.
-- 기본 레지스트리: `HermesAgent`가 `hooks`를 받지 않으면 새 `HookRegistry`를 만들어 `compression_enabled`일 때 `CompressionHook`을 `BEFORE_LLM`에 등록한다.
+- 레지스트리 소유: `HermesAgent`는 생성자에서 `self.hooks = HookRegistry()`를 만들고 `CompressionHook(self)`를 `BEFORE_LLM`에 **먼저** 등록한다. 생성자 인자로 레지스트리를 받지 않는다(받으면 압축이 조용히 꺼지는 실수가 가능하다). 추가 훅은 `agent.hooks.register(point, hook)`로 붙이고, 압축을 쓸지는 훅이 호출 시점에 `agent.compression_enabled`를 읽어 판단한다(시험이 생성 후 속성을 바꾸므로).
 
 ### 6-4. 통합 검증과 확장 예시 (040)
 - 시험용 기능 하나(예: 도구 호출 횟수를 세고 N회가 넘으면 `request_stop("budget")`)를 훅·미들웨어·sink 세 장치로만 붙이고, `agent.py`·`dispatcher.py`를 수정하지 않았음을 `git diff` 기준으로 확인하는 시험(핵심 가정 B).
