@@ -32,6 +32,8 @@ class TurnContext:
     run_state: dict[str, Any] = field(default_factory=dict)
     stop_reason: Optional[str] = None
     scope: TurnScope = field(default=None)  # type: ignore[assignment]
+    last_input_tokens: Optional[int] = None
+    last_message_count: Optional[int] = None
     _live_messages: list[dict[str, Any]] = field(default_factory=list, repr=False)
     _replace_fn: Optional[Callable[..., None]] = field(default=None, repr=False)
 
@@ -79,13 +81,13 @@ class HookRegistry:
     """턴 라이프사이클 훅 등록 및 순차 실행 레지스트리."""
 
     def __init__(self) -> None:
-        self._hooks: dict[str, list[TurnHook]] = {point: [] for point in HOOK_POINTS}
+        self._hooks: dict[str, list[tuple[TurnHook, Optional[str]]]] = {point: [] for point in HOOK_POINTS}
 
-    def register(self, point: str, hook: TurnHook) -> None:
+    def register(self, point: str, hook: TurnHook, name: Optional[str] = None) -> None:
         """특정 지점에 훅 등록. 등록 순서대로 실행된다."""
         if point not in self._hooks:
             raise ValueError(f"Unknown hook point '{point}'. Must be one of {HOOK_POINTS}")
-        self._hooks[point].append(hook)
+        self._hooks[point].append((hook, name))
 
     def run(
         self,
@@ -99,7 +101,7 @@ class HookRegistry:
 
         live_source = ctx._live_messages if ctx._live_messages is not None else ctx.messages
 
-        for hook in self._hooks[point]:
+        for hook, name in self._hooks[point]:
             # 훅 호출 직전 대화 복사본 생성 및 비교용 복사본 보관
             ctx.messages = copy.deepcopy(live_source)
             comparison = copy.deepcopy(live_source)

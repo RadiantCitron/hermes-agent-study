@@ -20,7 +20,12 @@ from hermes_core.constants import (
     CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE,
     CHILD_TOOL_NAMES,
 )
-from hermes_core.extensions.contract import TurnScope
+from hermes_core.extensions.contract import (
+    FailurePolicy,
+    MiddlewarePhase,
+    PHASE_FAILURE_POLICY,
+    TurnScope,
+)
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
@@ -111,16 +116,24 @@ class ToolDispatcher:
     def __init__(self):
         self._handlers: dict[str, Callable[..., str]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}
-        self._middlewares: list[ToolMiddleware] = []
+        self._middlewares: list[tuple[MiddlewarePhase, int, str, ToolMiddleware]] = []
+        self._middleware_counter = 0
 
     def register_tool(self, name: str, handler: Callable[..., str], schema: dict[str, Any]) -> None:
         """새로운 도구 핸들러와 OpenAI 규격 스키마 등록."""
         self._handlers[name] = handler
         self._schemas[name] = schema
 
-    def add_middleware(self, middleware: ToolMiddleware) -> None:
-        """도구 실행 파이프라인 미들웨어 등록 (체인 끝에 추가, 먼저 등록한 것이 바깥쪽)."""
-        self._middlewares.append(middleware)
+    def add_middleware(
+        self,
+        middleware: ToolMiddleware,
+        phase: MiddlewarePhase = MiddlewarePhase.POLICY,
+        name: Optional[str] = None,
+    ) -> None:
+        """도구 실행 파이프라인 미들웨어 등록."""
+        mw_name = name or getattr(middleware, "__name__", type(middleware).__name__)
+        self._middlewares.append((phase, self._middleware_counter, mw_name, middleware))
+        self._middleware_counter += 1
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
         """LLM 호출 시 전달할 모든 등록된 도구의 OpenAI 함수 스키마 목록 반환."""
@@ -166,12 +179,64 @@ class ToolDispatcher:
 
     def dispatch(self, call: ToolCall) -> str:
         """단일 도구 실행 진입로. 미들웨어 체인을 거쳐 도구를 호출하고 결과를 문자열로 반환."""
+        # (phase.value, 등록순서)로 정렬
+        sorted_mws = sorted(self._middlewares, key=lambda item: (item[0].value, item[1]))
+
         def _make_chain(index: int) -> Callable[[ToolCall], str]:
-            if index >= len(self._middlewares):
+            if index >= len(sorted_mws):
                 return self._execute
-            mw = self._middlewares[index]
+
+            phase, _, name, mw = sorted_mws[index]
+            policy = PHASE_FAILURE_POLICY.get(phase, FailurePolicy.CLOSED)
             next_fn = _make_chain(index + 1)
-            return lambda c: mw(c, next_fn)
+
+            def _wrapped(c: ToolCall) -> str:
+                called_next = False
+                inner_result: Optional[str] = None
+                inner_exc: Optional[Exception] = None
+
+                def _instrumented_next(next_c: ToolCall) -> str:
+                    nonlocal called_next, inner_result, inner_exc
+                    called_next = True
+                    try:
+                        inner_result = next_fn(next_c)
+                        return inner_result
+                    except Exception as exc:
+                        inner_exc = exc
+                        raise
+
+                if policy == FailurePolicy.OPEN:
+                    try:
+                        return mw(c, _instrumented_next)
+                    except Exception as mw_exc:
+                        logger.warning(
+                            "GUARD middleware '%s' failed in phase %s: %s",
+                            name,
+                            phase.name,
+                            mw_exc,
+                        )
+                        if c.scope is not None:
+                            c.scope.report_extension_error(name, phase.name, mw_exc)
+
+                        if inner_exc is not None:
+                            # 안쪽 결과를 아직 받지 못한 채(안쪽이 예외) 던진 경우 안쪽 예외를 위로
+                            raise inner_exc
+                        if called_next:
+                            # 이미 불렀으면 안쪽 결과 그대로 반환 (도구 재실행 방지)
+                            assert inner_result is not None
+                            return inner_result
+                        # next를 아직 부르지 않았으면 next(c)를 불러 그 결과를 반환
+                        return next_fn(c)
+                else:
+                    # CLOSED 정책
+                    try:
+                        return mw(c, next_fn)
+                    except Exception as mw_exc:
+                        if c.scope is not None:
+                            c.scope.report_extension_error(name, phase.name, mw_exc)
+                        raise
+
+            return _wrapped
 
         chain = _make_chain(0)
         try:

@@ -380,10 +380,10 @@ def test_g5_compression_max_per_run_bound(tmp_path: Path):
     ctx = TurnContext(messages=_build_test_history(), tools_schema=None, iteration=1, session_id="s1")
     ctx.run_state["compression"] = {"attempts": 3, "count": 1, "fallback": 0}
 
-    # 압축 훅 직접 호출
-    from hermes_core.agent.compression_hook import CompressionHook
-    hook = CompressionHook(agent)
-    hook(ctx)
+    # 압축 확장 훅 직접 호출
+    from hermes_core.agent.compression_hook import CompressionExtension
+    ext = CompressionExtension(agent._compression_config)
+    ext._before_llm(ctx)
 
     # attempts가 3에서 더 증가하지 않음
     assert ctx.run_state["compression"]["attempts"] == 3

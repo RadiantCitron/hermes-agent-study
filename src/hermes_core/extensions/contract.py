@@ -7,8 +7,10 @@
 - 불변 원칙: 이 모듈은 표준 라이브러리만 import하며, hermes_core.agent나 hermes_core.tools를 참조하지 않는다.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from enum import Enum
+from typing import Any, Optional, Protocol, runtime_checkable
 
 RESERVED_RESULT_KEYS: frozenset[str] = frozenset({
     "final_response",
@@ -18,6 +20,62 @@ RESERVED_RESULT_KEYS: frozenset[str] = frozenset({
     "stopped_reason",
     "error",
 })
+
+
+class MiddlewarePhase(Enum):
+    """도구 미들웨어 실행 단계 (값이 작을수록 바깥)."""
+
+    GUARD = 1
+    POLICY = 2
+    TRANSACTION = 3
+
+
+class FailurePolicy(Enum):
+    """미들웨어 실패 정책."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+PHASE_FAILURE_POLICY: dict[MiddlewarePhase, FailurePolicy] = {
+    MiddlewarePhase.GUARD: FailurePolicy.OPEN,
+    MiddlewarePhase.POLICY: FailurePolicy.CLOSED,
+    MiddlewarePhase.TRANSACTION: FailurePolicy.CLOSED,
+}
+
+
+@runtime_checkable
+class ExtensionHost(Protocol):
+    """확장이 코어에 장치를 등록할 때 사용하는 좁은 호스트 인터페이스."""
+
+    def add_tool_middleware(self, phase: MiddlewarePhase, middleware: Callable[..., Any]) -> None:
+        ...
+
+    def add_turn_hook(self, point: str, hook: Callable[..., Any]) -> None:
+        ...
+
+    def emit(self, kind: str, **data: Any) -> None:
+        ...
+
+
+@runtime_checkable
+class Extension(Protocol):
+    """코어 확장 단위 프로토콜."""
+
+    name: str
+
+    def install(self, host: ExtensionHost) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class ExtensionRecord:
+    """등록된 확장의 읽기 전용 기록."""
+
+    name: str
+    kind: str  # "tool_middleware" | "turn_hook"
+    slot: str  # 단계 이름("GUARD" 등) 또는 훅 지점("before_llm" 등)
+    failures: int
 
 
 @dataclass
@@ -30,6 +88,12 @@ class TurnScope:
     turn_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
     session_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
     reports: dict[str, Any] = field(default_factory=dict)
+    on_extension_error: Optional[Callable[[str, str, Exception], None]] = None
+
+    def report_extension_error(self, name: str, slot: str, exc: Exception) -> None:
+        """확장 실행 중 오류를 보고한다."""
+        if self.on_extension_error is not None:
+            self.on_extension_error(name, slot, exc)
 
     def request_stop(self, reason: str) -> None:
         """턴 루프 중단을 요청한다. 먼저 요청된 이유가 유지된다."""

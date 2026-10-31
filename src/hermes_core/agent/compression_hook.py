@@ -1,11 +1,15 @@
-"""컨텍스트 자동 압축 턴 훅 (Compression Hook).
+"""컨텍스트 자동 압축 확장 (Compression Extension).
 
 [원본 레퍼런스 매핑]
 - 대응 원본: hermes-agent/run_agent.py (대화 압축 및 컨텍스트 축약 로직)
 - 역할: before_llm 훅 지점에서 현재 메시지 토큰을 추정하고 임계치를 초과했을 때
   중간 메시지들을 요약하여 압축하고 세션 DB 원장과 메모리 메시지 목록을 동기화한다.
+- 불변 원칙: 에이전트를 직접 참조하지 않으며, TurnScope/TurnContext 계약과
+  CompressionConfig 팩토리만을 통해 동작한다.
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
 import logging
 from typing import Any
 
@@ -21,7 +25,7 @@ from hermes_core.agent.context_budget import (
     may_retry_after_reject,
     should_compress,
 )
-from hermes_core.agent.turn_hooks import TurnContext
+from hermes_core.agent.turn_hooks import BEFORE_LLM, TurnContext
 from hermes_core.constants import (
     COMPRESSION_HEAD_MESSAGES,
     COMPRESSION_MAX_PER_RUN,
@@ -29,19 +33,36 @@ from hermes_core.constants import (
     SUMMARY_END_MARKER,
     SUMMARY_PREFIX,
 )
+from hermes_core.extensions.contract import ExtensionHost
 
 logger = logging.getLogger(__name__)
 
 
-class CompressionHook:
-    """before_llm 시점에 호출되어 필요 시 메시지 목록을 압축하는 훅."""
+@dataclass(frozen=True)
+class CompressionConfig:
+    """압축 실행에 필요한 설정 값 객체."""
 
-    def __init__(self, agent: Any) -> None:
-        self.agent = agent
+    enabled: bool
+    context_window_tokens: int
+    threshold_ratio: float
+    llm_client: Any
 
-    def __call__(self, ctx: TurnContext) -> None:
-        agent = self.agent
-        if not agent.compression_enabled:
+
+class CompressionExtension:
+    """before_llm 시점에 호출되어 필요 시 메시지 목록을 압축하는 코어 확장."""
+
+    name: str = "compression"
+
+    def __init__(self, config: Callable[[], CompressionConfig]) -> None:
+        self._config = config
+
+    def install(self, host: ExtensionHost) -> None:
+        """호스트에 before_llm 턴 훅 등록."""
+        host.add_turn_hook(BEFORE_LLM, self._before_llm)
+
+    def _before_llm(self, ctx: TurnContext) -> None:
+        cfg = self._config()
+        if not cfg.enabled:
             return
 
         run_state = ctx.run_state
@@ -60,18 +81,25 @@ class CompressionHook:
         schema_list = ctx.tools_schema
 
         threshold = compression_threshold(
-            agent.context_window_tokens,
-            agent.compression_threshold_ratio,
+            cfg.context_window_tokens,
+            cfg.threshold_ratio,
         )
+
+        last_input = ctx.last_input_tokens
+        last_count = ctx.last_message_count
+
         current_tokens = estimate_current_tokens(
             messages=messages,
-            last_input_tokens=agent._last_input_tokens,
-            last_message_count=agent._last_message_count,
+            last_input_tokens=last_input,
+            last_message_count=last_count,
             tools=schema_list,
         )
 
+        session_state = ctx.scope.session_state("compression")
+        rejected_at_tokens = session_state.get("rejected_at_tokens")
+
         if should_compress(current_tokens, threshold) and may_retry_after_reject(
-            current_tokens, agent._rejected_at_tokens
+            current_tokens, rejected_at_tokens
         ):
             comp_stats["attempts"] += 1
             tail_budget = compression_tail_budget(threshold)
@@ -90,7 +118,7 @@ class CompressionHook:
 
             comp_res = compress_messages(
                 messages,
-                agent.llm_client,
+                cfg.llm_client,
                 head_messages=COMPRESSION_HEAD_MESSAGES,
                 tail_tokens=tail_budget,
                 min_tail_messages=COMPRESSION_MIN_TAIL_MESSAGES,
@@ -119,7 +147,7 @@ class CompressionHook:
                         summary_index=summary_idx,
                         usage=comp_res.usage,
                     )
-                    agent._rejected_at_tokens = None
+                    session_state["rejected_at_tokens"] = None
                     comp_stats["count"] += 1
                     if comp_res.used_fallback:
                         comp_stats["fallback"] += 1
@@ -129,7 +157,7 @@ class CompressionHook:
                     )
                     logger.info(
                         "[Compression] Session %s compressed: %d -> %d tokens (fallback=%s)",
-                        agent.session_id,
+                        ctx.session_id,
                         comp_res.tokens_before,
                         comp_res.tokens_after,
                         comp_res.used_fallback,
@@ -141,4 +169,4 @@ class CompressionHook:
                     )
             else:
                 if can_split:
-                    agent._rejected_at_tokens = current_tokens
+                    session_state["rejected_at_tokens"] = current_tokens

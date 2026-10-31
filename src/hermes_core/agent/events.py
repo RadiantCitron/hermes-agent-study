@@ -12,6 +12,7 @@ from typing import Any
 
 EVENT_TOOL_CALL = "tool_call"
 EVENT_HOOK_ERROR = "hook_error"
+EVENT_EXTENSION_ERROR = "extension_error"
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from hermes_core.agent.agent import HermesAgent, MockLLMClient, MockLLMResponse
-from hermes_core.agent.compression_hook import CompressionHook
 from hermes_core.agent.turn_hooks import TurnContext
 from hermes_core.extensions.contract import RESERVED_RESULT_KEYS, TurnScope
 from hermes_core.session_db import SessionDB

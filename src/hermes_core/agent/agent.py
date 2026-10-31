@@ -19,8 +19,9 @@ import logging
 from typing import Any, Optional
 import uuid
 
-from hermes_core.agent.compression_hook import CompressionHook
+from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
 from hermes_core.agent.events import (
+    EVENT_EXTENSION_ERROR,
     EVENT_HOOK_ERROR,
     EVENT_TOOL_CALL,
     AgentEvent,
@@ -41,7 +42,13 @@ from hermes_core.agent.turn_hooks import (
     TurnContext,
     TurnHook,
 )
-from hermes_core.extensions.contract import TurnScope
+from hermes_core.extensions.contract import (
+    Extension,
+    ExtensionHost,
+    ExtensionRecord,
+    MiddlewarePhase,
+    TurnScope,
+)
 from hermes_core.constants import (
     COMPRESSION_THRESHOLD_RATIO,
     CONTEXT_WINDOW_TOKENS,
@@ -163,10 +170,9 @@ class HermesAgent:
         # 세션 범위 슬롯 (확장 기능 간 세션 내 상태 공유)
         self._session_slots: dict[str, dict[str, Any]] = {}
 
-        # 토큰 추정 및 압축 거부 추적 상태 (세션 간 미보존)
+        # 토큰 추정 상태 (세션 간 미보존)
         self._last_input_tokens: Optional[int] = None
         self._last_message_count: Optional[int] = None
-        self._rejected_at_tokens: Optional[int] = None
 
         # 의존성 주입 및 격리
         self.session_db = session_db or SessionDB()
@@ -223,9 +229,56 @@ class HermesAgent:
             )
             self._cached_system_prompt = None
 
-        # 턴 훅 레지스트리 초기화 및 기본 압축 훅 등록
+        # 턴 훅 레지스트리 및 확장 관리자 초기화
         self.hooks = HookRegistry()
-        self.hooks.register(BEFORE_LLM, CompressionHook(self))
+        self._installed_extensions: list[Extension] = []
+        self._extension_registrations: list[dict[str, Any]] = []
+        self._extension_failures: dict[str, int] = {}
+        self._hook_to_extension: dict[int, str] = {}
+
+        # 기본 압축 확장 설치
+        self.install_extension(CompressionExtension(self._compression_config))
+
+    @property
+    def _rejected_at_tokens(self) -> Optional[int]:
+        """압축 확장과의 하위 호환성을 위한 읽기 전용 프로퍼티."""
+        return self._session_slots.get("compression", {}).get("rejected_at_tokens")
+
+    def _compression_config(self) -> CompressionConfig:
+        """현재 에이전트 상태 기반 CompressionConfig 생성."""
+        return CompressionConfig(
+            enabled=self.compression_enabled,
+            context_window_tokens=self.context_window_tokens,
+            threshold_ratio=self.compression_threshold_ratio,
+            llm_client=self.llm_client,
+        )
+
+    def install_extension(self, ext: Extension) -> None:
+        """코어 확장 설치 (중복 이름 시 ValueError)."""
+        if any(e.name == ext.name for e in self._installed_extensions):
+            raise ValueError(f"Extension '{ext.name}' is already installed.")
+
+        self._installed_extensions.append(ext)
+        host = _ExtensionHost(self, ext.name)
+        ext.install(host)
+
+    @property
+    def extensions(self) -> tuple[ExtensionRecord, ...]:
+        """설치된 확장의 읽기 전용 레코드 목록."""
+        records = []
+        for reg in self._extension_registrations:
+            name = reg["name"]
+            kind = reg["kind"]
+            slot = reg["slot"]
+            failures = self._extension_failures.get(name, 0)
+            records.append(ExtensionRecord(name=name, kind=kind, slot=slot, failures=failures))
+        return tuple(records)
+
+    def _on_extension_error(self, name: str, slot: str, exc: Exception) -> None:
+        """확장 실패 처리 및 집계."""
+        self._extension_failures[name] = self._extension_failures.get(name, 0) + 1
+        logger.warning("Extension '%s' failed at slot '%s': %s", name, slot, exc)
+        self._emit(EVENT_EXTENSION_ERROR, name=name, slot=slot, error=str(exc))
 
     def _resolve_skills_index_block(self, tool_names: Collection[str]) -> str:
         """스킬 인덱스 블록을 1회 렌더링하여 보관하고 반환 (세션 중 불변 고정).
@@ -318,6 +371,11 @@ class HermesAgent:
         hook_name = getattr(hook, "__name__", None) or getattr(type(hook), "__name__", str(hook))
         logger.warning("Hook '%s' at '%s' failed: %s", hook_name, point, exc)
         self._emit(EVENT_HOOK_ERROR, point=point, hook=hook_name, error=str(exc))
+
+        # 만약 확장에서 등록된 훅이라면 확장 실패도 함께 집계
+        ext_name = self._hook_to_extension.get(id(hook))
+        if ext_name:
+            self._on_extension_error(ext_name, point, exc)
 
     def _replace_transcript(
         self,
@@ -436,6 +494,7 @@ class HermesAgent:
         scope = TurnScope(
             session_id=self.session_id,
             session_slots=self._session_slots,
+            on_extension_error=self._on_extension_error,
         )
         ctx = TurnContext(
             messages=messages,
@@ -443,6 +502,8 @@ class HermesAgent:
             iteration=0,
             session_id=self.session_id,
             scope=scope,
+            last_input_tokens=self._last_input_tokens,
+            last_message_count=self._last_message_count,
             _live_messages=messages,
             _replace_fn=lambda new_msgs, summary_index=None, usage=None: self._replace_transcript(
                 messages, new_msgs, summary_index=summary_index, usage=usage
@@ -458,6 +519,8 @@ class HermesAgent:
             ctx.iteration = iterations
             scope.iteration = iterations
             ctx.tools_schema = schema_list
+            ctx.last_input_tokens = self._last_input_tokens
+            ctx.last_message_count = self._last_message_count
 
             self.hooks.run(BEFORE_LLM, ctx, on_error=self._on_hook_error)
             if ctx.stop_reason is not None:
@@ -539,6 +602,46 @@ class HermesAgent:
         result.update(scope.reports)
 
         return result
+
+
+class _ExtensionHost:
+    """ExtensionHost 프로토콜을 구현하는 에이전트 비공개 클래스."""
+
+    def __init__(self, agent: "HermesAgent", extension_name: str) -> None:
+        self._agent = agent
+        self._extension_name = extension_name
+
+    def add_tool_middleware(
+        self,
+        phase: MiddlewarePhase,
+        middleware: Callable[..., Any],
+    ) -> None:
+        self._agent.dispatcher.add_middleware(
+            middleware,
+            phase=phase,
+            name=self._extension_name,
+        )
+        self._agent._extension_registrations.append({
+            "name": self._extension_name,
+            "kind": "tool_middleware",
+            "slot": phase.name,
+        })
+
+    def add_turn_hook(
+        self,
+        point: str,
+        hook: Callable[..., Any],
+    ) -> None:
+        self._agent.hooks.register(point, hook, name=self._extension_name)
+        self._agent._hook_to_extension[id(hook)] = self._extension_name
+        self._agent._extension_registrations.append({
+            "name": self._extension_name,
+            "kind": "turn_hook",
+            "slot": point,
+        })
+
+    def emit(self, kind: str, **data: Any) -> None:
+        self._agent._emit(kind, **data)
 
 
 # 원본 인터페이스 호환을 위한 클래스 별칭

@@ -247,10 +247,10 @@ def test_scenario_e5_session_resume_registers_compression_hook(tmp_path: Path):
     client2 = MockLLMClient([MockLLMResponse(content="turn 2 finished")])
     agent2 = HermesAgent(session_id=sid, session_db=db, llm_client=client2, resume=True, quiet_mode=True)
 
-    # 압축 훅 등록 여부 확인
-    assert len(agent2.hooks._hooks[BEFORE_LLM]) >= 1
-    first_hook = agent2.hooks._hooks[BEFORE_LLM][0]
-    assert type(first_hook).__name__ == "CompressionHook"
+    # 압축 확장 등록 여부 확인
+    assert len(agent2.extensions) >= 1
+    assert agent2.extensions[0].name == "compression"
+    assert agent2.extensions[0].slot == "before_llm"
 
     # 대화 재개 실행
     conv_history = agent2.load_conversation_history()
