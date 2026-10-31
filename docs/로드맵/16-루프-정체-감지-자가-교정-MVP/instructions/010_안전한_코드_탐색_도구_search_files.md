@@ -1,8 +1,8 @@
 # [구현지시서 010] 안전한 코드 탐색 도구 (`search_files`) 구현 및 경로 가드·디스패처·프롬프트 배선
 
-> **상위 대시보드**: [15-README.md](../README.md)  
-> **선행 조건**: 없음(15의 첫 단계). 14 `Closed`.  
-> **근거**: [ADR-0015](../../../adr/0015-코드_탐색_및_루프_정체_감지_MVP_범위와_결정.md) §2-2·§2-3·§2-4·§2-5, [ROADMAP.md](../ROADMAP.md) §2·§4(위험 2·3·4)·§6-1, [WHY.md](../WHY.md) 가정 A·B·C
+> **상위 대시보드**: [16-README.md](../README.md)  
+> **선행 조건**: 없음(16의 첫 단계). 14 `Closed`.  
+> **근거**: [ADR-0016](../../../adr/0016-코드_탐색_및_루프_정체_감지_MVP_범위와_결정.md) §2-2·§2-3·§2-4·§2-5, [ROADMAP.md](../ROADMAP.md) §2·§4(위험 2·3·4)·§6-1, [WHY.md](../WHY.md) 가정 A·B·C
 
 ---
 
@@ -26,7 +26,7 @@
    ```
 2. 파일 도구 제한 상수 구역(`FILE_MAX_BYTES` 바로 아래)에 탐색 제한 상수 3종을 추가한다:
    ```python
-   # 파일·내용 탐색 도구(search_files) 제한 상수 (15 로드맵)
+   # 파일·내용 탐색 도구(search_files) 제한 상수 (16 로드맵)
    SEARCH_MAX_MATCHES = 50
    SEARCH_MAX_LINE_CHARS = 200
    SEARCH_MAX_FILES_SCANNED = 5000
@@ -202,7 +202,7 @@ def is_hermes_home_path(target_path: Path, workspace: Path) -> bool:
 - `src/hermes_core/tools/dispatcher.py`
 - `src/hermes_core/agent/prompt_builder.py`
 - `tests/test_hermes_core/test_search_files.py` (신규): 아래 시나리오 1~15
-- `docs/로드맵/15-루프-정체-감지-자가-교정-MVP/README.md`: 010 상태와 실행 기록
+- `docs/로드맵/16-루프-정체-감지-자가-교정-MVP/README.md`: 010 상태와 실행 기록
 
 ---
 

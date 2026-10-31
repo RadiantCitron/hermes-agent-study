@@ -1,8 +1,8 @@
-# [마스터 설계도] 15-코드 탐색(`search_files`) 및 루프 정체 감지(`LoopGuard`) MVP
+# [마스터 설계도] 16-코드 탐색(`search_files`) 및 루프 정체 감지(`LoopGuard`) MVP
 
 > **상태**: `Draft`  
 > **대시보드**: [README.md](README.md)  
-> **의도(Why)**: [WHY.md](WHY.md) · **승인된 계획**: [PLAN.md](PLAN.md) · **근거 결정**: [ADR-0015](../../adr/0015-코드_탐색_및_루프_정체_감지_MVP_범위와_결정.md)  
+> **의도(Why)**: [WHY.md](WHY.md) · **승인된 계획**: [PLAN.md](PLAN.md) · **근거 결정**: [ADR-0016](../../adr/0016-코드_탐색_및_루프_정체_감지_MVP_범위와_결정.md)  
 > **기준 코드**: `main` `3dcad60` (14 `Closed`, `roadmap-14-closed`)
 
 ---
