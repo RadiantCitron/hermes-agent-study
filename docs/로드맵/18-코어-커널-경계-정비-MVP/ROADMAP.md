@@ -36,8 +36,9 @@ src/hermes_core/
     transcript.py          # 신규 (030) 대화 불변식 한 곳(시스템 메시지 불변·도구 결과 메시지·인자 해석)
     loop.py                # 신규 (030) 턴 루프 run_turn
     llm_pipeline.py        # 신규 (050) LLM 미들웨어 체인
-  assembly.py              # 신규 (040) default_extensions, (050) 기본 LLM 미들웨어
+  assembly.py              # 신규 (040) default_extensions·compression_config_of, (050) 기본 LLM 미들웨어
   extensions/contract.py   # 변경 (020) 재수출만 남김 (호환 층 목록)
+  agent/__init__.py        # 변경 (040) 지연 import (PEP 562)
   agent/turn_hooks.py      # 변경 (020) 재수출만 남김 (호환 층 목록)
   agent/events.py          # 변경 (020) 코어 이름 재수출 + EVENT_LOOP_GUARD·ConsoleEventSink 유지
   agent/agent.py           # 변경 (010 import 1줄, 030 루프 위임, 040 확장 조립 위임, 050 사용량 코드 제거)
@@ -231,9 +232,12 @@ sequenceDiagram
 - `tests/test_kernel/`: 메모리 안 목록 기반 가짜 포트. 시나리오(정상 종료, 최대 횟수, LLM 오류, before_llm 정지, 배치 중 정지 요청과 도구 쌍, 훅 예외 격리, 훅의 대화 직접 변조 감지, 대화 교체 원장 실패 시 메모리 불변, 결과 예약 키 보호 등)는 030 지시서에 구현 전에 적는다.
 
 ### 6-4. 040 기본 확장 조립 분리
-- `assembly.py`의 `default_extensions(compression_config)`이 `[CompressionExtension(...), LoopGuardExtension()]`를 돌려준다.
-- `HermesAgent.__init__(..., extensions=None)`: `None`이면 `default_extensions(self._compression_config)`, 목록이면 그 목록을 순서대로 설치.
-- 결과: `agent.py`는 `CompressionExtension`·`LoopGuardExtension`을 import하지 않는다. 의존 방향 시험에 「`agent/agent.py`는 기능 확장 모듈을 import하지 않는다」 규칙을 추가할지는 040 지시서에서 정한다.
+- `assembly.py`의 `default_extensions(compression_config: Callable[[], CompressionConfig])`이 `[CompressionExtension(...), LoopGuardExtension()]`를 매번 새 인스턴스로 돌려준다.
+- `compression_config_of(agent)`가 에이전트로부터 호출 시점의 압축 설정을 생성한다.
+- `HermesAgent.__init__(..., extensions=None)`: 생성자 시작 시 중복 이름 선검사를 수행하여 부수 효과 전에 차단한다. `None`이면 `default_extensions(self._compression_config)`, 목록이면 그 목록을 순서대로 설치.
+- `agent/__init__.py`: 패키지 지연 import(PEP 562)를 적용하여 순환 import를 원천 차단한다.
+- 결과: `agent.py`는 `CompressionExtension`·`LoopGuardExtension`·`CompressionConfig`를 일체 import하지 않는다.
+- 의존 방향 시험에 규칙 R5 추가: 기본 기능 확장 모듈(`FEATURE_EXTENSION_MODULES`)을 import하는 `src` 모듈은 오직 `hermes_core.assembly`뿐이다. 시나리오 11이 목록 누락을 방지한다.
 
 ### 6-5. 050 LLM 호출 단일 입구
 - `kernel/llm_pipeline.py`: `LLMMiddleware = Callable[[LLMRequest, Callable[[LLMRequest], LLMResponse]], LLMResponse]`, 등록 순서대로 감싸는 체인.

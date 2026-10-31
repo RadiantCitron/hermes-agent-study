@@ -77,10 +77,10 @@ def skills_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_scenario_01_signature_inspection():
     """시나리오 1: HermesAgent.__init__ 및 build_system_prompt의 매개변수 위치 및 기본값."""
     sig_agent = inspect.signature(HermesAgent.__init__)
-    params_agent = list(sig_agent.parameters.values())
-    last_agent_param = params_agent[-1]
-    assert last_agent_param.name == "skills_index"
-    assert last_agent_param.default is False
+    assert "skills_index" in sig_agent.parameters
+    skills_index_param = sig_agent.parameters["skills_index"]
+    assert skills_index_param.name == "skills_index"
+    assert skills_index_param.default is False
 
     sig_bsp = inspect.signature(build_system_prompt)
     params_bsp = list(sig_bsp.parameters.values())

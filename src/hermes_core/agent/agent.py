@@ -1,16 +1,16 @@
 """AI 에이전트 핵심 루프 및 파사드 (Hermes Agent Facade).
 
 시스템 프롬프트 조립 및 의존성 주입을 담당하며, 실제 대화 턴 실행은 hermes_core.kernel.loop.run_turn에 위임한다.
+기본 확장 목록은 hermes_core.assembly가 정한다.
 """
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 import logging
 from typing import Any, Optional
 import uuid
 
-from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
-from hermes_core.agent.loop_guard import LoopGuardExtension
+from hermes_core.assembly import compression_config_of, default_extensions
 from hermes_core.agent.events import ConsoleEventSink
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
@@ -88,7 +88,10 @@ class MockLLMClient:
 # =============================================================================
 
 class HermesAgent:
-    """Hermes AI 에이전트 턴 오케스트레이터 클래스."""
+    """Hermes AI 에이전트 턴 오케스트레이터 클래스.
+    
+    기본 확장 목록은 hermes_core.assembly가 정한다.
+    """
 
     def __init__(
         self,
@@ -111,7 +114,18 @@ class HermesAgent:
         resume: bool = False,
         event_sink: Optional[EventSink] = None,
         skills_index: bool = False,
+        extensions: Optional[Iterable[Extension]] = None,
     ):
+        target_extensions: list[Extension]
+        if extensions is not None:
+            target_extensions = list(extensions)
+            seen_names: set[str] = set()
+            for ext in target_extensions:
+                if ext.name in seen_names:
+                    raise ValueError(f"Duplicate extension name '{ext.name}' in extensions.")
+                seen_names.add(ext.name)
+        else:
+            target_extensions = default_extensions(self._compression_config)
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
         self.max_iterations = max_iterations
@@ -203,9 +217,9 @@ class HermesAgent:
         self._extension_failures: dict[str, int] = {}
         self._hook_to_extension: dict[int, str] = {}
 
-        # 기본 압축 확장 설치
-        self.install_extension(CompressionExtension(self._compression_config))
-        self.install_extension(LoopGuardExtension())
+        # 확장 설치
+        for ext in target_extensions:
+            self.install_extension(ext)
 
     @property
     def _last_input_tokens(self) -> Optional[int]:
@@ -228,14 +242,9 @@ class HermesAgent:
         """압축 확장과의 하위 호환성을 위한 읽기 전용 프로퍼티."""
         return self._session_slots.get("compression", {}).get("rejected_at_tokens")
 
-    def _compression_config(self) -> CompressionConfig:
-        """현재 에이전트 상태 기반 CompressionConfig 생성."""
-        return CompressionConfig(
-            enabled=self.compression_enabled,
-            context_window_tokens=self.context_window_tokens,
-            threshold_ratio=self.compression_threshold_ratio,
-            llm_client=self.llm_client,
-        )
+    def _compression_config(self) -> Any:
+        """현재 에이전트 상태 기반 압축 설정 생성 (시험 호환 유지)."""
+        return compression_config_of(self)
 
     def install_extension(self, ext: Extension) -> None:
         """코어 확장 설치 (중복 이름 시 ValueError)."""

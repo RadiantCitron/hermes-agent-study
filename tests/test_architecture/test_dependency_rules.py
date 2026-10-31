@@ -39,6 +39,13 @@ KNOWN_DEBT: dict[tuple[str, str, str], tuple[str, str]] = {
     ): ("위임 도구가 자식 시스템 프롬프트 조립 함수 참조", "19번 이후: 자식 생성 팩토리 주입(16 대시보드 §6-2)"),
 }
 
+# 기본 기능 확장 모듈. 이 모듈을 import하는 src 모듈은 조립 지점 hermes_core.assembly뿐이다.
+# 새 기능 확장을 만들면 여기에 더한다 — 시나리오 11이 빠뜨림을 잡는다.
+FEATURE_EXTENSION_MODULES: tuple[str, ...] = (
+    "hermes_core.agent.compression_hook",
+    "hermes_core.agent.loop_guard",
+)
+
 
 def _resolve_relative_import(importer_mod: str, rel_module: str | None, level: int, is_package: bool) -> str:
     parts = importer_mod.split(".")
@@ -86,7 +93,7 @@ def _is_stdlib(module_root: str) -> bool:
 
 
 def find_violations(imports: dict[str, set[str]]) -> set[tuple[str, str, str]]:
-    """의존 방향 규칙(R1~R4)을 대조하여 위반 목록을 반환한다."""
+    """의존 방향 규칙(R1~R5)을 대조하여 위반 목록을 반환한다."""
     violations: set[tuple[str, str, str]] = set()
 
     for importer, targets in imports.items():
@@ -128,6 +135,13 @@ def find_violations(imports: dict[str, set[str]]) -> set[tuple[str, str, str]]:
                 target_is_stdlib = _is_stdlib(root_pkg)
                 if not (target_is_stdlib or target_is_kernel):
                     violations.add((importer, target, "R4"))
+
+            # R5: 대상이 FEATURE_EXTENSION_MODULES의 한 모듈과 같거나 모듈 + "."으로 시작하고 importer가 hermes_core.assembly가 아니면 위반
+            for feat_mod in FEATURE_EXTENSION_MODULES:
+                if target == feat_mod or target.startswith(f"{feat_mod}."):
+                    if importer != "hermes_core.assembly":
+                        violations.add((importer, target, "R5"))
+                    break
 
     return violations
 
@@ -228,8 +242,32 @@ def test_scenario_8_ratchet_debt_comparison():
     assert compare_with_debt({a}, {a}) == (set(), set())
 
 
+def test_scenario_9_r5_feature_extension_modules():
+    """시나리오 9: R5 규칙 판정 단위 검증."""
+    # (a) agent.agent가 loop_guard를 직접 import -> 위반
+    v_a = find_violations({"hermes_core.agent.agent": {"hermes_core.agent.loop_guard"}})
+    assert v_a == {("hermes_core.agent.agent", "hermes_core.agent.loop_guard", "R5")}
+
+    # (b) assembly가 compression_hook import -> 허용 (위반 없음)
+    v_b = find_violations({
+        "hermes_core.assembly": {
+            "hermes_core.agent.compression_hook",
+            "hermes_core.agent.compression_hook.CompressionExtension",
+        }
+    })
+    assert v_b == set()
+
+    # (c) cli가 loop_guard import -> 위반
+    v_c = find_violations({"hermes_core.cli": {"hermes_core.agent.loop_guard.LoopGuardExtension"}})
+    assert v_c == {("hermes_core.cli", "hermes_core.agent.loop_guard.LoopGuardExtension", "R5")}
+
+    # (d) 접두사만 유사한 다른 모듈 -> 해당 없음
+    v_d = find_violations({"hermes_core.x": {"hermes_core.agent.loop_guard_extra"}})
+    assert v_d == set()
+
+
 def test_scenario_9_actual_tree_scanner_smoke():
-    """시나리오 9: 실제 소스 트리 스캐너 동작 확인."""
+    """시나리오 9(기존 번호 보존): 실제 소스 트리 스캐너 동작 확인."""
     root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
     all_imports = scan_source_tree(root)
 
@@ -258,8 +296,55 @@ def test_scenario_10_actual_tree_ratchet_enforcement():
 
     error_messages = []
     if new_violations:
-        error_messages.append(f"새로운 의존 방향 위반 발견 (R1~R4): {sorted(new_violations)}")
+        error_messages.append(f"새로운 의존 방향 위반 발견 (R1~R5): {sorted(new_violations)}")
     if stale_debt:
         error_messages.append(f"갚은 부채를 KNOWN_DEBT에서 지워라: {sorted(stale_debt)}")
 
     assert not error_messages, " / ".join(error_messages)
+
+    # 040 추가 확인: hermes_core.agent.agent의 대상에 기능 확장 모듈이 없고 hermes_core.assembly가 있다
+    agent_targets = all_imports.get("hermes_core.agent.agent", set())
+    assert not any(
+        t == "hermes_core.agent.compression_hook"
+        or t.startswith("hermes_core.agent.compression_hook.")
+        or t == "hermes_core.agent.loop_guard"
+        or t.startswith("hermes_core.agent.loop_guard.")
+        for t in agent_targets
+    ), f"agent.py still imports feature extensions: {agent_targets}"
+    assert any(
+        t == "hermes_core.assembly" or t.startswith("hermes_core.assembly.")
+        for t in agent_targets
+    ), f"agent.py missing hermes_core.assembly: {agent_targets}"
+
+
+def test_scenario_11_feature_extension_modules_completeness():
+    """시나리오 11: FEATURE_EXTENSION_MODULES 빠뜨림 방지 검증."""
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    discovered_modules: set[str] = set()
+
+    for py_file in root.rglob("*.py"):
+        rel = py_file.relative_to(root)
+        parts = list(rel.with_suffix("").parts)
+        # kernel/ 내부는 제외
+        if parts and parts[0] == "kernel":
+            continue
+
+        is_pkg = parts[-1] == "__init__"
+        if is_pkg:
+            parts = parts[:-1]
+        mod_name = ".".join(["hermes_core"] + parts) if parts else "hermes_core"
+
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "install":
+                        discovered_modules.add(mod_name)
+                        break
+
+    expected_modules = set(FEATURE_EXTENSION_MODULES)
+    assert discovered_modules == expected_modules, (
+        f"FEATURE_EXTENSION_MODULES mismatch. Discovered - Expected: {discovered_modules - expected_modules}, "
+        f"Expected - Discovered: {expected_modules - discovered_modules}"
+    )
