@@ -17,7 +17,16 @@ import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
 from hermes_core.assembly import apply_runtime_settings, create_agent
-from hermes_core.control import ControlPanel, SettingsError, load_settings
+from hermes_core.control import (
+    ControlPanel,
+    DisableExtension,
+    EnableExtension,
+    SetSetting,
+    SettingsError,
+    load_settings,
+    parse_setting_string,
+    render_snapshot,
+)
 from hermes_core.cli_input import (
     hold_typeahead,
     is_interactive_terminal,
@@ -31,6 +40,12 @@ from hermes_core.constants import (
     CLI_CHECKPOINT_DISABLED_NOTICE,
     CLI_CHECKPOINT_ENABLED_NOTICE,
     CLI_CHECKPOINT_REFUSED_NOTICE,
+    CLI_CTL_DISABLE_ACCEPTED,
+    CLI_CTL_ENABLE_ACCEPTED,
+    CLI_CTL_REJECTED,
+    CLI_CTL_SET_ACCEPTED,
+    CLI_CTL_UNKNOWN_SUBCOMMAND,
+    CLI_CTL_USAGE_NOTICE,
     CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_MULTILINE_HINT,
     CLI_RESUME_AMBIGUOUS_ERROR,
@@ -199,6 +214,80 @@ def _handle_rollback(
     except Exception as e:
         print(CLI_ROLLBACK_ERROR_NOTICE.format(reason=str(e)))
         return None
+
+
+def _handle_ctl(tokens: list[str], panel: ControlPanel) -> None:
+    """REPL의 /ctl 제어판 명령을 처리한다.
+
+    하위 명령:
+      - /ctl status: 현재 상태 스냅샷 출력
+      - /ctl set <key> <value>: 런타임 설정 변경 대기열 적재
+      - /ctl enable <ext>: 확장 활성화 대기열 적재
+      - /ctl disable <ext>: 확장 비활성화 대기열 적재
+    """
+    if len(tokens) < 2:
+        print(CLI_CTL_USAGE_NOTICE)
+        return
+
+    subcmd = tokens[1].lower()
+
+    if subcmd == "status":
+        if len(tokens) != 2:
+            print(CLI_CTL_USAGE_NOTICE)
+            return
+        snapshot = panel.snapshot()
+        print(render_snapshot(snapshot))
+        return
+
+    if subcmd == "set":
+        if len(tokens) != 4:
+            print(CLI_CTL_USAGE_NOTICE)
+            return
+        key = tokens[2]
+        raw_val = tokens[3]
+        try:
+            typed_val = parse_setting_string(key, raw_val)
+        except ValueError:
+            typed_val = raw_val
+        cmd = SetSetting(key, typed_val)
+        result = panel.submit(cmd, source="cli")
+        if result.accepted:
+            print(CLI_CTL_SET_ACCEPTED.format(key=key, value=typed_val))
+        else:
+            reason = result.rejection.message if result.rejection else "Rejected"
+            print(CLI_CTL_REJECTED.format(command=f"set {key}", reason=reason))
+        return
+
+    if subcmd == "enable":
+        if len(tokens) != 3:
+            print(CLI_CTL_USAGE_NOTICE)
+            return
+        ext_name = tokens[2]
+        cmd = EnableExtension(ext_name)
+        result = panel.submit(cmd, source="cli")
+        if result.accepted:
+            print(CLI_CTL_ENABLE_ACCEPTED.format(name=ext_name))
+        else:
+            reason = result.rejection.message if result.rejection else "Rejected"
+            print(CLI_CTL_REJECTED.format(command=f"enable {ext_name}", reason=reason))
+        return
+
+    if subcmd == "disable":
+        if len(tokens) != 3:
+            print(CLI_CTL_USAGE_NOTICE)
+            return
+        ext_name = tokens[2]
+        cmd = DisableExtension(ext_name)
+        result = panel.submit(cmd, source="cli")
+        if result.accepted:
+            print(CLI_CTL_DISABLE_ACCEPTED.format(name=ext_name))
+        else:
+            reason = result.rejection.message if result.rejection else "Rejected"
+            print(CLI_CTL_REJECTED.format(command=f"disable {ext_name}", reason=reason))
+        return
+
+    print(CLI_CTL_UNKNOWN_SUBCOMMAND.format(subcommand=tokens[1]))
+
 
 
 def main() -> None:
@@ -481,6 +570,10 @@ def main() -> None:
                 rollback_res = _handle_rollback(tokens, checkpointer)
                 if rollback_res is not None:
                     pending_notices.append(rollback_res)
+                continue
+
+            if tokens and tokens[0].lower() == "/ctl":
+                _handle_ctl(tokens, panel)
                 continue
 
             panel.apply_pending()

@@ -275,6 +275,27 @@ CLI_ROLLBACK_ERROR_NOTICE = (
     "Rollback failed ({reason}). Some files may already have been restored; check the working directory."
 )
 
+# -----------------------------------------------------------------------------
+# CLI /ctl (Control Panel) 메시지 상수 (19번 로드맵)
+# -----------------------------------------------------------------------------
+CLI_CTL_USAGE_NOTICE = (
+    "Usage: /ctl <status|set <key> <value>|enable <extension>|disable <extension>>"
+)
+CLI_CTL_UNKNOWN_SUBCOMMAND = (
+    "Unknown /ctl command '{subcommand}'. Usage: /ctl <status|set <key> <value>|enable <extension>|disable <extension>>"
+)
+CLI_CTL_SET_ACCEPTED = (
+    "Setting '{key}' queued to change to {value} (will apply on next turn)."
+)
+CLI_CTL_ENABLE_ACCEPTED = (
+    "Extension '{name}' queued to enable (will apply on next turn)."
+)
+CLI_CTL_DISABLE_ACCEPTED = (
+    "Extension '{name}' queued to disable (will apply on next turn)."
+)
+CLI_CTL_REJECTED = "Command '{command}' rejected ({reason})."
+
+
 # 턴 취소 화면 안내 상수 (13 로드맵)
 CLI_TURN_CANCELLED_NOTICE = (
     "Request cancelled. It was dropped from the conversation; the session continues."
