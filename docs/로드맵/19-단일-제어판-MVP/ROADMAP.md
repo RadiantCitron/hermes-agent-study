@@ -148,7 +148,7 @@ stateDiagram-v2
 | 010 | `control/settings.py` 신설, `assembly.create_agent`, `cli.py`의 에이전트 생성 경로, argparse 기본값(「주지 않음」을 알기 위해 `None`) | `HermesAgent.__init__`(시그니처·기본값), 설정이 없을 때의 값(가정 A), `--context-window` 오류 시 종료 코드 2와 DB 미생성(`test_cli.py` 시나리오 25), `--help` 출력의 옵션 이름 |
 | 020 | `control/snapshot.py` 신설 | 에이전트·장부 상태(읽기만) |
 | 030 | `agent.py`의 `_ExtensionHost` 두 등록 메서드(게이트로 감쌈), 새 공개 메서드 3개, `agent/events.py` 이벤트 1개 | 커널 전체, `tools/dispatcher.py`, `ExtensionRecord`, `agent.extensions`의 내용, 라이브러리 기본 동작(차단기 꺼짐), 훅 오류 이벤트의 `hook` 이름(게이트는 `functools.wraps`로 이름 보존) |
-| 040 | `session_db.py`(v7, 표 1개, 메서드 2개), `control/commands.py`·`panel.py`, `assembly.apply_runtime_settings`, 차단 시 감사 기록 | 기존 표 6개의 열, 기존 이전 경로(v2~v6), 스키마 단언 시험(모두 `>=` 비교라 영향 없음: `test_approval_ledger.py`·`test_agent_e2e.py`) |
+| 040 | `session_db.py`(v7, 표 1개, 메서드 2개), `control/commands.py`·`panel.py`, `assembly.apply_runtime_settings`, 차단 시 감사 기록, `test_checkpoint_ledger.py` 3줄(`== 6` → `>= 6`, 11-010 선례) | 기존 표 6개의 열, 기존 이전 경로(v2~v6), 나머지 스키마 단언 시험(`test_approval_ledger.py`·`test_agent_e2e.py`·`test_session_db.py`는 모두 `>=` 비교) |
 | 050 | `cli.py`의 입력 분기에 `/ctl` 추가 | `/rollback`·`exit/quit` 분기, 턴 실행 경로 |
 
 - 어느 단계도 바꾸지 않는 것: `kernel/`, `tools/`(디스패처 포함), 프롬프트 조립, 압축 알고리즘, 체크포인트·승인 로직(값은 Settings에서 오지만 동작은 그대로), `constants.py`의 기존 이름.
