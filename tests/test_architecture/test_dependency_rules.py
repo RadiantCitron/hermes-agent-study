@@ -528,6 +528,8 @@ PURE_DOMAIN_MODULES: tuple[str, ...] = (
     "hermes_core.agent.context_budget",
     "hermes_core.tools.checkpoint_domain",
     "hermes_core.tools.path_guard",
+    "hermes_core.ledger_domain",
+    "hermes_core.tools.file_domain",
 )
 
 FORBIDDEN_INFRA_MODULES: tuple[str, ...] = (
@@ -554,27 +556,75 @@ def _check_domain_purity_violations(
 
 
 def test_scenario_r20_pure_domain_modules_have_no_infra_imports() -> None:
-    """시나리오 R20-3: 순수 도메인 모듈 4종의 인프라(DB/네트워크/CLI) 무의존성 검증."""
-    # 1. 합성 위반 자체 검증 (Self-Check)
+    """시나리오 R20-3 / R21-040: 순수 도메인 모듈 6종의 인프라(DB/네트워크/CLI) 무의존성 검증."""
+    # 1. 합성 위반 자체 검증 (Self-Check - 시나리오 2)
     synthetic_imports = {
         "hermes_core.tools.path_guard": {"pathlib", "sqlite3"},
         "hermes_core.agent.compression": {"dataclasses", "hermes_core.session_db.SessionDB"},
+        "hermes_core.ledger_domain": {"sqlite3"},
+        "hermes_core.tools.file_domain": {"httpx"},
     }
     synthetic_violations = _check_domain_purity_violations(synthetic_imports)
     assert ("hermes_core.tools.path_guard", "sqlite3") in synthetic_violations
     assert ("hermes_core.agent.compression", "hermes_core.session_db.SessionDB") in synthetic_violations
+    assert ("hermes_core.ledger_domain", "sqlite3") in synthetic_violations
+    assert ("hermes_core.tools.file_domain", "httpx") in synthetic_violations
 
-    # 2. 실제 소스 트리 전수 검증
+    # 2. 실제 소스 트리 전수 검증 (시나리오 1)
     root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
     all_imports = scan_source_tree(root)
 
-    # 4종 순수 도메인 모듈이 모두 스캔 결과에 존재하는지 확인
+    # 6종 순수 도메인 모듈이 모두 스캔 결과에 존재하는지 확인
     for mod in PURE_DOMAIN_MODULES:
         assert mod in all_imports, f"Pure domain module {mod} missing from scan_source_tree"
 
     actual_violations = _check_domain_purity_violations(all_imports)
     assert not actual_violations, (
         f"Pure domain modules violate infrastructure isolation: {actual_violations}"
+    )
+
+
+MAX_SOURCE_LINES = 800
+
+
+def _check_file_size_violations(
+    files: list[tuple[Path, int]],
+    max_lines: int = MAX_SOURCE_LINES,
+) -> list[tuple[Path, int]]:
+    return [(path, count) for path, count in files if count > max_lines]
+
+
+def test_scenario_r21_file_size_limits() -> None:
+    """시나리오 R21-4: src/hermes_core 내 단일 파일 800줄 상한선 영구 강제 검증."""
+    # 1. 방어적 자체 검증 (Self-Check - 시나리오 4)
+    dummy_801 = Path("/virtual/dummy_801.py")
+    dummy_800 = Path("/virtual/dummy_800.py")
+    dummy_files = [
+        (dummy_801, 801),
+        (dummy_800, 800),
+    ]
+    violations = _check_file_size_violations(dummy_files, max_lines=MAX_SOURCE_LINES)
+    assert (dummy_801, 801) in violations
+    assert (dummy_800, 800) not in violations
+
+    # 2. 실제 src/hermes_core 디렉터리 하위 전수 검증 (시나리오 3)
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    py_files = sorted(root.rglob("*.py"))
+    assert len(py_files) > 0, "No python files found in src/hermes_core"
+
+    measured_files: list[tuple[Path, int]] = []
+    for file_path in py_files:
+        lines = len(file_path.read_text(encoding="utf-8").splitlines())
+        measured_files.append((file_path, lines))
+
+    actual_violations = _check_file_size_violations(measured_files, max_lines=MAX_SOURCE_LINES)
+    violation_reports = [
+        f"{path.relative_to(root.parent.parent)}: {lines} lines (exceeds {MAX_SOURCE_LINES})"
+        for path, lines in actual_violations
+    ]
+    assert not actual_violations, (
+        f"Source files exceed maximum line limit ({MAX_SOURCE_LINES}):\n"
+        + "\n".join(violation_reports)
     )
 
 

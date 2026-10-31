@@ -16,7 +16,10 @@ from hermes_core.tools.checkpoint import Checkpointer
 from hermes_core.tools.dispatcher import ToolDispatcher
 from hermes_core.tools.ports import (
     ApprovalStorePort,
+    ApproverPort,
     CheckpointStorePort,
+    CommandExecutorPort,
+    ControlAuditPort,
     DelegateStorePort,
     SessionSearchPort,
 )
@@ -250,4 +253,58 @@ def test_scenario_r20_020_child_runner_port_conformance() -> None:
         max_iterations=10,
         dispatcher=None,
     )
+
+
+def test_scenario_r21_ports_conformance() -> None:
+    """시나리오 R21-040 (시나리오 5~7): ApproverPort, ControlAuditPort, CommandExecutorPort 적합성 및 바인딩 검증."""
+    # 시나리오 5: ApproverPort 런타임 적합성 및 바인딩
+    assert issubclass(Approver, ApproverPort), "Approver must satisfy ApproverPort"
+    approver_instance = Approver(
+        session_db=None,  # type: ignore[arg-type]
+        session_id="s1",
+        ask=lambda p: "y",
+        is_interactive=lambda: False,
+    )
+    assert isinstance(approver_instance, ApproverPort), "Approver instance must satisfy ApproverPort"
+
+    sig_appr = inspect.signature(Approver.request)
+    sig_appr.bind(None, ["rm", "-rf", "/"])
+
+    # 시나리오 6: ControlAuditPort 런타임 적합성 및 바인딩
+    assert issubclass(SessionDB, ControlAuditPort), "SessionDB must satisfy ControlAuditPort"
+
+    sig_rec = inspect.signature(SessionDB.record_control_audit)
+    sig_rec.bind(
+        None, "s1", source="control_panel", command="pause", target="agent", result="success"
+    )
+    sig_rec.bind(
+        None,
+        "s1",
+        source="control_panel",
+        command="budget",
+        target="tokens",
+        old_value="10",
+        new_value="20",
+        result="success",
+        reason="user",
+    )
+
+    sig_list = inspect.signature(SessionDB.list_control_audit)
+    sig_list.bind(None, "s1")
+
+    # 시나리오 7: CommandExecutorPort 콜러블 적합성 및 바인딩
+    def dummy_exec(args: list[str], cwd: Path, timeout: int) -> str:
+        return "{}"
+
+    class DummyExecutor:
+        def __call__(self, args: list[str], cwd: Path, timeout: int) -> str:
+            return "{}"
+
+    assert isinstance(dummy_exec, CommandExecutorPort), "Function must satisfy CommandExecutorPort"
+    assert isinstance(DummyExecutor(), CommandExecutorPort), "Callable instance must satisfy CommandExecutorPort"
+    assert issubclass(DummyExecutor, CommandExecutorPort), "Callable class must satisfy CommandExecutorPort"
+
+    sig_exec = inspect.signature(CommandExecutorPort.__call__)
+    sig_exec.bind(None, ["echo", "1"], Path("/tmp"), 10)
+
 
