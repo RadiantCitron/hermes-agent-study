@@ -20,6 +20,7 @@ from hermes_core.constants import (
     CHECKPOINT_WORKSPACE_MISMATCH_MESSAGE,
     CHILD_TOOL_NAMES,
 )
+from hermes_core.extensions.contract import TurnScope
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
@@ -96,6 +97,7 @@ class ToolCall:
     name: str
     args: dict[str, Any]
     task_id: Optional[str] = None
+    scope: Optional[TurnScope] = None
 
 
 ToolMiddleware = Callable[[ToolCall, Callable[[ToolCall], str]], str]

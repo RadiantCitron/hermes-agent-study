@@ -127,6 +127,10 @@ class CompressionHook:
                     comp_stats["count"] += 1
                     if comp_res.used_fallback:
                         comp_stats["fallback"] += 1
+                    ctx.scope.report(
+                        "compression",
+                        {"count": comp_stats["count"], "fallback": comp_stats["fallback"]},
+                    )
                     if comp_res.usage:
                         in_tok = comp_res.usage.get("prompt_tokens") or comp_res.usage.get("input_tokens") or 0
                         out_tok = comp_res.usage.get("completion_tokens") or comp_res.usage.get("output_tokens") or 0

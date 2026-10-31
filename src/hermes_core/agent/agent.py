@@ -41,6 +41,7 @@ from hermes_core.agent.turn_hooks import (
     TurnContext,
     TurnHook,
 )
+from hermes_core.extensions.contract import TurnScope
 from hermes_core.constants import (
     COMPRESSION_THRESHOLD_RATIO,
     CONTEXT_WINDOW_TOKENS,
@@ -158,6 +159,9 @@ class HermesAgent:
 
         # 스킬 인덱스 블록 캐시 (세션 중 불변 고정)
         self._skills_index_block: Optional[str] = None
+
+        # 세션 범위 슬롯 (확장 기능 간 세션 내 상태 공유)
+        self._session_slots: dict[str, dict[str, Any]] = {}
 
         # 토큰 추정 및 압축 거부 추적 상태 (세션 간 미보존)
         self._last_input_tokens: Optional[int] = None
@@ -387,11 +391,16 @@ class HermesAgent:
         iterations = 0
         error_info: Optional[dict[str, str]] = None
 
+        scope = TurnScope(
+            session_id=self.session_id,
+            session_slots=self._session_slots,
+        )
         ctx = TurnContext(
             messages=messages,
             tools_schema=None,
             iteration=0,
             session_id=self.session_id,
+            scope=scope,
         )
 
         while iterations < self.max_iterations:
@@ -401,6 +410,7 @@ class HermesAgent:
             schema_list = tools_schema if tools_schema else None
 
             ctx.iteration = iterations
+            scope.iteration = iterations
             ctx.tools_schema = schema_list
 
             self.hooks.run(BEFORE_LLM, ctx, on_error=self._on_hook_error)
@@ -478,14 +488,9 @@ class HermesAgent:
             "session_id": self.session_id,
             "stopped_reason": stopped_reason,
         }
-        comp_stats = ctx.run_state.get("compression")
-        if comp_stats and comp_stats.get("count", 0) > 0:
-            result["compression"] = {
-                "count": comp_stats["count"],
-                "fallback": comp_stats["fallback"],
-            }
         if error_info is not None:
             result["error"] = error_info
+        result.update(scope.reports)
 
         return result
 

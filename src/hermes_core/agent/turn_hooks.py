@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Optional
 
+from hermes_core.extensions.contract import TurnScope
+
 logger = logging.getLogger(__name__)
 
 BEFORE_LLM = "before_llm"
@@ -29,11 +31,31 @@ class TurnContext:
     session_id: str
     run_state: dict[str, Any] = field(default_factory=dict)
     stop_reason: Optional[str] = None
+    scope: TurnScope = field(default=None)  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.scope is None:
+            self.scope = TurnScope(session_id=self.session_id, iteration=self.iteration)
+        # run_state와 scope.turn_slots를 동일 객체로 연결
+        # 기존 run_state에 초기값이 있었다면 turn_slots에 병합
+        if self.run_state and self.run_state is not self.scope.turn_slots:
+            self.scope.turn_slots.update(self.run_state)
+        self.run_state = self.scope.turn_slots
+        if self.stop_reason is not None and self.scope.stop_reason is None:
+            self.scope.request_stop(self.stop_reason)
+
+    @property
+    def stop_reason(self) -> Optional[str]:  # type: ignore[no-redef]
+        return self.scope.stop_reason
+
+    @stop_reason.setter
+    def stop_reason(self, value: Optional[str]) -> None:
+        if self.scope is not None and value is not None:
+            self.scope.request_stop(value)
 
     def request_stop(self, reason: str) -> None:
         """턴 루프 중단을 요청한다. 먼저 요청된 이유가 유지된다."""
-        if self.stop_reason is None:
-            self.stop_reason = reason
+        self.scope.request_stop(reason)
 
 
 TurnHook = Callable[[TurnContext], None]
