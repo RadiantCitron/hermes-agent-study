@@ -33,7 +33,7 @@ from hermes_core.constants import (
     get_hermes_home,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -117,6 +117,19 @@ CREATE TABLE IF NOT EXISTS file_checkpoints (
     reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS control_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    created_at REAL NOT NULL,
+    source TEXT NOT NULL,
+    command TEXT NOT NULL,
+    target TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    result TEXT NOT NULL,
+    reason TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
@@ -124,6 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestam
 CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id);
 CREATE INDEX IF NOT EXISTS idx_file_checkpoints_session_turn ON file_checkpoints(session_id, turn_index);
+CREATE INDEX IF NOT EXISTS idx_control_audit_session ON control_audit(session_id, id);
 """
 
 FTS_SQL = """
@@ -210,6 +224,8 @@ class SessionDB:
                 cursor.execute("UPDATE schema_version SET version = 5")
             if current_version < 6:
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # FTS5 가상 테이블 초기화
         try:
@@ -880,6 +896,67 @@ class SessionDB:
                    ORDER BY id ASC""",
                 (session_id,),
             )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def record_control_audit(
+        self,
+        session_id: str,
+        *,
+        source: str,
+        command: str,
+        target: str,
+        old_value: Optional[str] = None,
+        new_value: Optional[str] = None,
+        result: str,
+        reason: Optional[str] = None,
+    ) -> int:
+        """제어 명령 검증·반영 및 차단기 동작 감사 기록을 남긴다."""
+        if not isinstance(session_id, str) or session_id.strip() == "":
+            raise ValueError("session_id must be a non-empty string")
+        if not isinstance(source, str) or source.strip() == "":
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(target, str) or target.strip() == "":
+            raise ValueError("target must be a non-empty string")
+        if command not in ("set_setting", "enable_extension", "disable_extension"):
+            raise ValueError(f"Invalid audit command: {command!r}")
+        if result not in ("accepted", "rejected", "applied"):
+            raise ValueError(f"Invalid audit result: {result!r}")
+        if old_value is not None and not isinstance(old_value, str):
+            raise ValueError("old_value must be None or a string")
+        if new_value is not None and not isinstance(new_value, str):
+            raise ValueError("new_value must be None or a string")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("reason must be None or a string")
+
+        now = time.time()
+        cursor = self._conn.execute(
+            """INSERT INTO control_audit (
+                   session_id, created_at, source, command, target,
+                   old_value, new_value, result, reason
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                now,
+                source,
+                command,
+                target,
+                old_value,
+                new_value,
+                result,
+                reason,
+            ),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def list_control_audit(self, session_id: str) -> list[dict[str, Any]]:
+        """특정 세션의 제어 감사 기록 목록을 id 오름차순으로 반환한다."""
+        cursor = self._conn.execute(
+            """SELECT * FROM control_audit
+               WHERE session_id = ?
+               ORDER BY id ASC""",
+            (session_id,),
+        )
         return [dict(row) for row in cursor.fetchall()]
 
 

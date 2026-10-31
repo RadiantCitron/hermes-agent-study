@@ -355,6 +355,8 @@ def test_scenario_10_actual_tree_ratchet_enforcement():
         "hermes_core.control",
         "hermes_core.control.settings",
         "hermes_core.control.snapshot",
+        "hermes_core.control.commands",
+        "hermes_core.control.panel",
         "hermes_core.assembly",
         "hermes_core.cli",
     }

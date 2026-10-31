@@ -345,6 +345,25 @@ class HermesAgent:
             and self._extension_enabled.get(name, True)
             and consec >= self._breaker_threshold
         ):
+            record_fn = getattr(self.session_db, "record_control_audit", None)
+            if callable(record_fn):
+                try:
+                    record_fn(
+                        self.session_id,
+                        source="breaker",
+                        command="disable_extension",
+                        target=name,
+                        old_value="true",
+                        new_value="false",
+                        result="applied",
+                        reason=f"consecutive_failures={consec}",
+                    )
+                except Exception as audit_exc:
+                    logger.warning(
+                        "Failed to record breaker control audit for '%s': %s",
+                        name,
+                        audit_exc,
+                    )
             self._extension_enabled[name] = False
             self._extension_tripped[name] = True
             logger.warning(

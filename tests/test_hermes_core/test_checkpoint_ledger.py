@@ -20,10 +20,10 @@ from hermes_core.session_db import SessionDB
 
 
 def test_scenario_01_new_db_schema_version_and_columns(tmp_path):
-    """시나리오 1: 새 DB를 SessionDB(path)로 연다 -> db.schema_version == 6, file_checkpoints 표가 있고 열 이름 집합이 정확히 일치."""
+    """시나리오 1: 새 DB를 SessionDB(path)로 연다 -> db.schema_version >= 6, file_checkpoints 표가 있고 열 이름 집합이 정확히 일치."""
     db_path = tmp_path / "new_state.db"
     db = SessionDB(db_path)
-    assert db.schema_version == 6
+    assert db.schema_version >= 6
 
     cursor = db._conn.execute("PRAGMA table_info(file_checkpoints)")
     cols = {row["name"] for row in cursor.fetchall()}
@@ -126,7 +126,7 @@ def test_scenario_02_v5_migration_preserves_data(tmp_path):
     conn.close()
 
     db = SessionDB(db_path)
-    assert db.schema_version == 6
+    assert db.schema_version >= 6
 
     # file_checkpoints 표 존재 확인
     cursor = db._conn.execute(
@@ -203,7 +203,7 @@ def test_scenario_03_v3_migration_preserves_data(tmp_path):
     conn.close()
 
     db = SessionDB(db_path)
-    assert db.schema_version == 6
+    assert db.schema_version >= 6
 
     # approval_requests 및 file_checkpoints 생성 확인
     cursor = db._conn.execute(

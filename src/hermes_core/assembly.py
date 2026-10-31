@@ -7,15 +7,56 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Collection, Optional
 
 from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
 from hermes_core.agent.loop_guard import LoopGuardExtension
 from hermes_core.constants import LOOP_GUARD_BLOCK_THRESHOLD, LOOP_GUARD_WARN_THRESHOLD
-from hermes_core.control.settings import Settings
+from hermes_core.control.settings import SETTING_SPECS, Settings
 from hermes_core.kernel.contract import Extension
 from hermes_core.kernel.llm_pipeline import LLMMiddleware, LLMNext, LLMRequest
 from hermes_core.kernel.ports import CallRecordable, LLMReply, TranscriptStore
+
+RUNTIME_SETTING_KEYS: tuple[str, ...] = (
+    "max_iterations",
+    "context_window_tokens",
+    "compression_enabled",
+    "compression_threshold_ratio",
+    "breaker_threshold",
+)
+
+
+def apply_runtime_settings(
+    agent: Any,
+    settings: Settings,
+    *,
+    changed_keys: Optional[Collection[str]] = None,
+) -> None:
+    """Settings 스냅샷의 런타임 설정 항목을 에이전트에 반영한다."""
+    if changed_keys is not None:
+        for k in changed_keys:
+            if k not in SETTING_SPECS or SETTING_SPECS[k].mutability != "runtime":
+                raise ValueError(f"Setting '{k}' is not runtime-mutable")
+
+    for k, spec in SETTING_SPECS.items():
+        val = getattr(settings, k, None)
+        try:
+            spec.validator(val)
+        except Exception as exc:
+            raise ValueError(f"Invalid setting value for '{k}': {exc}") from exc
+
+    target_keys = set(changed_keys) if changed_keys is not None else set(RUNTIME_SETTING_KEYS)
+
+    if "max_iterations" in target_keys:
+        agent.max_iterations = settings.max_iterations
+    if "context_window_tokens" in target_keys:
+        agent.context_window_tokens = settings.context_window_tokens
+    if "compression_enabled" in target_keys:
+        agent.compression_enabled = settings.compression_enabled
+    if "compression_threshold_ratio" in target_keys:
+        agent.compression_threshold_ratio = settings.compression_threshold_ratio
+    if "breaker_threshold" in target_keys:
+        agent.set_extension_breaker(settings.breaker_threshold)
 
 
 def compression_config_of(agent: Any) -> CompressionConfig:

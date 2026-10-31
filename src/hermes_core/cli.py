@@ -16,8 +16,8 @@ from typing import Optional
 import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
-from hermes_core.assembly import create_agent
-from hermes_core.control.settings import SettingsError, load_settings
+from hermes_core.assembly import apply_runtime_settings, create_agent
+from hermes_core.control import ControlPanel, SettingsError, load_settings
 from hermes_core.cli_input import (
     hold_typeahead,
     is_interactive_terminal,
@@ -387,6 +387,12 @@ def main() -> None:
         dispatcher=dispatcher,
         resume=is_resuming,
     )
+    panel = ControlPanel(
+        agent,
+        loaded,
+        session_db,
+        apply_settings_fn=apply_runtime_settings,
+    )
 
     if not args.mock and settings.delegate:
         register_delegate_tool(
@@ -476,6 +482,8 @@ def main() -> None:
                 if rollback_res is not None:
                     pending_notices.append(rollback_res)
                 continue
+
+            panel.apply_pending()
 
             if checkpointer is not None:
                 checkpointer.begin_turn()

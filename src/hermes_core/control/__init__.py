@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+from hermes_core.control.commands import (
+    ControlCommand,
+    DisableExtension,
+    EnableExtension,
+    Rejection,
+    RejectionCode,
+    SetSetting,
+    validate_command,
+)
+from hermes_core.control.panel import (
+    AppliedChange,
+    ControlPanel,
+    SubmitResult,
+)
 from hermes_core.control.settings import (
     SETTING_SPECS,
     LoadedSettings,
@@ -38,4 +52,14 @@ __all__ = [
     "build_snapshot",
     "mask_secrets",
     "render_snapshot",
+    "ControlCommand",
+    "SetSetting",
+    "EnableExtension",
+    "DisableExtension",
+    "Rejection",
+    "RejectionCode",
+    "validate_command",
+    "ControlPanel",
+    "SubmitResult",
+    "AppliedChange",
 ]
