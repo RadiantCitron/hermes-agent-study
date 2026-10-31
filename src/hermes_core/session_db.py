@@ -22,144 +22,25 @@ from typing import Any, Optional, Union
 
 from hermes_core.constants import (
     APPROVAL_DECISION_PENDING,
-    APPROVAL_FINAL_DECISIONS,
-    CHECKPOINT_STATUS_APPLIED,
     CHECKPOINT_STATUS_PENDING,
-    CHECKPOINT_TOOL_NAMES,
-    CHECKPOINT_TRANSITIONS,
-    FILE_MAX_BYTES,
     SUMMARY_END_MARKER,
     SUMMARY_PREFIX,
     get_hermes_home,
 )
-
-SCHEMA_VERSION = 7
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    user_id TEXT,
-    model TEXT,
-    model_config TEXT,
-    system_prompt TEXT,
-    parent_session_id TEXT,
-    started_at REAL NOT NULL,
-    ended_at REAL,
-    end_reason TEXT,
-    message_count INTEGER DEFAULT 0,
-    tool_call_count INTEGER DEFAULT 0,
-    input_tokens INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0,
-    mode TEXT,
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    role TEXT NOT NULL,
-    content TEXT,
-    tool_call_id TEXT,
-    tool_calls TEXT,
-    tool_name TEXT,
-    timestamp REAL NOT NULL,
-    token_count INTEGER,
-    finish_reason TEXT,
-    active INTEGER DEFAULT 1,
-    compacted INTEGER DEFAULT 0,
-    is_copy INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS llm_calls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    created_at REAL NOT NULL,
-    model TEXT,
-    request_json TEXT,
-    response_json TEXT,
-    status_code INTEGER,
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    latency_ms INTEGER,
-    error_kind TEXT,
-    error_message TEXT
-);
-
-CREATE TABLE IF NOT EXISTS approval_requests (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    tool_name TEXT NOT NULL,
-    argv_json TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    decision TEXT NOT NULL,
-    decided_at REAL,
-    reason TEXT
-);
-
-CREATE TABLE IF NOT EXISTS file_checkpoints (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    turn_index INTEGER NOT NULL,
-    tool_name TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-    rel_path TEXT NOT NULL,
-    before_exists INTEGER NOT NULL,
-    before_content TEXT,
-    after_sha256 TEXT,
-    status TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL,
-    reason TEXT
-);
-
-CREATE TABLE IF NOT EXISTS control_audit (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    created_at REAL NOT NULL,
-    source TEXT NOT NULL,
-    command TEXT NOT NULL,
-    target TEXT NOT NULL,
-    old_value TEXT,
-    new_value TEXT,
-    result TEXT NOT NULL,
-    reason TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
-CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls(session_id);
-CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id);
-CREATE INDEX IF NOT EXISTS idx_file_checkpoints_session_turn ON file_checkpoints(session_id, turn_index);
-CREATE INDEX IF NOT EXISTS idx_control_audit_session ON control_audit(session_id, id);
-"""
-
-FTS_SQL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content,
-    content=messages,
-    content_rowid=id
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.id, old.content);
-    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-END;
-"""
+from hermes_core.ledger_domain import (
+    FTS_SQL,
+    SCHEMA_SQL,
+    SCHEMA_VERSION,
+    build_checkpoint_update_query,
+    build_fts_search_query,
+    extract_tool_name_map,
+    is_valid_hex_sha256 as _is_valid_hex_sha256,
+    validate_approval_decision,
+    validate_approval_request_argv,
+    validate_control_audit_input,
+    validate_deactivate_after_id,
+    validate_file_checkpoint_input,
+)
 
 
 class SessionDB:
@@ -513,8 +394,7 @@ class SessionDB:
 
     def deactivate_messages_after(self, session_id: str, after_id: int) -> int:
         """after_id(단, 해당 턴 도중 압축이 일어났다면 압축본 마지막 행 id) 이후의 active=1 메시지를 active=0으로 내리고 변경된 행 수를 반환한다."""
-        if not isinstance(after_id, int) or isinstance(after_id, bool) or after_id < 0:
-            raise ValueError("after_id must be a non-negative integer")
+        validate_deactivate_after_id(after_id)
 
         # 압축 보호 기준점 계산 (effective_after_id):
         # 해당 세션에서 현재 active=1이면서 압축(archive_and_compact)이 삽입한 행,
@@ -559,15 +439,7 @@ class SessionDB:
         - 단조 증가 타임스탬프 적용.
         """
         # assistant tool_calls에서 tool_name 맵핑 수집 (tool 메시지의 tool_name 복원용)
-        tool_name_map: dict[str, str] = {}
-        for m in new_messages:
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                for tc in m["tool_calls"]:
-                    tc_id = tc.get("id")
-                    fn = tc.get("function", {})
-                    fn_name = fn.get("name") or tc.get("name")
-                    if tc_id and fn_name:
-                        tool_name_map[tc_id] = fn_name
+        tool_name_map = extract_tool_name_map(new_messages)
 
         with self._conn:
             cursor = self._conn.cursor()
@@ -639,47 +511,15 @@ class SessionDB:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """FTS5 전문 검색을 통해 키워드가 일치하는 메시지와 하이라이트 스니펫 반환."""
-        if not query or not query.strip():
+        sql, params = build_fts_search_query(
+            query=query,
+            source_filter=source_filter,
+            role_filter=role_filter,
+            limit=limit,
+            offset=offset,
+        )
+        if not sql:
             return []
-
-        if source_filter is None:
-            source_filter = ["cli", "telegram", "discord", "whatsapp", "slack"]
-
-        where_clauses = ["messages_fts MATCH ?", "m.is_copy = 0"]
-        params: list[Any] = [query]
-
-        source_placeholders = ",".join("?" for _ in source_filter)
-        where_clauses.append(f"s.source IN ({source_placeholders})")
-        params.extend(source_filter)
-
-        if role_filter:
-            role_placeholders = ",".join("?" for _ in role_filter)
-            where_clauses.append(f"m.role IN ({role_placeholders})")
-            params.extend(role_filter)
-
-        where_sql = " AND ".join(where_clauses)
-        params.extend([limit, offset])
-
-        sql = f"""
-            SELECT
-                m.id,
-                m.session_id,
-                m.role,
-                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
-                m.content,
-                m.timestamp,
-                m.tool_name,
-                s.source,
-                s.model,
-                s.started_at AS session_started
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE {where_sql}
-            ORDER BY rank
-            LIMIT ? OFFSET ?
-        """
-
         cursor = self._conn.execute(sql, params)
         return [dict(row) for row in cursor.fetchall()]
 
@@ -758,9 +598,7 @@ class SessionDB:
         tool_name: str = "terminal",
     ) -> int:
         """승인 요청을 approval_requests 원장에 선기록(pending)하고 생성된 id를 반환한다."""
-        if not isinstance(argv, list) or len(argv) == 0 or not all(isinstance(a, str) for a in argv):
-            raise ValueError("argv must be a non-empty list of strings")
-
+        validate_approval_request_argv(argv)
         argv_json = json.dumps(argv, ensure_ascii=False)
         cursor = self._conn.execute(
             """INSERT INTO approval_requests (
@@ -778,11 +616,7 @@ class SessionDB:
         reason: Optional[str] = None,
     ) -> bool:
         """pending 상태인 승인 요청의 최종 결정을 기록한다. 이미 결정되었거나 없으면 False."""
-        if decision not in APPROVAL_FINAL_DECISIONS:
-            raise ValueError(
-                f"decision must be one of {APPROVAL_FINAL_DECISIONS}, got {decision!r}"
-            )
-
+        validate_approval_decision(decision)
         cursor = self._conn.execute(
             """UPDATE approval_requests
                SET decision = ?, decided_at = ?, reason = ?
@@ -815,31 +649,15 @@ class SessionDB:
         before_content: Optional[str] = None,
     ) -> int:
         """파일 도구 실행 전 상태를 file_checkpoints 원장에 선기록(pending)하고 id를 반환한다."""
-        if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 1:
-            raise ValueError(f"turn_index must be an integer >= 1, got {turn_index!r}")
-        if not isinstance(tool_name, str) or tool_name not in CHECKPOINT_TOOL_NAMES:
-            raise ValueError(
-                f"tool_name must be one of {CHECKPOINT_TOOL_NAMES}, got {tool_name!r}"
-            )
-        if not isinstance(workspace, str) or len(workspace) == 0:
-            raise ValueError("workspace must be a non-empty string")
-        if not isinstance(rel_path, str) or len(rel_path) == 0:
-            raise ValueError("rel_path must be a non-empty string")
-        if not isinstance(before_exists, bool):
-            raise ValueError(f"before_exists must be a boolean, got {before_exists!r}")
-
-        if before_exists:
-            if not isinstance(before_content, str):
-                raise ValueError("before_content must be a string when before_exists is True")
-            encoded_len = len(before_content.encode("utf-8"))
-            if encoded_len > FILE_MAX_BYTES:
-                raise ValueError(
-                    f"before_content exceeds FILE_MAX_BYTES ({encoded_len} > {FILE_MAX_BYTES})"
-                )
-        else:
-            if before_content is not None:
-                raise ValueError("before_content must be None when before_exists is False")
-
+        validate_file_checkpoint_input(
+            session_id=session_id,
+            turn_index=turn_index,
+            tool_name=tool_name,
+            workspace=workspace,
+            rel_path=rel_path,
+            before_exists=before_exists,
+            before_content=before_content,
+        )
         cursor = self._conn.execute(
             """INSERT INTO file_checkpoints (
                 session_id, turn_index, tool_name, workspace, rel_path,
@@ -870,41 +688,14 @@ class SessionDB:
         reason: Optional[str] = None,
     ) -> bool:
         """체크포인트의 상태를 갱신한다. 허용된 전이가 아니거나 없는 id면 False."""
-        if status not in CHECKPOINT_TRANSITIONS:
-            raise ValueError(
-                f"status must be one of {tuple(CHECKPOINT_TRANSITIONS.keys())}, got {status!r}"
-            )
-
-        if status == CHECKPOINT_STATUS_APPLIED:
-            if not _is_valid_hex_sha256(after_sha256):
-                raise ValueError(
-                    f"after_sha256 must be a 64-character lowercase hex string, got {after_sha256!r}"
-                )
-        else:
-            if after_sha256 is not None:
-                raise ValueError(
-                    f"after_sha256 can only be set when status is '{CHECKPOINT_STATUS_APPLIED}', got {after_sha256!r}"
-                )
-
-        allowed_previous = CHECKPOINT_TRANSITIONS[status]
-        placeholders = ", ".join("?" for _ in allowed_previous)
-        now = time.time()
-
-        if status == CHECKPOINT_STATUS_APPLIED:
-            cursor = self._conn.execute(
-                f"""UPDATE file_checkpoints
-                   SET status = ?, updated_at = ?, reason = ?, after_sha256 = ?
-                   WHERE id = ? AND status IN ({placeholders})""",
-                (status, now, reason, after_sha256, checkpoint_id, *allowed_previous),
-            )
-        else:
-            cursor = self._conn.execute(
-                f"""UPDATE file_checkpoints
-                   SET status = ?, updated_at = ?, reason = ?
-                   WHERE id = ? AND status IN ({placeholders})""",
-                (status, now, reason, checkpoint_id, *allowed_previous),
-            )
-
+        sql, params = build_checkpoint_update_query(
+            checkpoint_id=checkpoint_id,
+            status=status,
+            now=time.time(),
+            reason=reason,
+            after_sha256=after_sha256,
+        )
+        cursor = self._conn.execute(sql, params)
         self._conn.commit()
         return cursor.rowcount > 0
 
@@ -943,23 +734,16 @@ class SessionDB:
         reason: Optional[str] = None,
     ) -> int:
         """제어 명령 검증·반영 및 차단기 동작 감사 기록을 남긴다."""
-        if not isinstance(session_id, str) or session_id.strip() == "":
-            raise ValueError("session_id must be a non-empty string")
-        if not isinstance(source, str) or source.strip() == "":
-            raise ValueError("source must be a non-empty string")
-        if not isinstance(target, str) or target.strip() == "":
-            raise ValueError("target must be a non-empty string")
-        if command not in ("set_setting", "enable_extension", "disable_extension"):
-            raise ValueError(f"Invalid audit command: {command!r}")
-        if result not in ("accepted", "rejected", "applied"):
-            raise ValueError(f"Invalid audit result: {result!r}")
-        if old_value is not None and not isinstance(old_value, str):
-            raise ValueError("old_value must be None or a string")
-        if new_value is not None and not isinstance(new_value, str):
-            raise ValueError("new_value must be None or a string")
-        if reason is not None and not isinstance(reason, str):
-            raise ValueError("reason must be None or a string")
-
+        validate_control_audit_input(
+            session_id=session_id,
+            source=source,
+            command=command,
+            target=target,
+            result=result,
+            old_value=old_value,
+            new_value=new_value,
+            reason=reason,
+        )
         now = time.time()
         cursor = self._conn.execute(
             """INSERT INTO control_audit (
@@ -991,11 +775,5 @@ class SessionDB:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-
-def _is_valid_hex_sha256(value: Any) -> bool:
-    """소문자 16진수 64자 SHA-256 해시 문자열인지 검증한다."""
-    if not isinstance(value, str) or len(value) != 64:
-        return False
-    return all(c in "0123456789abcdef" for c in value)
 
 
