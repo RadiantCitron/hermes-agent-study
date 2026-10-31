@@ -12,7 +12,7 @@
   4. 테스트 격리를 위한 MockLLMClient 내장.
 """
 
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 import json
 import logging

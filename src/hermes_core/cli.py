@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+from typing import Optional
 import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
