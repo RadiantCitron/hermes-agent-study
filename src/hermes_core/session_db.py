@@ -28,6 +28,8 @@ from hermes_core.constants import (
     CHECKPOINT_TOOL_NAMES,
     CHECKPOINT_TRANSITIONS,
     FILE_MAX_BYTES,
+    SUMMARY_END_MARKER,
+    SUMMARY_PREFIX,
     get_hermes_home,
 )
 
@@ -275,6 +277,15 @@ class SessionDB:
         )
         self._conn.commit()
 
+    def reopen_session(self, session_id: str) -> bool:
+        """세션을 재개할 수 있도록 ended_at과 end_reason을 NULL로 비운다. 존재하는 세션이면 True, 없으면 False."""
+        cursor = self._conn.execute(
+            "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
+            (session_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """시스템 프롬프트 스냅샷 갱신."""
         self._conn.execute(
@@ -303,6 +314,42 @@ class SessionDB:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def find_resumable_session(
+        self, target: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """재개 가능한 최상위 CLI 세션(source='cli' AND parent_session_id IS NULL)을 최신순으로 조회한다.
+
+        - target이 None이거나 공백 제거 후 소문자가 'latest'이면 가장 최근 세션 최대 1건을 리스트로 반환.
+        - 그 외 문자열이면 공백 제거 후 id 접두사(prefix)로 매칭되는 모든 세션을 최신순(started_at DESC, rowid DESC) 리스트로 반환.
+        - 공백만 있는 문자열이면 빈 리스트([]) 반환.
+        """
+        if target is None or (
+            isinstance(target, str) and target.strip().lower() == "latest"
+        ):
+            cursor = self._conn.execute(
+                "SELECT * FROM sessions WHERE source = 'cli' AND parent_session_id IS NULL "
+                "ORDER BY started_at DESC, rowid DESC LIMIT 1"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+        if isinstance(target, str):
+            prefix = target.strip()
+            if not prefix:
+                return []
+            escaped = (
+                prefix.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            cursor = self._conn.execute(
+                "SELECT * FROM sessions WHERE source = 'cli' AND parent_session_id IS NULL "
+                "AND id LIKE ? ESCAPE '\\' ORDER BY started_at DESC, rowid DESC",
+                (f"{escaped}%",),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+        return []
 
     # =========================================================================
     # 메시지 원장 추가 및 조회 메서드
@@ -404,6 +451,51 @@ class SessionDB:
                     pass
             messages.append(msg)
         return messages
+
+    def get_last_active_message_id(self, session_id: str) -> int:
+        """해당 세션에서 현재 active=1인 메시지의 최대 id를 반환한다. 활성 행이 없으면 0."""
+        cursor = self._conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ? AND active = 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return 0
+        return int(row[0])
+
+    def deactivate_messages_after(self, session_id: str, after_id: int) -> int:
+        """after_id(단, 해당 턴 도중 압축이 일어났다면 압축본 마지막 행 id) 이후의 active=1 메시지를 active=0으로 내리고 변경된 행 수를 반환한다."""
+        if not isinstance(after_id, int) or isinstance(after_id, bool) or after_id < 0:
+            raise ValueError("after_id must be a non-negative integer")
+
+        # 압축 보호 기준점 계산 (effective_after_id):
+        # 해당 세션에서 현재 active=1이면서 압축(archive_and_compact)이 삽입한 행,
+        # 즉 is_copy = 1이거나 독립 요약 행인 행들의 COALESCE(MAX(id), 0)을 조회해 compaction_max_id로 둔다.
+        cursor = self._conn.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) FROM messages
+            WHERE session_id = ? AND active = 1
+              AND (
+                is_copy = 1
+                OR (
+                    role IN ('user', 'assistant')
+                    AND content LIKE ?
+                    AND content LIKE ?
+                )
+              )
+            """,
+            (session_id, f"{SUMMARY_PREFIX}%", f"%{SUMMARY_END_MARKER}"),
+        )
+        row = cursor.fetchone()
+        compaction_max_id = int(row[0]) if row and row[0] is not None else 0
+        effective_after_id = max(after_id, compaction_max_id)
+
+        update_cursor = self._conn.execute(
+            "UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1 AND id > ?",
+            (session_id, effective_after_id),
+        )
+        self._conn.commit()
+        return update_cursor.rowcount
 
     def archive_and_compact(
         self,
