@@ -31,6 +31,12 @@ from hermes_core.agent.context_budget import (
     may_retry_after_reject,
     should_compress,
 )
+from hermes_core.agent.events import (
+    EVENT_TOOL_CALL,
+    AgentEvent,
+    ConsoleEventSink,
+    EventSink,
+)
 from hermes_core.agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     build_context_files_prompt,
@@ -135,12 +141,19 @@ class HermesAgent:
         skip_memory: bool = False,
         skip_context_files: bool = False,
         resume: bool = False,
+        event_sink: Optional[EventSink] = None,
         skills_index: bool = False,
     ):
         self.system_message = system_message
         self.session_id = session_id or str(uuid.uuid4())
         self.max_iterations = max_iterations
         self.quiet_mode = quiet_mode
+        if event_sink is not None:
+            self.event_sink: Optional[EventSink] = event_sink
+        elif not quiet_mode:
+            self.event_sink = ConsoleEventSink()
+        else:
+            self.event_sink = None
         self.context_window_tokens = context_window_tokens
         self.compression_threshold_ratio = compression_threshold_ratio
         self.compression_enabled = compression_enabled
@@ -291,6 +304,15 @@ class HermesAgent:
         sys_prompt = self._build_system_prompt()
         return [{"role": "system", "content": sys_prompt}, *active_msgs]
 
+    def _emit(self, kind: str, **data: Any) -> None:
+        """이벤트 싱크가 등록되어 있으면 이벤트를 방출한다. 싱크 예외는 경고 로그 후 삼킨다."""
+        if self.event_sink is None:
+            return
+        try:
+            self.event_sink(AgentEvent(kind=kind, data=data))
+        except Exception as e:
+            logger.warning("EventSink failed for event '%s': %s", kind, e)
+
     def _execute_tool_calls(
         self,
         tool_calls: list[dict[str, Any]],
@@ -303,8 +325,7 @@ class HermesAgent:
             func_name = func_obj.get("name") or tc.get("name", "unknown")
             args_str = func_obj.get("arguments", "{}")
 
-            if not self.quiet_mode:
-                print(f"  [Tool Call] {func_name}({args_str})")
+            self._emit(EVENT_TOOL_CALL, name=func_name, arguments=args_str)
 
             args, parse_error = _parse_tool_arguments(args_str)
             if parse_error is None:
