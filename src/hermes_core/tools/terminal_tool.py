@@ -18,13 +18,13 @@ import subprocess
 from typing import Any, Optional
 
 from hermes_core.constants import TERMINAL_STRIPPED_ENV_NAMES
-from hermes_core.tools.approval import Approver
 from hermes_core.tools.path_guard import (
     is_inside,
     is_protected_path,
     path_values,
     resolve_workspace,
 )
+from hermes_core.tools.ports import ApproverPort, CommandExecutorPort
 
 TERMINAL_MAX_OUTPUT_CHARS = 10_000
 TERMINAL_MAX_TIMEOUT = 30
@@ -119,11 +119,34 @@ def _execute(args: list[str], cwd: Path, timeout: int) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _run_command(
+    args: list[str],
+    cwd: Path,
+    timeout: int,
+    command_executor: Optional[CommandExecutorPort] = None,
+) -> str:
+    """명령 실행을 command_executor 또는 기본 _execute에 위임."""
+    if command_executor is not None:
+        try:
+            return command_executor(args, cwd, timeout)
+        except Exception as e:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Execution error: {str(e)}",
+                    "exit_code": -1,
+                },
+                ensure_ascii=False,
+            )
+    return _execute(args, cwd, timeout)
+
+
 def terminal_tool(
     command: str,
     timeout: int = TERMINAL_MAX_TIMEOUT,
     workspace: Optional[Path] = None,
-    approver: Optional[Approver] = None,
+    approver: Optional[ApproverPort] = None,
+    command_executor: Optional[CommandExecutorPort] = None,
 ) -> str:
     """허용목록의 프로그램 또는 승인된 명령을 작업 폴더에서 셸 없이 실행하고 JSON 문자열로 결과를 반환.
 
@@ -150,7 +173,7 @@ def terminal_tool(
                 return _failure(f"Path '{arg}' is outside the workspace.")
             if any(is_protected_path(value, base) for value in values):
                 return _failure(f"Path '{arg}' refers to a protected file or folder (.env*, .git).")
-        return _execute(args, base, timeout)
+        return _run_command(args, base, timeout, command_executor)
 
     if approver is None:
         return _failure(f"Command '{args[0]}' is not allowed. Allowed: {', '.join(ALLOWED_COMMANDS)}")
@@ -164,4 +187,4 @@ def terminal_tool(
     if not outcome.approved:
         return _failure(outcome.message)
 
-    return _execute(args, base, timeout)
+    return _run_command(args, base, timeout, command_executor)

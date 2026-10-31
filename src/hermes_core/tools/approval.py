@@ -9,7 +9,6 @@
   - 세션 원장(approval_requests) 선기록 및 결정 갱신 보장.
 """
 
-from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
 from hermes_core.constants import (
@@ -28,7 +27,7 @@ from hermes_core.constants import (
     APPROVAL_TOO_LONG_MESSAGE,
     APPROVAL_YES_ANSWERS,
 )
-from hermes_core.tools.ports import ApprovalStorePort
+from hermes_core.tools.ports import ApprovalOutcome, ApprovalStorePort
 
 
 def format_command_for_display(argv: Sequence[str]) -> str:
@@ -49,21 +48,6 @@ def is_approval_answer(answer: Any) -> bool:
     if not isinstance(answer, str):
         return False
     return answer.strip().casefold() in APPROVAL_YES_ANSWERS
-
-
-@dataclass(frozen=True)
-class ApprovalOutcome:
-    """승인 요청 결과 객체.
-
-    Attributes:
-        approved: 명령 실행이 승인되었는지 여부.
-        decision: 원장에 남은 최종 결정 상태 (APPROVAL_FINAL_DECISIONS 중 하나).
-        message: 거부/취소 시 모델에게 전달할 안내 문구 (승인이면 빈 문자열).
-    """
-
-    approved: bool
-    decision: str
-    message: str
 
 
 class Approver:

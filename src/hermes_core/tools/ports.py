@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
 
@@ -107,3 +109,56 @@ class ChildRunnerPort(Protocol):
         max_iterations: int,
         dispatcher: Optional[Any] = None,
     ) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    """승인 요청 결과 객체 (ADR-0021 D-04).
+
+    Attributes:
+        approved: 명령 실행이 승인되었는지 여부.
+        decision: 원장에 남은 최종 결정 상태 (APPROVAL_FINAL_DECISIONS 중 하나).
+        message: 거부·취소·초과 시 에러 메시지 (승인 시 빈 문자열).
+    """
+
+    approved: bool
+    decision: str
+    message: str = ""
+
+
+@runtime_checkable
+class ApproverPort(Protocol):
+    """터미널 도구가 사용자나 외부 정책 엔진에 명령 승인을 요청하는 포트 (ADR-0021 D-04)."""
+
+    def request(self, argv: list[str]) -> ApprovalOutcome: ...
+
+
+@runtime_checkable
+class CommandExecutorPort(Protocol):
+    """작업 디렉터리 내에서 서브프로세스 또는 샌드박스 명령을 실행하는 포트 (ADR-0021 D-04).
+
+    서브프로세스 격리(Docker 컨테이너, Firecracker 마이크로VM, 원격 gRPC 실행기 등)
+    구현체가 이 프로토콜을 구현하여 terminal_tool에 주입된다.
+    """
+
+    def __call__(self, args: list[str], cwd: Path, timeout: int) -> str: ...
+
+
+@runtime_checkable
+class ControlAuditPort(Protocol):
+    """제어 명령 검증·반영 및 차단기 동작 감사 기록 저장소 포트 (ADR-0021 D-04)."""
+
+    def record_control_audit(
+        self,
+        session_id: str,
+        *,
+        source: str,
+        command: str,
+        target: str,
+        old_value: Optional[str] = None,
+        new_value: Optional[str] = None,
+        result: str,
+        reason: Optional[str] = None,
+    ) -> int: ...
+
+    def list_control_audit(self, session_id: str) -> list[dict[str, Any]]: ...

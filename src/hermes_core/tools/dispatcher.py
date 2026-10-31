@@ -25,9 +25,8 @@ from hermes_core.kernel.contract import (
     PHASE_FAILURE_POLICY,
 )
 from hermes_core.kernel.tool_call import ToolCall, ToolMiddleware
-from hermes_core.tools.ports import SessionSearchPort
-from hermes_core.tools.approval import Approver
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
+from hermes_core.tools.ports import ApproverPort, CommandExecutorPort, SessionSearchPort
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
     READ_FILE_SCHEMA,
@@ -340,8 +339,9 @@ def create_default_dispatcher(
     memory_store: Optional[MemoryStore] = None,
     session_db: Optional[SessionSearchPort] = None,
     include: Optional[Collection[str]] = None,
-    approver: Optional[Approver] = None,
+    approver: Optional[ApproverPort] = None,
     checkpointer: Optional[Checkpointer] = None,
+    command_executor: Optional[CommandExecutorPort] = None,
 ) -> ToolDispatcher:
     """Hermes 핵심 도구들이 등록된 기본 디스패처 생성.
 
@@ -381,7 +381,11 @@ def create_default_dispatcher(
     # 3. Terminal 도구 등록
     if _should_register("terminal"):
         def _terminal_handler(**kwargs):
-            return terminal_tool(approver=approver, **kwargs)
+            return terminal_tool(
+                approver=approver,
+                command_executor=command_executor,
+                **kwargs,
+            )
 
         dispatcher.register_tool("terminal", _terminal_handler, TERMINAL_SCHEMA)
 
