@@ -457,3 +457,124 @@ def test_scenario_r7_tools_cannot_import_session_db() -> None:
                     f"R7 violation: {importer} imports {target}"
                 )
 
+
+def test_scenario_r20_known_debt_is_permanently_empty() -> None:
+    """시나리오 R20-1: 아키텍처 부채(KNOWN_DEBT) 영구 0건 및 실제 트리 무위반 검증."""
+    # 1. KNOWN_DEBT 정의 자체가 비어있음을 단언
+    assert KNOWN_DEBT == {}, f"KNOWN_DEBT must remain permanently empty, but got: {KNOWN_DEBT}"
+    assert len(KNOWN_DEBT) == 0
+
+    # 2. 실제 소스 트리 스캔 결과 위반이 0건임을 단언
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    all_imports = scan_source_tree(root)
+    actual_violations = find_violations(all_imports)
+    assert actual_violations == set(), f"Architecture violations detected in source tree: {sorted(actual_violations)}"
+
+    # 3. 래칫 비교 결과 새 위반 및 미해소 부채가 모두 0건임을 단언
+    new_violations, stale_debt = compare_with_debt(actual_violations, set(KNOWN_DEBT.keys()))
+    assert new_violations == set(), f"New violations: {new_violations}"
+    assert stale_debt == set(), f"Stale debt: {stale_debt}"
+
+
+def _find_private_conn_lines(tree: ast.AST) -> list[int]:
+    """AST를 순회하여 node.attr == '_conn'인 속성 접근 노드의 줄 번호 목록을 반환한다."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "_conn"
+    ]
+
+
+def test_scenario_r20_no_private_conn_outside_session_db() -> None:
+    """시나리오 R20-2: session_db.py 외의 모든 hermes_core 모듈에서 ._conn 접근 0건 검증."""
+    # 1. 합성 코드 자체 검증 (Self-Check)
+    synthetic_violation_1 = ast.parse("x = db._conn.execute('SELECT 1')")
+    assert len(_find_private_conn_lines(synthetic_violation_1)) == 1
+
+    synthetic_violation_2 = ast.parse("def run(self):\n    return self.store._conn.cursor()")
+    assert len(_find_private_conn_lines(synthetic_violation_2)) == 1
+
+    synthetic_legitimate = ast.parse("x = db.conn.execute('SELECT 1')\ny = obj._connection\nz = _conn_helper()")
+    assert len(_find_private_conn_lines(synthetic_legitimate)) == 0
+
+    # 2. 실제 소스 트리 전수 AST 순회
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    outside_violations: list[tuple[str, int]] = []
+    session_db_conn_count = 0
+
+    for py_file in root.rglob("*.py"):
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_file))
+        lines = _find_private_conn_lines(tree)
+
+        if py_file.name == "session_db.py":
+            session_db_conn_count += len(lines)
+        else:
+            rel_path = str(py_file.relative_to(root))
+            for line in lines:
+                outside_violations.append((rel_path, line))
+
+    # session_db 내부에는 실제 SQLite 핸들 사용이 존재해야 함 (검사기 무력화 방지)
+    assert session_db_conn_count > 0, "session_db.py must contain legitimate _conn usages"
+
+    # session_db 외부에는 0건이어야 함
+    assert not outside_violations, (
+        f"Found private ._conn accesses outside session_db.py: {outside_violations}"
+    )
+
+
+PURE_DOMAIN_MODULES: tuple[str, ...] = (
+    "hermes_core.agent.compression",
+    "hermes_core.agent.context_budget",
+    "hermes_core.tools.checkpoint_domain",
+    "hermes_core.tools.path_guard",
+)
+
+FORBIDDEN_INFRA_MODULES: tuple[str, ...] = (
+    "sqlite3",
+    "httpx",
+    "hermes_core.session_db",
+    "hermes_core.agent.agent",
+    "hermes_core.cli",
+    "hermes_core.llm_client",
+)
+
+
+def _check_domain_purity_violations(
+    domain_imports: dict[str, set[str]],
+) -> list[tuple[str, str]]:
+    violations: list[tuple[str, str]] = []
+    for mod in PURE_DOMAIN_MODULES:
+        targets = domain_imports.get(mod, set())
+        for target in targets:
+            for forbidden in FORBIDDEN_INFRA_MODULES:
+                if target == forbidden or target.startswith(f"{forbidden}."):
+                    violations.append((mod, target))
+    return violations
+
+
+def test_scenario_r20_pure_domain_modules_have_no_infra_imports() -> None:
+    """시나리오 R20-3: 순수 도메인 모듈 4종의 인프라(DB/네트워크/CLI) 무의존성 검증."""
+    # 1. 합성 위반 자체 검증 (Self-Check)
+    synthetic_imports = {
+        "hermes_core.tools.path_guard": {"pathlib", "sqlite3"},
+        "hermes_core.agent.compression": {"dataclasses", "hermes_core.session_db.SessionDB"},
+    }
+    synthetic_violations = _check_domain_purity_violations(synthetic_imports)
+    assert ("hermes_core.tools.path_guard", "sqlite3") in synthetic_violations
+    assert ("hermes_core.agent.compression", "hermes_core.session_db.SessionDB") in synthetic_violations
+
+    # 2. 실제 소스 트리 전수 검증
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    all_imports = scan_source_tree(root)
+
+    # 4종 순수 도메인 모듈이 모두 스캔 결과에 존재하는지 확인
+    for mod in PURE_DOMAIN_MODULES:
+        assert mod in all_imports, f"Pure domain module {mod} missing from scan_source_tree"
+
+    actual_violations = _check_domain_purity_violations(all_imports)
+    assert not actual_violations, (
+        f"Pure domain modules violate infrastructure isolation: {actual_violations}"
+    )
+
+
