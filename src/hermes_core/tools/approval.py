@@ -28,7 +28,7 @@ from hermes_core.constants import (
     APPROVAL_TOO_LONG_MESSAGE,
     APPROVAL_YES_ANSWERS,
 )
-from hermes_core.session_db import SessionDB
+from hermes_core.tools.ports import ApprovalStorePort
 
 
 def format_command_for_display(argv: Sequence[str]) -> str:
@@ -72,7 +72,7 @@ class Approver:
     def __init__(
         self,
         *,
-        session_db: SessionDB,
+        session_db: ApprovalStorePort,
         session_id: str,
         ask: Callable[[str], str],
         is_interactive: Callable[[], bool],
@@ -82,7 +82,7 @@ class Approver:
         """승인기 초기화.
 
         Args:
-            session_db: 요청을 기록하고 결정을 갱신할 SessionDB 인스턴스.
+            session_db: 요청을 기록하고 결정을 갱신할 저장소 포트 인스턴스 (ApprovalStorePort).
             session_id: 요청이 귀속될 세션 ID (이미 DB에 존재해야 함).
             ask: 사람에게 한 줄 입력을 요청하는 함수.
             is_interactive: 현재 대화형 터미널 환경인지 확인하는 함수.

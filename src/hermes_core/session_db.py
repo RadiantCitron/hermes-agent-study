@@ -331,6 +331,38 @@ class SessionDB:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def count_child_sessions(
+        self,
+        parent_session_id: str,
+        *,
+        started_at_min: Optional[float] = None,
+        started_at_max: Optional[float] = None,
+    ) -> int:
+        """부모 세션에서 파생된 자식 세션 수를 반환한다.
+
+        Args:
+            parent_session_id: 부모 세션 ID.
+            started_at_min: 지정 시 started_at >= started_at_min 조건 추가.
+            started_at_max: 지정 시 started_at < started_at_max 조건 추가 (started_at_min과 함께 사용).
+        """
+        if started_at_min is None:
+            cursor = self._conn.execute(
+                "SELECT count(*) FROM sessions WHERE parent_session_id = ?",
+                (parent_session_id,),
+            )
+        elif started_at_max is None:
+            cursor = self._conn.execute(
+                "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ?",
+                (parent_session_id, started_at_min),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ? AND started_at < ?",
+                (parent_session_id, started_at_min, started_at_max),
+            )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
     def find_resumable_session(
         self, target: Optional[str] = None
     ) -> list[dict[str, Any]]:

@@ -52,7 +52,7 @@ from hermes_core.constants import (
     ROLLBACK_NOTICE_UNKNOWN_REASON,
     get_default_workspace,
 )
-from hermes_core.session_db import SessionDB
+from hermes_core.tools.ports import CheckpointStorePort
 from hermes_core.tools.path_guard import check_write_path, resolve_workspace
 
 
@@ -136,7 +136,7 @@ class Checkpointer:
 
     def __init__(
         self,
-        db: SessionDB,
+        db: CheckpointStorePort,
         session_id: str,
         workspace: Optional[Path] = None,
         *,
@@ -491,24 +491,11 @@ class Checkpointer:
 
         subagent_count = 0
         try:
-            if start_time is None:
-                cursor = self.db._conn.execute(
-                    "SELECT count(*) FROM sessions WHERE parent_session_id = ?",
-                    (self.session_id,),
-                )
-            elif end_time is None:
-                cursor = self.db._conn.execute(
-                    "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ?",
-                    (self.session_id, start_time),
-                )
-            else:
-                cursor = self.db._conn.execute(
-                    "SELECT count(*) FROM sessions WHERE parent_session_id = ? AND started_at >= ? AND started_at < ?",
-                    (self.session_id, start_time, end_time),
-                )
-            row = cursor.fetchone()
-            if row:
-                subagent_count = row[0]
+            subagent_count = self.db.count_child_sessions(
+                self.session_id,
+                started_at_min=start_time,
+                started_at_max=end_time,
+            )
         except Exception:
             pass
 

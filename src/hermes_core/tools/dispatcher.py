@@ -25,7 +25,7 @@ from hermes_core.kernel.contract import (
     PHASE_FAILURE_POLICY,
 )
 from hermes_core.kernel.tool_call import ToolCall, ToolMiddleware
-from hermes_core.session_db import SessionDB
+from hermes_core.tools.ports import SessionSearchPort
 from hermes_core.tools.approval import Approver
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
 from hermes_core.tools.file_tools import (
@@ -338,7 +338,7 @@ def _checkpointed_handler(
 
 def create_default_dispatcher(
     memory_store: Optional[MemoryStore] = None,
-    session_db: Optional[SessionDB] = None,
+    session_db: Optional[SessionSearchPort] = None,
     include: Optional[Collection[str]] = None,
     approver: Optional[Approver] = None,
     checkpointer: Optional[Checkpointer] = None,

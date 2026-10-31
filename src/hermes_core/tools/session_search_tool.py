@@ -9,7 +9,7 @@
 import json
 from typing import Optional
 
-from hermes_core.session_db import SessionDB
+from hermes_core.tools.ports import SessionSearchPort
 
 SESSION_SEARCH_SCHEMA = {
     "type": "function",
@@ -38,7 +38,7 @@ SESSION_SEARCH_SCHEMA = {
 def session_search_tool(
     query: str,
     limit: int = 3,
-    db: Optional[SessionDB] = None,
+    db: Optional[SessionSearchPort] = None,
 ) -> str:
     """SessionDB의 FTS5 검색 엔진을 호출하여 검색 결과를 JSON 문자열로 반환."""
     if db is None:

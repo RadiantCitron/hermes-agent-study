@@ -22,7 +22,7 @@ from hermes_core.constants import (
     DELEGATE_SUMMARY_MAX_CHARS,
     SUBAGENT_SOURCE,
 )
-from hermes_core.session_db import SessionDB
+from hermes_core.tools.ports import DelegateStorePort
 from hermes_core.tools.dispatcher import ToolDispatcher, create_child_dispatcher
 
 DELEGATE_TASK_SCHEMA: dict[str, Any] = {
@@ -56,7 +56,7 @@ DELEGATE_TASK_SCHEMA: dict[str, Any] = {
 def register_delegate_tool(
     dispatcher: ToolDispatcher,
     *,
-    session_db: SessionDB,
+    session_db: DelegateStorePort,
     parent_session_id: str,
     llm_client_factory: Callable[[], Any],
     max_iterations: int = DELEGATE_CHILD_MAX_ITERATIONS,

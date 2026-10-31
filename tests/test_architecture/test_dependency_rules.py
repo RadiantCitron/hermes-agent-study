@@ -130,6 +130,15 @@ def find_violations(imports: dict[str, set[str]]) -> set[tuple[str, str, str]]:
                 if target_is_agent:
                     violations.add((importer, target, "R3"))
 
+            # R7: importer가 hermes_core.tools 하위이면 대상이 hermes_core.session_db(하위 포함)이면 위반
+            if is_importer_tools:
+                target_is_session_db = (
+                    target == "hermes_core.session_db"
+                    or target.startswith("hermes_core.session_db.")
+                )
+                if target_is_session_db:
+                    violations.add((importer, target, "R7"))
+
             # R4: importer가 hermes_core.extensions.contract이면 대상은 표준 라이브러리이거나 hermes_core.kernel(하위 포함)
             if is_importer_contract:
                 target_is_kernel = target == "hermes_core.kernel" or target.startswith("hermes_core.kernel.")
@@ -302,9 +311,10 @@ def test_scenario_9_actual_tree_scanner_smoke():
     cli_targets = all_imports.get("hermes_core.cli", set())
     assert any(t == "hermes_core.agent" or t.startswith("hermes_core.agent.") for t in cli_targets)
 
-    # hermes_core.tools.delegate_tool이 hermes_core.session_db를 참조하는지 확인
+    # hermes_core.tools.delegate_tool이 hermes_core.tools.ports를 참조하고 session_db를 참조하지 않는지 확인
     del_targets = all_imports.get("hermes_core.tools.delegate_tool", set())
-    assert any(t == "hermes_core.session_db" or t.startswith("hermes_core.session_db.") for t in del_targets)
+    assert any(t == "hermes_core.tools.ports" or t.startswith("hermes_core.tools.ports.") for t in del_targets)
+    assert not any(t == "hermes_core.session_db" or t.startswith("hermes_core.session_db.") for t in del_targets)
 
 
 def test_scenario_10_actual_tree_ratchet_enforcement():
@@ -440,4 +450,31 @@ def test_scenario_12_r6_control_boundary():
             "hermes_core.control",
         }
     }) == set()
+
+
+def test_scenario_r7_tools_cannot_import_session_db() -> None:
+    """시나리오 R7: tools/* 하위 모듈의 session_db import 금지 검증."""
+    # 1. 합성 위반 검출 확인
+    synthetic_violations = find_violations({
+        "hermes_core.tools.checkpoint": {"hermes_core.session_db"},
+        "hermes_core.tools.approval": {"hermes_core.session_db.SessionDB"},
+    })
+    assert ("hermes_core.tools.checkpoint", "hermes_core.session_db", "R7") in synthetic_violations
+    assert ("hermes_core.tools.approval", "hermes_core.session_db.SessionDB", "R7") in synthetic_violations
+
+    # 2. tools/ports import는 R7 위반이 아님 확인
+    ports_violations = find_violations({
+        "hermes_core.tools.checkpoint": {"hermes_core.tools.ports"},
+    })
+    assert not any(rule == "R7" for _, _, rule in ports_violations)
+
+    # 3. 실제 소스 트리에서 tools/* 모듈 중 session_db를 import하는 모듈이 0개임을 검증
+    root = Path(__file__).resolve().parents[2] / "src" / "hermes_core"
+    all_imports = scan_source_tree(root)
+    for importer, targets in all_imports.items():
+        if importer == "hermes_core.tools" or importer.startswith("hermes_core.tools."):
+            for target in targets:
+                assert target != "hermes_core.session_db" and not target.startswith("hermes_core.session_db."), (
+                    f"R7 violation: {importer} imports {target}"
+                )
 
