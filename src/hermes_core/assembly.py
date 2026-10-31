@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
 from hermes_core.agent.loop_guard import LoopGuardExtension
+from hermes_core.constants import LOOP_GUARD_BLOCK_THRESHOLD, LOOP_GUARD_WARN_THRESHOLD
+from hermes_core.control.settings import Settings
 from hermes_core.kernel.contract import Extension
 from hermes_core.kernel.llm_pipeline import LLMMiddleware, LLMNext, LLMRequest
 from hermes_core.kernel.ports import CallRecordable, LLMReply, TranscriptStore
@@ -28,6 +30,9 @@ def compression_config_of(agent: Any) -> CompressionConfig:
 
 def default_extensions(
     compression_config: Callable[[], CompressionConfig],
+    *,
+    loop_guard_warn_threshold: int = LOOP_GUARD_WARN_THRESHOLD,
+    loop_guard_block_threshold: int = LOOP_GUARD_BLOCK_THRESHOLD,
 ) -> list[Extension]:
     """기본 확장 목록을 새로 인스턴스화하여 반환한다.
 
@@ -35,8 +40,37 @@ def default_extensions(
     """
     return [
         CompressionExtension(compression_config),
-        LoopGuardExtension(),
+        LoopGuardExtension(
+            warn_threshold=loop_guard_warn_threshold,
+            block_threshold=loop_guard_block_threshold,
+        ),
     ]
+
+
+def create_agent(settings: Settings, **parts: Any) -> Any:
+    """Settings 스냅샷과 추가 부품들로 HermesAgent를 조립하여 반환한다."""
+    from hermes_core.agent.agent import HermesAgent
+
+    kwargs: dict[str, Any] = {
+        "model": settings.model,
+        "max_iterations": settings.max_iterations,
+        "context_window_tokens": settings.context_window_tokens,
+        "compression_threshold_ratio": settings.compression_threshold_ratio,
+        "compression_enabled": settings.compression_enabled,
+        "skills_index": settings.skills_index,
+    }
+    kwargs.update(parts)
+
+    if "extensions" not in kwargs or kwargs["extensions"] is None:
+        agent: Any = None
+        kwargs["extensions"] = default_extensions(
+            lambda: compression_config_of(agent),
+            loop_guard_warn_threshold=settings.loop_guard_warn_threshold,
+            loop_guard_block_threshold=settings.loop_guard_block_threshold,
+        )
+
+    agent = HermesAgent(**kwargs)
+    return agent
 
 
 def usage_ledger_middleware(store: TranscriptStore) -> LLMMiddleware:

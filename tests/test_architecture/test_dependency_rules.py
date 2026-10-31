@@ -93,13 +93,14 @@ def _is_stdlib(module_root: str) -> bool:
 
 
 def find_violations(imports: dict[str, set[str]]) -> set[tuple[str, str, str]]:
-    """의존 방향 규칙(R1~R5)을 대조하여 위반 목록을 반환한다."""
+    """의존 방향 규칙(R1~R6)을 대조하여 위반 목록을 반환한다."""
     violations: set[tuple[str, str, str]] = set()
 
     for importer, targets in imports.items():
         is_importer_kernel = importer == "hermes_core.kernel" or importer.startswith("hermes_core.kernel.")
         is_importer_tools = importer == "hermes_core.tools" or importer.startswith("hermes_core.tools.")
         is_importer_contract = importer == "hermes_core.extensions.contract"
+        is_importer_control = importer == "hermes_core.control" or importer.startswith("hermes_core.control.")
 
         for target in targets:
             root_pkg = target.split(".")[0]
@@ -142,6 +143,32 @@ def find_violations(imports: dict[str, set[str]]) -> set[tuple[str, str, str]]:
                     if importer != "hermes_core.assembly":
                         violations.add((importer, target, "R5"))
                     break
+
+            # R6 유입(inbound): target이 hermes_core.control 또는 하위일 때
+            # importer는 assembly, cli, control(하위 포함)만 허용
+            target_is_control = target == "hermes_core.control" or target.startswith("hermes_core.control.")
+            if target_is_control:
+                importer_allowed = (
+                    importer == "hermes_core.assembly"
+                    or importer == "hermes_core.cli"
+                    or importer == "hermes_core.control"
+                    or importer.startswith("hermes_core.control.")
+                )
+                if not importer_allowed:
+                    violations.add((importer, target, "R6"))
+
+            # R6 유출(outbound): importer가 hermes_core.control 또는 하위일 때
+            # target은 표준 라이브러리, constants(하위 포함), control(하위 포함)만 허용
+            if is_importer_control:
+                target_allowed = (
+                    _is_stdlib(root_pkg)
+                    or target == "hermes_core.constants"
+                    or target.startswith("hermes_core.constants.")
+                    or target == "hermes_core.control"
+                    or target.startswith("hermes_core.control.")
+                )
+                if not target_allowed:
+                    violations.add((importer, target, "R6"))
 
     return violations
 
@@ -296,7 +323,7 @@ def test_scenario_10_actual_tree_ratchet_enforcement():
 
     error_messages = []
     if new_violations:
-        error_messages.append(f"새로운 의존 방향 위반 발견 (R1~R5): {sorted(new_violations)}")
+        error_messages.append(f"새로운 의존 방향 위반 발견 (R1~R6): {sorted(new_violations)}")
     if stale_debt:
         error_messages.append(f"갚은 부채를 KNOWN_DEBT에서 지워라: {sorted(stale_debt)}")
 
@@ -315,6 +342,24 @@ def test_scenario_10_actual_tree_ratchet_enforcement():
         t == "hermes_core.assembly" or t.startswith("hermes_core.assembly.")
         for t in agent_targets
     ), f"agent.py missing hermes_core.assembly: {agent_targets}"
+
+    # 010 추가 확인: all_imports에 hermes_core.control.settings가 존재하고,
+    # 이를 import하는 모듈은 hermes_core.control, hermes_core.assembly, hermes_core.cli뿐임
+    assert "hermes_core.control.settings" in all_imports
+    importers_of_control = {
+        m
+        for m, targets in all_imports.items()
+        if any(t == "hermes_core.control" or t.startswith("hermes_core.control.") for t in targets)
+    }
+    allowed_importers = {
+        "hermes_core.control",
+        "hermes_core.control.settings",
+        "hermes_core.assembly",
+        "hermes_core.cli",
+    }
+    assert importers_of_control.issubset(allowed_importers), (
+        f"Unexpected importers of control: {importers_of_control - allowed_importers}"
+    )
 
 
 def test_scenario_11_feature_extension_modules_completeness():
@@ -348,3 +393,48 @@ def test_scenario_11_feature_extension_modules_completeness():
         f"FEATURE_EXTENSION_MODULES mismatch. Discovered - Expected: {discovered_modules - expected_modules}, "
         f"Expected - Discovered: {expected_modules - discovered_modules}"
     )
+
+
+def test_scenario_12_r6_control_boundary():
+    """시나리오 12: R6 단위 검증 (유입·유출 양방향)."""
+    # (a) 유입 위반: agent -> control.settings
+    assert find_violations({"hermes_core.agent.agent": {"hermes_core.control.settings"}}) == {
+        ("hermes_core.agent.agent", "hermes_core.control.settings", "R6")
+    }
+
+    # (b) 유입 위반: dispatcher -> control
+    assert find_violations({"hermes_core.tools.dispatcher": {"hermes_core.control"}}) == {
+        ("hermes_core.tools.dispatcher", "hermes_core.control", "R6")
+    }
+
+    # (c) 유입 위반: session_db -> control.settings
+    assert find_violations({"hermes_core.session_db": {"hermes_core.control.settings"}}) == {
+        ("hermes_core.session_db", "hermes_core.control.settings", "R6")
+    }
+
+    # (d) 유입 허용: assembly, cli, control -> control.settings
+    assert find_violations({
+        "hermes_core.assembly": {"hermes_core.control.settings"},
+        "hermes_core.cli": {"hermes_core.control.settings"},
+        "hermes_core.control": {"hermes_core.control.settings"},
+    }) == set()
+
+    # (e) 유출 위반: control.settings -> agent.agent
+    assert find_violations({"hermes_core.control.settings": {"hermes_core.agent.agent"}}) == {
+        ("hermes_core.control.settings", "hermes_core.agent.agent", "R6")
+    }
+
+    # (f) 유출 위반: control.settings -> assembly
+    assert find_violations({"hermes_core.control.settings": {"hermes_core.assembly"}}) == {
+        ("hermes_core.control.settings", "hermes_core.assembly", "R6")
+    }
+
+    # (g) 유출 허용: control.settings -> tomllib, constants, control
+    assert find_violations({
+        "hermes_core.control.settings": {
+            "tomllib",
+            "hermes_core.constants",
+            "hermes_core.control",
+        }
+    }) == set()
+

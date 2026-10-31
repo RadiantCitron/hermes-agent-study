@@ -16,6 +16,8 @@ from typing import Optional
 import uuid
 
 from hermes_core.agent import HermesAgent, MockLLMClient
+from hermes_core.assembly import create_agent
+from hermes_core.control.settings import SettingsError, load_settings
 from hermes_core.cli_input import (
     hold_typeahead,
     is_interactive_terminal,
@@ -211,7 +213,7 @@ def main() -> None:
     parser.add_argument(
         "--context-window",
         type=int,
-        default=CONTEXT_WINDOW_TOKENS,
+        default=None,
         help=f"Context window token limit (default: {CONTEXT_WINDOW_TOKENS})",
     )
     parser.add_argument(
@@ -255,14 +257,28 @@ def main() -> None:
         print(CLI_RESUME_MOCK_ERROR, file=sys.stderr)
         sys.exit(2)
 
-    if args.context_window < 1:
-        print(
-            f"Error: --context-window must be a positive integer (got {args.context_window}).",
-            file=sys.stderr,
-        )
+    cli_overrides: dict[str, Any] = {}
+    if args.model is not None:
+        cli_overrides["model"] = args.model
+    if args.context_window is not None:
+        cli_overrides["context_window_tokens"] = args.context_window
+    if args.delegate:
+        cli_overrides["delegate"] = True
+    if args.no_skills_index:
+        cli_overrides["skills_index"] = False
+    if args.no_approval:
+        cli_overrides["approval_enabled"] = False
+    if args.no_checkpoints:
+        cli_overrides["checkpoints_enabled"] = False
+
+    try:
+        loaded = load_settings(cli_overrides=cli_overrides)
+    except SettingsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    model = args.model
+    settings = loaded.settings
+    model = settings.model
     llm_client = None
 
     if args.mock:
@@ -306,7 +322,7 @@ def main() -> None:
 
         llm_client = OpenRouterClient(api_key=api_key, model=model)
 
-    approval_enabled = not args.no_approval and is_interactive_terminal()
+    approval_enabled = settings.approval_enabled and is_interactive_terminal()
     session_db = SessionDB()
 
     is_resuming = args.resume is not None
@@ -347,7 +363,7 @@ def main() -> None:
     )
     checkpointer = (
         Checkpointer(session_db, session_id, Path.cwd())
-        if not args.no_checkpoints
+        if settings.checkpoints_enabled
         else None
     )
     restored_turn = (
@@ -361,11 +377,10 @@ def main() -> None:
         approver=approver,
         checkpointer=checkpointer,
     )
-    agent = HermesAgent(
+    agent = create_agent(
+        settings,
         model=model,
         llm_client=llm_client,
-        context_window_tokens=args.context_window,
-        skills_index=not args.no_skills_index,
         session_id=session_id,
         session_db=session_db,
         memory_store=memory_store,
@@ -373,7 +388,7 @@ def main() -> None:
         resume=is_resuming,
     )
 
-    if not args.mock and args.delegate:
+    if not args.mock and settings.delegate:
         register_delegate_tool(
             agent.dispatcher,
             session_db=agent.session_db,
@@ -402,15 +417,15 @@ def main() -> None:
     else:
         print(f"🚀 Running in REAL mode (Model: {agent.model}).")
         print(f"📁 Working directory: {os.getcwd()}")
-    if not args.mock and args.delegate:
+    if not args.mock and settings.delegate:
         print("Delegation enabled (delegate_task).")
-    if args.no_skills_index:
+    if not settings.skills_index:
         print("Skills index disabled (--no-skills-index).")
-    if args.no_approval:
+    if not settings.approval_enabled:
         print(CLI_APPROVAL_DISABLED_NOTICE)
     elif approval_enabled:
         print(CLI_APPROVAL_ENABLED_NOTICE)
-    if args.no_checkpoints:
+    if not settings.checkpoints_enabled:
         print(CLI_CHECKPOINT_DISABLED_NOTICE)
     else:
         print(CLI_CHECKPOINT_ENABLED_NOTICE)

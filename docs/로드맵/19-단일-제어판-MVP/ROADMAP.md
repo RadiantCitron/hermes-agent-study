@@ -201,8 +201,8 @@ stateDiagram-v2
 | `context_window_tokens` | int ≥ 1 | `CONTEXT_WINDOW_TOKENS` | runtime | `agent.context_window_tokens` → `assembly.compression_config_of`가 호출 때마다 읽음 |
 | `compression_enabled` | bool | True | runtime | `agent.compression_enabled` → 같음 |
 | `compression_threshold_ratio` | float (0, 1] | `COMPRESSION_THRESHOLD_RATIO` | runtime | 같음 |
-| `loop_guard_warn_threshold` | int ≥ 1 | `LOOP_GUARD_WARN_THRESHOLD` | startup | `LoopGuardExtension(warn_threshold=)`(`agent/loop_guard.py` 120행) |
-| `loop_guard_block_threshold` | int > warn | `LOOP_GUARD_BLOCK_THRESHOLD` | startup | 같음 |
+| `loop_guard_warn_threshold` | int ≥ 2 | `LOOP_GUARD_WARN_THRESHOLD` (3) | startup | `LoopGuardExtension(warn_threshold=)`(`agent/loop_guard.py` 120행, 하한 ≥ 2) |
+| `loop_guard_block_threshold` | int > warn (최소 3) | `LOOP_GUARD_BLOCK_THRESHOLD` (5) | startup | 같음 |
 | `skills_index` | bool | True(CLI 기본, `--no-skills-index`) | startup | `HermesAgent(skills_index=)` |
 | `delegate` | bool | False(`--delegate`) | startup | `cli.py` 376행 `register_delegate_tool` |
 | `approval_enabled` | bool | True(`--no-approval`) | locked | `cli.py` `approval_enabled`(TTY 조건은 그대로 곱함) |
@@ -213,22 +213,22 @@ stateDiagram-v2
   - API 키는 넣지 않는다(ADR D-03).
 - **계층**:
   - 파일은 `$HERMES_HOME/config.toml`이다. 경로는 `constants.get_hermes_home()` 기준이고, 평평한 키만 허용한다.
-  - 환경변수는 `HERMES_` + 키 대문자다(예: `HERMES_MAX_ITERATIONS`). 불리언은 `1/0/true/false/yes/no`다.
+  - 환경변수는 `HERMES_` + 키 대문자다(예: `HERMES_MAX_ITERATIONS`). `SETTING_SPECS`에 등록된 키만 읽고 무관한 `HERMES_*`(`HERMES_HOME` 등)는 무시한다. 불리언은 `1/0/true/false/yes/no`다.
   - CLI는 사용자가 **준** 옵션만 덮는다. 이를 위해 argparse 기본값을 `None`으로 두고, `--no-*` 플래그는 「주어졌을 때만 False」로 해석한다.
 - **시그니처 초안**:
-  - `load_settings(*, cli_overrides: Mapping[str, Any], environ: Mapping[str, str] = os.environ, config_path: Path | None = None) -> LoadedSettings`
+  - `load_settings(*, cli_overrides: Mapping[str, Any] | None = None, environ: Mapping[str, str] | None = None, config_path: Path | None = None) -> LoadedSettings`
   - `LoadedSettings.sources[key]`는 `"default" | "file" | "env" | "cli"` 중 하나다.
   - 오류는 `SettingsError(layer, key, reason)`로 낸다.
   - 항목 메타데이터는 `SETTING_SPECS: Mapping[str, SettingSpec(type, mutability, validator)]` 하나에 둔다. 항목 표의 정본이다.
 - **조립**:
-  - `assembly.create_agent(settings: Settings, **parts) -> HermesAgent`. `parts`는 `llm_client`, `session_id`, `session_db`, `memory_store`, `dispatcher`, `resume` 등 실행 부품이다.
+  - `assembly.create_agent(settings: Settings, **parts) -> Any`. `parts`는 `llm_client`, `session_id`, `session_db`, `memory_store`, `dispatcher`, `resume` 등 실행 부품이다. 반환 타입 주석은 순환 방지를 위해 `Any`로 두고, `HermesAgent` import는 함수 본문 안에서 수행한다.
   - LoopGuard 임계를 넘기려면 `extensions=`를 직접 만들어야 한다. 그런데 압축 확장은 에이전트를 가리키는 설정 함수가 필요하다. 그래서 늦게 묶는 함수(`lambda: compression_config_of(agent)`)를 쓴다.
-  - **탐침**: `CompressionExtension`이 설치(`install`) 중에 설정 함수를 부르는지 확인한다. 부르면 늦게 묶기가 실패한다.
-  - `default_extensions`에 임계 키워드 인자(기본값은 지금 상수)를 더해도 기존 호출 3곳(시험)은 그대로다.
+  - **탐침 확인 완료**: `CompressionExtension`이 설치(`install`) 중에 설정 함수를 부르지 않으므로 늦게 묶기가 안전하게 성립한다.
+  - `default_extensions`에 임계 키워드 인자(기본값은 지금 상수)를 더해도 기존 호출 4곳(에이전트 및 시험)은 그대로다.
 - **CLI 변경**:
   - `cli.py` 364~374행의 `HermesAgent(...)`를 `create_agent(settings, ...)`로 바꾼다. `cli.HermesAgent` 이름은 남긴다(`test_cli.py`가 `cli.HermesAgent.__init__`을 패치함).
   - 검증 오류는 세션 DB를 열기 전에 종료 코드 2로 끝낸다(`test_cli.py` 시나리오 25).
-- **R6**: `test_dependency_rules.py`에 「`hermes_core.control`을 import하는 모듈은 `hermes_core.assembly`·`hermes_core.cli`·`hermes_core.control.*`뿐」을 더한다. 기존 R1~R5 구조(ast 수집, 부채 목록 완전성)를 따른다.
+- **R6**: `test_dependency_rules.py`에 유입(`control`을 import할 수 있는 모듈은 `assembly`·`cli`·`control.*`뿐) 및 유출(`control`이 import할 수 있는 모듈은 표준 라이브러리·`constants`·`control.*`뿐) 양방향을 검사한다. 기존 R1~R5 구조(ast 수집, 부채 목록 완전성)를 따른다.
 - **인수 시나리오 후보**:
   1. 아무 계층도 없음 → 모든 값이 표의 기본값, 출처는 전부 `default`.
   2. 파일 + 환경변수 + CLI가 같은 키를 주면 CLI가 이긴다. 키 셋을 섞으면 키마다 출처가 맞다.
