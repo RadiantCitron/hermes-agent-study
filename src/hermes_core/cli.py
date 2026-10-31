@@ -30,6 +30,10 @@ from hermes_core.constants import (
     CLI_CHECKPOINT_REFUSED_NOTICE,
     CLI_INTERRUPT_MODEL_WILL_BE_TOLD_NOTICE,
     CLI_MULTILINE_HINT,
+    CLI_RESUME_AMBIGUOUS_ERROR,
+    CLI_RESUME_MOCK_ERROR,
+    CLI_RESUME_NOT_FOUND_ERROR,
+    CLI_RESUMED_BANNER_NOTICE,
     CLI_ROLLBACK_ABORTED_NOTICE,
     CLI_ROLLBACK_CANCELLED_NOTICE,
     CLI_ROLLBACK_DISABLED_NOTICE,
@@ -228,6 +232,14 @@ def main() -> None:
         action="store_true",
         help="Disable file checkpoints (write_file/patch changes cannot be rolled back with /rollback)",
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        default=None,
+        metavar="SESSION_ID",
+        help="Resume the latest CLI session, or a session matching the given ID/prefix",
+    )
     args = parser.parse_args()
 
     if args.delegate and args.mock:
@@ -235,6 +247,10 @@ def main() -> None:
             "Error: --delegate cannot be used with --mock (delegation needs a real model).",
             file=sys.stderr,
         )
+        sys.exit(2)
+
+    if args.resume is not None and args.mock:
+        print(CLI_RESUME_MOCK_ERROR, file=sys.stderr)
         sys.exit(2)
 
     if args.context_window < 1:
@@ -289,8 +305,33 @@ def main() -> None:
         llm_client = OpenRouterClient(api_key=api_key, model=model)
 
     approval_enabled = not args.no_approval and is_interactive_terminal()
-    session_id = str(uuid.uuid4())
     session_db = SessionDB()
+
+    is_resuming = args.resume is not None
+    if is_resuming:
+        target_arg = args.resume.strip()
+        matches = session_db.find_resumable_session(target_arg)
+        if not matches:
+            detail = (
+                ""
+                if target_arg.lower() == "latest"
+                else f" matching '{target_arg}'"
+            )
+            print(CLI_RESUME_NOT_FOUND_ERROR.format(detail=detail), file=sys.stderr)
+            session_db.close()
+            sys.exit(2)
+        if len(matches) > 1:
+            short_ids = ", ".join(m["id"][:8] for m in matches[:5])
+            print(
+                CLI_RESUME_AMBIGUOUS_ERROR.format(prefix=target_arg, matches=short_ids),
+                file=sys.stderr,
+            )
+            session_db.close()
+            sys.exit(2)
+        session_id = matches[0]["id"]
+    else:
+        session_id = str(uuid.uuid4())
+
     memory_store = MemoryStore()
     approver = (
         Approver(
@@ -307,6 +348,11 @@ def main() -> None:
         if not args.no_checkpoints
         else None
     )
+    restored_turn = (
+        checkpointer.restore_from_db()
+        if (is_resuming and checkpointer is not None)
+        else 0
+    )
     dispatcher = create_default_dispatcher(
         memory_store=memory_store,
         session_db=session_db,
@@ -322,6 +368,7 @@ def main() -> None:
         session_db=session_db,
         memory_store=memory_store,
         dispatcher=dispatcher,
+        resume=is_resuming,
     )
 
     if not args.mock and args.delegate:
@@ -334,6 +381,20 @@ def main() -> None:
 
     print("=" * 60)
     print(f"🤖 Hermes Core CLI Started (Session: {agent.session_id[:8]}...)")
+    if is_resuming:
+        initial_history = agent.load_conversation_history()
+        restored_msg_count = (
+            0 if initial_history is None else max(0, len(initial_history) - 1)
+        )
+        print(
+            CLI_RESUMED_BANNER_NOTICE.format(
+                session_id=agent.session_id[:8],
+                message_count=restored_msg_count,
+                turn_index=restored_turn,
+            )
+        )
+    else:
+        initial_history = None
     if args.mock:
         print("💡 Running in MOCK mode (Offline test).")
     else:
@@ -369,7 +430,7 @@ def main() -> None:
     session_end_reason = SESSION_END_ERROR
     pending_notices: list[RollbackResult | InterruptedTurn] = []
     try:
-        history = None
+        history = initial_history
         checkpoint_refusal_notified = False
         while True:
             try:
@@ -407,6 +468,9 @@ def main() -> None:
             pending_notices.clear()
             message = f"{notice}\n\n{user_input}" if notice else user_input
 
+            last_active_msg_id = agent.session_db.get_last_active_message_id(
+                agent.session_id
+            )
             # 처리 중에 미리 친 키는 다음 프롬프트로 그대로 넘긴다 (승인 질문은 따로 버린다)
             try:
                 with hold_typeahead():
@@ -422,6 +486,12 @@ def main() -> None:
             except KeyboardInterrupt:
                 print(f"\n{CLI_TURN_CANCELLED_NOTICE}")
                 pending_notices[:0] = delivered
+                try:
+                    agent.session_db.deactivate_messages_after(
+                        agent.session_id, last_active_msg_id
+                    )
+                except Exception as e:
+                    logger.warning("deactivate_messages_after failed: %s", e)
                 if checkpointer is not None:
                     try:
                         interrupted = checkpointer.collect_interrupted_turn()

@@ -427,6 +427,22 @@ SESSION_END_USER_INTERRUPT = "user_interrupt"
 SESSION_END_EOF = "eof"
 SESSION_END_ERROR = "error"
 
+# =============================================================================
+# 세션 재개 안내 및 에러 관련 상수 (14 로드맵)
+# =============================================================================
+
+CLI_RESUME_MOCK_ERROR = (
+    "Error: --resume cannot be used with --mock (resume requires persistent state.db in real mode)."
+)
+CLI_RESUME_NOT_FOUND_ERROR = "Error: No resumable CLI session found{detail}."
+CLI_RESUME_AMBIGUOUS_ERROR = (
+    "Error: Session prefix '{prefix}' is ambiguous (matches: {matches})."
+)
+CLI_RESUMED_BANNER_NOTICE = (
+    "♻️  Resumed session {session_id}... ({message_count} active messages, last turn: {turn_index})."
+)
+
+
 
 
 
