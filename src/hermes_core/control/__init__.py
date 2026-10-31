@@ -13,6 +13,14 @@ from hermes_core.control.settings import (
     load_settings,
     parse_setting_string,
 )
+from hermes_core.control.snapshot import (
+    ControlSnapshot,
+    ExtensionView,
+    SettingView,
+    build_snapshot,
+    mask_secrets,
+    render_snapshot,
+)
 
 __all__ = [
     "Settings",
@@ -24,4 +32,10 @@ __all__ = [
     "Mutability",
     "SettingSource",
     "parse_setting_string",
+    "ControlSnapshot",
+    "ExtensionView",
+    "SettingView",
+    "build_snapshot",
+    "mask_secrets",
+    "render_snapshot",
 ]

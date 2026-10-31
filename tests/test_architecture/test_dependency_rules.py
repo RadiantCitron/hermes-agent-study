@@ -354,6 +354,7 @@ def test_scenario_10_actual_tree_ratchet_enforcement():
     allowed_importers = {
         "hermes_core.control",
         "hermes_core.control.settings",
+        "hermes_core.control.snapshot",
         "hermes_core.assembly",
         "hermes_core.cli",
     }
