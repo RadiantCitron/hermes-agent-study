@@ -211,6 +211,9 @@ class ToolDispatcher:
                     try:
                         return mw(c, _instrumented_next)
                     except Exception as mw_exc:
+                        if inner_exc is not None and mw_exc is inner_exc:
+                            # 안쪽 미들웨어/핸들러가 던진 예외가 그대로 전달된 것이면 현재 미들웨어의 자체 실패가 아님
+                            raise
                         logger.warning(
                             "GUARD middleware '%s' failed in phase %s: %s",
                             name,

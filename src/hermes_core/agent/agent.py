@@ -20,6 +20,7 @@ from typing import Any, Optional
 import uuid
 
 from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
+from hermes_core.agent.loop_guard import LoopGuardExtension
 from hermes_core.agent.events import (
     EVENT_EXTENSION_ERROR,
     EVENT_HOOK_ERROR,
@@ -238,6 +239,7 @@ class HermesAgent:
 
         # 기본 압축 확장 설치
         self.install_extension(CompressionExtension(self._compression_config))
+        self.install_extension(LoopGuardExtension())
 
     @property
     def _rejected_at_tokens(self) -> Optional[int]:

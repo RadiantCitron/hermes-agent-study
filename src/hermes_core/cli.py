@@ -52,6 +52,7 @@ from hermes_core.constants import (
     CLI_ROLLBACK_RESULT_SKIPPED,
     CLI_ROLLBACK_RESULT_SUMMARY,
     CLI_ROLLBACK_USAGE_NOTICE,
+    CLI_STUCK_LOOP_NOTICE,
     CLI_TURN_CANCELLED_NOTICE,
     CLI_UNSENT_NOTICE_ON_EXIT,
     CONTEXT_WINDOW_TOKENS,
@@ -481,6 +482,8 @@ def main() -> None:
                         kind = err.get("kind", "unknown")
                         msg = err.get("message", "Unknown error")
                         print(f"\nModel call failed ({kind}): {msg}")
+                    elif result.get("stopped_reason") == "stuck_loop":
+                        print(f"\n{CLI_STUCK_LOOP_NOTICE}")
                     else:
                         print(f"\nAssistant: {result['final_response']}")
             except KeyboardInterrupt:

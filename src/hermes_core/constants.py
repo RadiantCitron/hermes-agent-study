@@ -456,8 +456,24 @@ CLI_RESUMED_BANNER_NOTICE = (
 )
 
 
+# =============================================================================
+# 루프 정체 감지 및 자가 교정 상수 (17 로드맵)
+# =============================================================================
 
+LOOP_GUARD_WARN_THRESHOLD = 3
+LOOP_GUARD_BLOCK_THRESHOLD = 5
 
-
-
+LOOP_GUARD_WARNING_MESSAGE = (
+    "Loop guard warning: tool '{tool_name}' was called {count} times consecutively "
+    "with identical arguments. Do not repeat the same call; inspect with "
+    "search_files/read_file, change arguments, or ask the user."
+)
+LOOP_GUARD_BLOCKED_MESSAGE = (
+    "Loop guard blocked: tool '{tool_name}' was called {count} times consecutively "
+    "with identical arguments. Execution was skipped and the turn is stopping to "
+    "prevent an infinite loop."
+)
+CLI_STUCK_LOOP_NOTICE = (
+    "⚠️  Agent stopped early: repeated identical tool calls detected (stuck_loop)."
+)
 
