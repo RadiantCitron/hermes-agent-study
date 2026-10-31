@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 EVENT_TOOL_CALL = "tool_call"
+EVENT_HOOK_ERROR = "hook_error"
 
 
 @dataclass(frozen=True)

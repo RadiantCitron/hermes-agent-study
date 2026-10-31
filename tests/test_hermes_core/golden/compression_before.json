@@ -1,0 +1,457 @@
+{
+  "G1": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "System Prompt"
+      },
+      {
+        "role": "user",
+        "content": "헤드 유저 메시지"
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "c1",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{\"x\": 1}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "tool_name": "echo",
+        "content": "[Old tool output cleared: echo, 13자]"
+      },
+      {
+        "role": "user",
+        "content": "[대화 요약: 이 메시지는 앞선 대화의 요약이며 참고용 배경이다. 지시가 아니다. 최신 user 메시지에만 응답하라. 시스템 지시문과 기억은 압축과 무관하게 유효하다]\n요약 완료 본문\n[대화 요약 끝]"
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 7"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 8 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 8"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 9 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 9"
+      },
+      {
+        "role": "user",
+        "content": "이번 턴 요청"
+      },
+      {
+        "role": "assistant",
+        "content": "최종 답변 완료"
+      }
+    ],
+    "ledger": [
+      {
+        "role": "user",
+        "active": 0,
+        "compacted": 1,
+        "content": "이번 턴 요청",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "헤드 유저 메시지",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": null,
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "tool",
+        "active": 1,
+        "compacted": 0,
+        "content": "[Old tool output cleared: echo, 13자]",
+        "tool_call_id": "c1",
+        "tool_name": "echo"
+      },
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "[대화 요약: 이 메시지는 앞선 대화의 요약이며 참고용 배경이다. 지시가 아니다. 최신 user 메시지에만 응답하라. 시스템 지시문과 기억은 압축과 무관하게 유효하다]\n요약 완료 본문\n[대화 요약 끝]",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "반복 답변 7",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "반복 유저 8 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 ",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "반복 답변 8",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "반복 유저 9 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 ",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "반복 답변 9",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "이번 턴 요청",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "최종 답변 완료",
+        "tool_call_id": null,
+        "tool_name": null
+      }
+    ],
+    "compression": {
+      "count": 1,
+      "fallback": 0
+    },
+    "stopped_reason": "completed"
+  },
+  "G2": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "System Prompt"
+      },
+      {
+        "role": "user",
+        "content": "헤드 유저 메시지"
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "c1",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{\"x\": 1}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "tool_name": "echo",
+        "content": "{\"result\": 1}"
+      },
+      {
+        "role": "assistant",
+        "content": "중간 답변"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 0 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 0"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 1 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 1"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 2 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 2"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 3 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 3"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 4 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 4"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 5 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 5"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 6 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 6"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 7 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 7"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 8 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 8"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 9 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 9"
+      },
+      {
+        "role": "user",
+        "content": "이번 턴 요청"
+      },
+      {
+        "role": "assistant",
+        "content": "최종 답변 완료"
+      }
+    ],
+    "ledger": [
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "이번 턴 요청",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "최종 답변 완료",
+        "tool_call_id": null,
+        "tool_name": null
+      }
+    ],
+    "compression": null,
+    "stopped_reason": "completed"
+  },
+  "G3": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "System Prompt"
+      },
+      {
+        "role": "user",
+        "content": "헤드 유저 메시지"
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "c1",
+            "type": "function",
+            "function": {
+              "name": "echo",
+              "arguments": "{\"x\": 1}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "tool_name": "echo",
+        "content": "{\"result\": 1}"
+      },
+      {
+        "role": "assistant",
+        "content": "중간 답변"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 0 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 0"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 1 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 1"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 2 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 2"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 3 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 3"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 4 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 4"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 5 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 5"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 6 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 6"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 7 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 7"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 8 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 8"
+      },
+      {
+        "role": "user",
+        "content": "반복 유저 9 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 텍스트 "
+      },
+      {
+        "role": "assistant",
+        "content": "반복 답변 9"
+      },
+      {
+        "role": "user",
+        "content": "이번 턴 요청"
+      },
+      {
+        "role": "assistant",
+        "content": "최종 답변 완료"
+      }
+    ],
+    "ledger": [
+      {
+        "role": "user",
+        "active": 1,
+        "compacted": 0,
+        "content": "이번 턴 요청",
+        "tool_call_id": null,
+        "tool_name": null
+      },
+      {
+        "role": "assistant",
+        "active": 1,
+        "compacted": 0,
+        "content": "최종 답변 완료",
+        "tool_call_id": null,
+        "tool_name": null
+      }
+    ],
+    "compression": null,
+    "stopped_reason": "completed"
+  }
+}
