@@ -9,6 +9,7 @@
 """
 
 from collections.abc import Callable, Collection
+from dataclasses import dataclass
 import json
 import logging
 from typing import Any, Optional
@@ -88,29 +89,44 @@ def _validate_arguments(schema: dict[str, Any], args: Any) -> Optional[str]:
     return None
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """도구 호출 요청 데이터 클래스."""
+
+    name: str
+    args: dict[str, Any]
+    task_id: Optional[str] = None
+
+
+ToolMiddleware = Callable[[ToolCall, Callable[[ToolCall], str]], str]
+
+
 class ToolDispatcher:
     """도구 등록 및 실행 디스패처 클래스."""
 
     def __init__(self):
         self._handlers: dict[str, Callable[..., str]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}
+        self._middlewares: list[ToolMiddleware] = []
 
     def register_tool(self, name: str, handler: Callable[..., str], schema: dict[str, Any]) -> None:
         """새로운 도구 핸들러와 OpenAI 규격 스키마 등록."""
         self._handlers[name] = handler
         self._schemas[name] = schema
 
+    def add_middleware(self, middleware: ToolMiddleware) -> None:
+        """도구 실행 파이프라인 미들웨어 등록 (체인 끝에 추가, 먼저 등록한 것이 바깥쪽)."""
+        self._middlewares.append(middleware)
+
     def get_tools_schema(self) -> list[dict[str, Any]]:
         """LLM 호출 시 전달할 모든 등록된 도구의 OpenAI 함수 스키마 목록 반환."""
         return list(self._schemas.values())
 
-    def handle_function_call(
-        self,
-        function_name: str,
-        function_args: dict[str, Any],
-        task_id: Optional[str] = None,
-    ) -> str:
-        """단일 도구 실행 진입로. 등록된 도구를 찾아 호출하고 결과를 문자열로 반환."""
+    def _execute(self, call: ToolCall) -> str:
+        """체인의 가장 안쪽 도구 핸들러 실행 진입점."""
+        function_name = call.name
+        function_args = call.args
+
         handler = self._handlers.get(function_name)
         if not handler:
             return json.dumps(
@@ -137,6 +153,38 @@ class ToolDispatcher:
                 {"success": False, "error": f"Tool '{function_name}' failed: {str(e)}"},
                 ensure_ascii=False,
             )
+
+    def handle_function_call(
+        self,
+        function_name: str,
+        function_args: dict[str, Any],
+        task_id: Optional[str] = None,
+    ) -> str:
+        """단일 도구 실행 진입로. 미들웨어 체인을 거쳐 도구를 호출하고 결과를 문자열로 반환."""
+        initial_call = ToolCall(name=function_name, args=function_args, task_id=task_id)
+
+        def _make_chain(index: int) -> Callable[[ToolCall], str]:
+            if index >= len(self._middlewares):
+                return self._execute
+            mw = self._middlewares[index]
+            next_fn = _make_chain(index + 1)
+            return lambda call: mw(call, next_fn)
+
+        chain = _make_chain(0)
+        try:
+            result = chain(initial_call)
+        except Exception as e:
+            return json.dumps(
+                {"success": False, "error": f"Tool '{function_name}' failed: {str(e)}"},
+                ensure_ascii=False,
+            )
+
+        if not isinstance(result, str):
+            return json.dumps(
+                {"success": False, "error": f"Tool '{function_name}' middleware returned a non-string result."},
+                ensure_ascii=False,
+            )
+        return result
 
 
 _DEFAULT_TOOL_NAMES = (
