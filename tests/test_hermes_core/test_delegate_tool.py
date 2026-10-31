@@ -768,3 +768,200 @@ def test_scenario_17_default_limits(base_env):
     payload_b = json.loads(raw_b)
     assert len(payload_b["summary"]) == 8000
     assert payload_b["truncated"] is True
+
+
+def test_scenario_r20_020_custom_child_runner_injection(base_env):
+    """시나리오 20-020-3: 커스텀 child_runner 주입을 통한 독립 구동 및 토큰 집계 검증."""
+    db = base_env["db"]
+    store = base_env["store"]
+    parent = HermesAgent(session_db=db, memory_store=store, quiet_mode=True)
+
+    def stub_runner(
+        goal: str,
+        context: str | None = None,
+        *,
+        session_db: Any,
+        parent_session_id: str,
+        llm_client: Any,
+        max_iterations: int,
+        dispatcher: Any = None,
+    ) -> dict[str, Any]:
+        cid = "stub_child_123"
+        session_db.create_session(cid, source="subagent", parent_session_id=parent_session_id)
+        session_db.update_token_counts(cid, input_tokens=42, output_tokens=21)
+        return {
+            "child_session_id": cid,
+            "run_result": {
+                "final_response": "stub response",
+                "iterations": 1,
+                "stopped_reason": "completed",
+            },
+            "caught_exception": None,
+        }
+
+    register_delegate_tool(
+        parent.dispatcher,
+        session_db=db,
+        parent_session_id=parent.session_id,
+        llm_client_factory=lambda: MockLLMClient(),
+        child_runner=stub_runner,
+    )
+
+    raw = parent.dispatcher.handle_function_call("delegate_task", {"goal": "do something"})
+    payload = json.loads(raw)
+
+    assert payload["success"] is True
+    assert payload["status"] == "completed"
+    assert payload["summary"] == "stub response"
+    assert payload["child_session_id"] == "stub_child_123"
+    assert payload["iterations"] == 1
+    assert payload["stopped_reason"] == "completed"
+    assert payload["tokens"] == {"input": 42, "output": 21}
+    assert payload["truncated"] is False
+    assert "error" not in payload
+
+    # DB 원장 마감 확인
+    sess = db.get_session("stub_child_123")
+    assert sess is not None
+    assert sess["end_reason"] == "completed"
+    assert sess["ended_at"] is not None
+
+
+def test_scenario_r20_020_child_execution_exception_end_session(base_env):
+    """시나리오 20-020-4: 자식 실행 중 예외 포획 시 원장 마감 및 실패 응답 반환 검증."""
+    db = base_env["db"]
+    store = base_env["store"]
+    parent = HermesAgent(session_db=db, memory_store=store, quiet_mode=True)
+
+    def failing_runner(
+        goal: str,
+        context: str | None = None,
+        *,
+        session_db: Any,
+        parent_session_id: str,
+        llm_client: Any,
+        max_iterations: int,
+        dispatcher: Any = None,
+    ) -> dict[str, Any]:
+        cid = "child_crash_456"
+        session_db.create_session(cid, source="subagent", parent_session_id=parent_session_id)
+        return {
+            "child_session_id": cid,
+            "run_result": None,
+            "caught_exception": RuntimeError("child crashed during execution"),
+        }
+
+    register_delegate_tool(
+        parent.dispatcher,
+        session_db=db,
+        parent_session_id=parent.session_id,
+        llm_client_factory=lambda: MockLLMClient(),
+        child_runner=failing_runner,
+    )
+
+    raw = parent.dispatcher.handle_function_call("delegate_task", {"goal": "crash"})
+    payload = json.loads(raw)
+
+    assert payload["success"] is False
+    assert payload["status"] == "failed"
+    assert payload["stopped_reason"] == "exception"
+    assert payload["error"]["kind"] == "exception"
+    assert "child crashed during execution" in payload["error"]["message"]
+
+    # 원장 세션 마감 보장 확인
+    sess = db.get_session("child_crash_456")
+    assert sess is not None
+    assert sess["end_reason"] == "exception"
+    assert sess["ended_at"] is not None
+
+
+def test_scenario_r20_020_orphan_prevention_on_agent_init_failure(base_env):
+    """시나리오 20-020-5: 자식 에이전트 생성/초기화 도중 실패 시 고아 세션 방지 (R-2)."""
+    db = base_env["db"]
+    store = base_env["store"]
+    parent = HermesAgent(session_db=db, memory_store=store, quiet_mode=True)
+
+    def init_failed_runner(
+        goal: str,
+        context: str | None = None,
+        *,
+        session_db: Any,
+        parent_session_id: str,
+        llm_client: Any,
+        max_iterations: int,
+        dispatcher: Any = None,
+    ) -> dict[str, Any]:
+        cid = "child_init_fail_789"
+        session_db.create_session(cid, source="subagent", parent_session_id=parent_session_id)
+        return {
+            "child_session_id": cid,
+            "run_result": None,
+            "caught_exception": RuntimeError("failed during agent init"),
+        }
+
+    register_delegate_tool(
+        parent.dispatcher,
+        session_db=db,
+        parent_session_id=parent.session_id,
+        llm_client_factory=lambda: MockLLMClient(),
+        child_runner=init_failed_runner,
+    )
+
+    raw = parent.dispatcher.handle_function_call("delegate_task", {"goal": "init fail"})
+    payload = json.loads(raw)
+
+    assert payload["success"] is False
+    assert payload["status"] == "failed"
+    assert payload["child_session_id"] == "child_init_fail_789"
+
+    # 고아 세션(ended_at IS NULL)이 존재하지 않고 정상 마감되었는지 확인
+    sess = db.get_session("child_init_fail_789")
+    assert sess is not None
+    assert sess["end_reason"] == "exception"
+    assert sess["ended_at"] is not None
+
+
+def test_scenario_r20_020_create_child_dispatcher_monkeypatch_contract(base_env, monkeypatch):
+    """시나리오 20-020-6: create_child_dispatcher 몽키패치가 child_runner에 누락 없이 전달됨을 검증."""
+    import hermes_core.tools.delegate_tool as dt_mod
+    from hermes_core.tools.dispatcher import ToolDispatcher
+
+    db = base_env["db"]
+    store = base_env["store"]
+    parent = HermesAgent(session_db=db, memory_store=store, quiet_mode=True)
+
+    custom_dispatcher = ToolDispatcher()
+    monkeypatch.setattr(dt_mod, "create_child_dispatcher", lambda: custom_dispatcher)
+
+    passed_dispatcher: list[Any] = []
+
+    def spy_runner(
+        goal: str,
+        context: str | None = None,
+        *,
+        session_db: Any,
+        parent_session_id: str,
+        llm_client: Any,
+        max_iterations: int,
+        dispatcher: Any = None,
+    ) -> dict[str, Any]:
+        passed_dispatcher.append(dispatcher)
+        cid = "spy_child_001"
+        session_db.create_session(cid, source="subagent", parent_session_id=parent_session_id)
+        return {
+            "child_session_id": cid,
+            "run_result": {"final_response": "ok", "iterations": 1, "stopped_reason": "completed"},
+            "caught_exception": None,
+        }
+
+    register_delegate_tool(
+        parent.dispatcher,
+        session_db=db,
+        parent_session_id=parent.session_id,
+        llm_client_factory=lambda: MockLLMClient(),
+        child_runner=spy_runner,
+    )
+
+    parent.dispatcher.handle_function_call("delegate_task", {"goal": "spy test"})
+    assert len(passed_dispatcher) == 1
+    assert passed_dispatcher[0] is custom_dispatcher

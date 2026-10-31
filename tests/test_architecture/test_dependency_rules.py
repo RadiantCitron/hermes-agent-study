@@ -15,29 +15,8 @@ from typing import Any
 
 # 알려진 의존 방향 위반 (래칫). 줄어들기만 한다.
 # 항목을 갚으면 시험이 「목록에서 지워라」로 실패한다. 새 항목 추가는 사용자 승인 사항이다.
-KNOWN_DEBT: dict[tuple[str, str, str], tuple[str, str]] = {
-    # (importer, 대상, 규칙): (사유, 해소 예정)
-    (
-        "hermes_core.tools.delegate_tool",
-        "hermes_core.agent.agent",
-        "R3",
-    ): ("위임 도구가 자식 에이전트를 직접 생성", "19번 이후: 자식 생성 팩토리 주입(16 대시보드 §6-2)"),
-    (
-        "hermes_core.tools.delegate_tool",
-        "hermes_core.agent.agent.HermesAgent",
-        "R3",
-    ): ("위임 도구가 자식 에이전트를 직접 생성", "19번 이후: 자식 생성 팩토리 주입(16 대시보드 §6-2)"),
-    (
-        "hermes_core.tools.delegate_tool",
-        "hermes_core.agent.prompt_builder",
-        "R3",
-    ): ("위임 도구가 자식 시스템 프롬프트 조립 함수 참조", "19번 이후: 자식 생성 팩토리 주입(16 대시보드 §6-2)"),
-    (
-        "hermes_core.tools.delegate_tool",
-        "hermes_core.agent.prompt_builder.build_child_system_message",
-        "R3",
-    ): ("위임 도구가 자식 시스템 프롬프트 조립 함수 참조", "19번 이후: 자식 생성 팩토리 주입(16 대시보드 §6-2)"),
-}
+# 20번 로드맵 020 단계에서 delegate_tool의 R3 위반 4건이 완전 청산되어 0건이 됨.
+KNOWN_DEBT: dict[tuple[str, str, str], tuple[str, str]] = {}
 
 # 기본 기능 확장 모듈. 이 모듈을 import하는 src 모듈은 조립 지점 hermes_core.assembly뿐이다.
 # 새 기능 확장을 만들면 여기에 더한다 — 시나리오 11이 빠뜨림을 잡는다.

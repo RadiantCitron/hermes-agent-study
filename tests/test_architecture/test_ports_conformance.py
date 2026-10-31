@@ -231,3 +231,23 @@ def test_scenario_r7_fake_stores_standalone_without_session_db() -> None:
     assert result["count"] == 1
     assert "found query=keyword" in result["results"][0]["snippet"]
 
+
+def test_scenario_r20_020_child_runner_port_conformance() -> None:
+    """시나리오 20-020-2: ChildRunnerPort 적합성 및 run_child_session 바인딩 검증."""
+    from hermes_core.assembly import create_child_runner, run_child_session
+    from hermes_core.tools.ports import ChildRunnerPort
+
+    assert isinstance(run_child_session, ChildRunnerPort), "run_child_session must satisfy ChildRunnerPort"
+    assert create_child_runner() is run_child_session, "create_child_runner() must return run_child_session"
+
+    sig_runner = inspect.signature(run_child_session)
+    sig_runner.bind(
+        "goal",
+        context="ctx",
+        session_db=None,
+        parent_session_id="p1",
+        llm_client=None,
+        max_iterations=10,
+        dispatcher=None,
+    )
+

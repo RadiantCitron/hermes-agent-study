@@ -8,14 +8,21 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Collection, Optional
+import uuid
 
 from hermes_core.agent.compression_hook import CompressionConfig, CompressionExtension
 from hermes_core.agent.loop_guard import LoopGuardExtension
-from hermes_core.constants import LOOP_GUARD_BLOCK_THRESHOLD, LOOP_GUARD_WARN_THRESHOLD
+from hermes_core.constants import (
+    DELEGATE_CHILD_MAX_ITERATIONS,
+    LOOP_GUARD_BLOCK_THRESHOLD,
+    LOOP_GUARD_WARN_THRESHOLD,
+    SUBAGENT_SOURCE,
+)
 from hermes_core.control.settings import SETTING_SPECS, Settings
 from hermes_core.kernel.contract import Extension
 from hermes_core.kernel.llm_pipeline import LLMMiddleware, LLMNext, LLMRequest
 from hermes_core.kernel.ports import CallRecordable, LLMReply, TranscriptStore
+from hermes_core.tools.ports import ChildRunnerPort
 
 RUNTIME_SETTING_KEYS: tuple[str, ...] = (
     "max_iterations",
@@ -155,3 +162,53 @@ def connect_call_recorder(agent: Any) -> bool:
         )
         return True
     return False
+
+
+def run_child_session(
+    goal: str,
+    context: Optional[str] = None,
+    *,
+    session_db: Any,
+    parent_session_id: str,
+    llm_client: Any,
+    max_iterations: int = DELEGATE_CHILD_MAX_ITERATIONS,
+    dispatcher: Optional[Any] = None,
+) -> dict[str, Any]:
+    """격리된 자식 에이전트 세션을 생성하고 1회 대화를 실행한다 (D-04, R-2)."""
+    from hermes_core.agent.agent import HermesAgent
+    from hermes_core.agent.prompt_builder import build_child_system_message
+    from hermes_core.tools.dispatcher import create_child_dispatcher
+
+    child_session_id = str(uuid.uuid4())
+    caught_exception: Optional[Exception] = None
+    run_result: Optional[dict[str, Any]] = None
+
+    try:
+        child_agent = HermesAgent(
+            session_id=child_session_id,
+            session_db=session_db,
+            dispatcher=dispatcher if dispatcher is not None else create_child_dispatcher(),
+            llm_client=llm_client,
+            max_iterations=max_iterations,
+            quiet_mode=True,
+            system_message=build_child_system_message(context),
+            parent_session_id=parent_session_id,
+            source=SUBAGENT_SOURCE,
+            skip_memory=True,
+            skip_context_files=True,
+        )
+        child_session_id = child_agent.session_id
+        run_result = child_agent.run_conversation(goal)
+    except Exception as e:
+        caught_exception = e
+
+    return {
+        "child_session_id": child_session_id,
+        "run_result": run_result,
+        "caught_exception": caught_exception,
+    }
+
+
+def create_child_runner() -> ChildRunnerPort:
+    """기본 자식 실행기(run_child_session)를 반환한다."""
+    return run_child_session

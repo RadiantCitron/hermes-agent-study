@@ -15,14 +15,12 @@ from collections.abc import Callable
 import json
 from typing import Any, Optional
 
-from hermes_core.agent.agent import HermesAgent
-from hermes_core.agent.prompt_builder import build_child_system_message
+from hermes_core.assembly import run_child_session
 from hermes_core.constants import (
     DELEGATE_CHILD_MAX_ITERATIONS,
     DELEGATE_SUMMARY_MAX_CHARS,
-    SUBAGENT_SOURCE,
 )
-from hermes_core.tools.ports import DelegateStorePort
+from hermes_core.tools.ports import ChildRunnerPort, DelegateStorePort
 from hermes_core.tools.dispatcher import ToolDispatcher, create_child_dispatcher
 
 DELEGATE_TASK_SCHEMA: dict[str, Any] = {
@@ -61,6 +59,7 @@ def register_delegate_tool(
     llm_client_factory: Callable[[], Any],
     max_iterations: int = DELEGATE_CHILD_MAX_ITERATIONS,
     summary_max_chars: int = DELEGATE_SUMMARY_MAX_CHARS,
+    child_runner: Optional[ChildRunnerPort] = None,
 ) -> None:
     """디스패처에 delegate_task 도구를 등록한다."""
 
@@ -81,76 +80,72 @@ def register_delegate_tool(
                 ensure_ascii=False,
             )
 
-        # 3. 자식 에이전트 생성
-        child_agent = HermesAgent(
-            session_db=session_db,
-            dispatcher=create_child_dispatcher(),
-            llm_client=child_client,
-            max_iterations=max_iterations,
-            quiet_mode=True,
-            system_message=build_child_system_message(context),
-            parent_session_id=parent_session_id,
-            source=SUBAGENT_SOURCE,
-            skip_memory=True,
-            skip_context_files=True,
-        )
-        child_session_id = child_agent.session_id
+        runner: ChildRunnerPort = child_runner if child_runner is not None else run_child_session
+        child_dispatcher = create_child_dispatcher()
 
-        # 4. 실행 및 예외 포획
-        caught_exception = None
-        run_result = None
+        # 3~6. 자식 실행 및 생명주기 마감 안전망 (R-2)
+        child_session_id: Optional[str] = None
+        end_reason = "exception"
         try:
-            run_result = child_agent.run_conversation(goal)
-        except Exception as e:
-            caught_exception = e
+            outcome = runner(
+                goal,
+                context,
+                session_db=session_db,
+                parent_session_id=parent_session_id,
+                llm_client=child_client,
+                max_iterations=max_iterations,
+                dispatcher=child_dispatcher,
+            )
+            child_session_id = outcome.get("child_session_id")
+            run_result = outcome.get("run_result")
+            caught_exception = outcome.get("caught_exception")
 
-        # 5. 상태 및 결과 판정
-        if caught_exception is not None:
-            stopped_reason = "exception"
-            final_response = ""
-            iterations = 0
-            error_payload: Optional[dict[str, Any]] = {
-                "kind": "exception",
-                "message": str(caught_exception),
-            }
-        else:
-            final_response = (run_result.get("final_response", "") or "") if run_result else ""
-            iterations = run_result.get("iterations", 0) if run_result else 0
-            stopped_reason = run_result.get("stopped_reason", "completed") if run_result else "completed"
-            error_payload = run_result.get("error") if run_result else None
-
-        if stopped_reason == "completed":
-            if not final_response.strip():
-                status = "failed"
-                end_reason = "empty_response"
-                error_payload = {
-                    "kind": "empty_response",
-                    "message": "Subagent returned an empty response.",
+            if caught_exception is not None:
+                stopped_reason = "exception"
+                final_response = ""
+                iterations = 0
+                error_payload: Optional[dict[str, Any]] = {
+                    "kind": "exception",
+                    "message": str(caught_exception),
                 }
             else:
-                status = "completed"
-                end_reason = "completed"
-        else:
-            status = "failed"
-            end_reason = stopped_reason
-            if error_payload is None:
-                error_payload = {
-                    "kind": stopped_reason,
-                    "message": f"Subagent stopped with reason '{stopped_reason}'.",
-                }
+                final_response = (run_result.get("final_response", "") or "") if run_result else ""
+                iterations = run_result.get("iterations", 0) if run_result else 0
+                stopped_reason = run_result.get("stopped_reason", "completed") if run_result else "completed"
+                error_payload = run_result.get("error") if run_result else None
 
-        # 6. 세션 종료 기록 (finally 보장)
-        try:
-            session_db.end_session(child_session_id, end_reason=end_reason)
-        except Exception:
-            pass
+            if stopped_reason == "completed":
+                if not final_response.strip():
+                    status = "failed"
+                    end_reason = "empty_response"
+                    error_payload = {
+                        "kind": "empty_response",
+                        "message": "Subagent returned an empty response.",
+                    }
+                else:
+                    status = "completed"
+                    end_reason = "completed"
+            else:
+                status = "failed"
+                end_reason = stopped_reason
+                if error_payload is None:
+                    error_payload = {
+                        "kind": stopped_reason,
+                        "message": f"Subagent stopped with reason '{stopped_reason}'.",
+                    }
+        finally:
+            if child_session_id is not None:
+                try:
+                    session_db.end_session(child_session_id, end_reason=end_reason)
+                except Exception:
+                    pass
 
         # 7. 요약 절삭
         truncated = len(final_response) > summary_max_chars
         summary = final_response[:summary_max_chars]
 
         # 8. 토큰 집계 (자식 세션 원장에서 취득, 부모에 합산하지 않음)
-        sess_data = session_db.get_session(child_session_id) or {}
+        sess_data = session_db.get_session(child_session_id) or {} if child_session_id else {}
         tokens = {
             "input": sess_data.get("input_tokens") or 0,
             "output": sess_data.get("output_tokens") or 0,
