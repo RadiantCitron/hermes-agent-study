@@ -247,10 +247,10 @@ stateDiagram-v2
 - **만들 것**: `control/snapshot.py`.
   - `ControlSnapshot`(동결): `settings: tuple[SettingView(key, value, source, mutability)]`, `extensions: tuple[ExtensionView(name, kinds, slots, total_failures)]`, `session_id`, `input_tokens`, `output_tokens`, `pending_commands: int`.
   - `build_snapshot(agent, loaded, *, pending: int = 0) -> ControlSnapshot`.
-  - `render_snapshot(snapshot) -> str`: 050에서 화면에 쓴다. 이 단계에서 만들어 둘지는 지시서가 정한다.
+  - `render_snapshot(snapshot: ControlSnapshot) -> str`: **020에서 함께 구현**한다(050 CLI `/ctl status`에서 재사용).
 - 확장 정보: 020에서는 `agent.extensions`(이름별로 묶음)만 쓴다. 030에서 `extension_status()`의 켜짐·연속 실패를 더한다(030이 이 파일을 함께 고친다).
 - 토큰: `session_db.get_session(session_id)`(310행)의 `input_tokens`·`output_tokens`.
-- 마스킹: `mask_secrets(text)`. 패턴은 OpenRouter 키 모양(`sk-or-` 접두), `Bearer` 토큰 등이다. 정확한 패턴은 지시서에서 `llm_client.py` 40~60행을 대조해 정한다.
+- 마스킹: `mask_secrets(text: str) -> str`. `llm_client._mask_str`(40행)은 알려진 키 값을 치환하는 방식이라 재사용하지 않고, 정규식 2종(`(?i)\b(Bearer\s+)[^\s"',;)]+` → `\1***`, `\bsk-[A-Za-z0-9_-]{8,}\b` → `***`)으로 패턴 마스킹한다.
 - **인수 시나리오 후보**:
   1. 스냅샷 전후로 에이전트 속성과 장부 행 수가 같다.
   2. 출처가 `LoadedSettings.sources`와 같다.
@@ -408,6 +408,6 @@ stateDiagram-v2
    - `kernel/`·`tools/dispatcher.py` 수정(가정 C. 필요해 보이면 멈추고 보고한다)
    - 커밋 전에 실제 해시를 지어내기. 18번에서 존재하지 않는 해시 2건이 기록된 적이 있다. 해시 칸에는 식별자를 쓰고, 다음 커밋에서 실제 값으로 채운다.
 6. **열린 질문**(지시서 작성 때 정한다):
-   - `render_snapshot`을 020에 둘지 050에 둘지
-   - R6이 `control → agent` 런타임 import도 금지할지
+   - ~~`render_snapshot`을 020에 둘지 050에 둘지~~ → **020에서 `control/snapshot.py`에 함께 구현**(지시서 020 §6 확정)
+   - ~~R6이 `control → agent` 런타임 import도 금지할지~~ → **R6 유입·유출 양방향 금지**(지시서 010 §6 확정)
    - 060에서 새 편을 만들지
