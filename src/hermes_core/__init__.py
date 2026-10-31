@@ -5,10 +5,25 @@
 - 연구 목적: 계층형 시스템 프롬프트 조립, 바운디드 메모리, SQLite 세션 원장, 도구 실행 턴 루프 메커니즘 체득
 """
 
-from hermes_core.agent import AIAgent, HermesAgent
-from hermes_core.session_db import SessionDB
-from hermes_core.tools.dispatcher import ToolDispatcher
-from hermes_core.tools.memory_tool import MemoryStore
-
 __version__ = "0.1.0"
 __all__ = ["HermesAgent", "AIAgent", "SessionDB", "MemoryStore", "ToolDispatcher", "__version__"]
+
+
+def __getattr__(name: str) -> object:
+    if name in ("HermesAgent", "AIAgent"):
+        from hermes_core.agent import AIAgent, HermesAgent
+
+        return HermesAgent if name == "HermesAgent" else AIAgent
+    if name == "SessionDB":
+        from hermes_core.session_db import SessionDB
+
+        return SessionDB
+    if name == "MemoryStore":
+        from hermes_core.tools.memory_tool import MemoryStore
+
+        return MemoryStore
+    if name == "ToolDispatcher":
+        from hermes_core.tools.dispatcher import ToolDispatcher
+
+        return ToolDispatcher
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

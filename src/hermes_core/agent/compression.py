@@ -21,7 +21,7 @@ from hermes_core.constants import (
     SUMMARY_PREFIX,
     TOOL_OUTPUT_CLEARED_FORMAT,
 )
-from hermes_core.llm_client import LLMError
+from hermes_core.kernel.ports import LLMError
 
 
 @dataclass

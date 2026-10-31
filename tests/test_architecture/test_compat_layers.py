@@ -7,6 +7,7 @@ import ast
 import glob
 import importlib
 from pathlib import Path
+import pkgutil
 import sys
 
 # 호환 층 재수출 목록. 줄어들기만 한다. 새 항목 추가는 사용자 승인 사항이다.
@@ -32,6 +33,7 @@ COMPAT_REEXPORTS: dict[tuple[str, str], str] = {
     ("hermes_core.agent.events", "EVENT_TOOL_CALL"): "hermes_core.kernel.events",
     ("hermes_core.agent.events", "EventSink"): "hermes_core.kernel.events",
     ("hermes_core.tools.dispatcher", "ToolCall"): "hermes_core.kernel.tool_call",
+    ("hermes_core.llm_client", "LLMError"): "hermes_core.kernel.ports",
 }
 
 COMPAT_REASON = "기존 시험이 구 경로를 import한다(검증된 시험 무수정, ADR-0018 D-05)"
@@ -46,7 +48,7 @@ PURE_REEXPORT_MODULES = (
 
 def test_scenario_1_object_identity() -> None:
     """시나리오 1: 객체 동일성 (위험 4)."""
-    assert len(COMPAT_REEXPORTS) == 20
+    assert len(COMPAT_REEXPORTS) == 21
     for (old_mod_name, attr_name), new_mod_name in COMPAT_REEXPORTS.items():
         old_mod = importlib.import_module(old_mod_name)
         new_mod = importlib.import_module(new_mod_name)
@@ -146,6 +148,11 @@ def test_scenario_4_src_does_not_rely_on_compat_layers() -> None:
                     for alias in node.names:
                         if alias.name not in allowed_event_names:
                             violations.append(f"{file_path}: imported {alias.name} from agent.events")
+                # (d) hermes_core.llm_client에서 LLMError 금지
+                if node.module == "hermes_core.llm_client":
+                    for alias in node.names:
+                        if alias.name == "LLMError":
+                            violations.append(f"{file_path}: imported LLMError from llm_client")
 
     assert not violations, f"Src files rely on compat layers:\n" + "\n".join(violations)
 
@@ -165,5 +172,5 @@ def test_scenario_6_kernel_package_does_not_collect_god_names() -> None:
     import hermes_core.kernel
 
     public_names = [n for n in vars(hermes_core.kernel) if not n.startswith("_")]
-    allowed_submodules = {"contract", "turn_hooks", "tool_call", "events"}
+    allowed_submodules = {name for _, name, _ in pkgutil.iter_modules(hermes_core.kernel.__path__)}
     assert set(public_names).issubset(allowed_submodules), f"Unexpected public names in kernel package: {public_names}"

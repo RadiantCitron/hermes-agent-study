@@ -1,20 +1,10 @@
-"""AI 에이전트 핵심 루프 및 턴 오케스트레이터 (Hermes Agent Loop).
+"""AI 에이전트 핵심 루프 및 파사드 (Hermes Agent Facade).
 
-[원본 레퍼런스 매핑]
-- 대응 원본: hermes-agent/run_agent.py (AIAgent 클래스)
-- 핵심 원리:
-  1. 세션별 프롬프트 캐싱(Prompt Caching):
-     - `_build_system_prompt()`는 세션당 1회만 조립되고 캐싱되어, 대화가 진행되는 동안 Prefix Cache를 보존.
-  2. 메시지 역할 순서:
-     - user -> assistant(tool_calls) -> tool -> assistant 의 순서대로 쌓는다. 순서를 검사하거나 강제하지는 않는다.
-  3. 도구 실행 및 세션 원장 동기화:
-     - 도구 실행 결과가 발생하는 즉시 SQLite SessionDB에 영구 기록.
-  4. 테스트 격리를 위한 MockLLMClient 내장.
+시스템 프롬프트 조립 및 의존성 주입을 담당하며, 실제 대화 턴 실행은 hermes_core.kernel.loop.run_turn에 위임한다.
 """
 
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-import json
 import logging
 from typing import Any, Optional
 import uuid
@@ -32,17 +22,10 @@ from hermes_core.agent.prompt_builder import (
 from hermes_core.kernel.events import (
     EVENT_EXTENSION_ERROR,
     EVENT_HOOK_ERROR,
-    EVENT_TOOL_CALL,
-    AgentEvent,
     EventSink,
+    emit_event,
 )
-from hermes_core.kernel.turn_hooks import (
-    AFTER_TOOL_CALLS,
-    BEFORE_LLM,
-    HookRegistry,
-    TurnContext,
-    TurnHook,
-)
+from hermes_core.kernel.turn_hooks import HookRegistry, TurnHook
 from hermes_core.kernel.contract import (
     Extension,
     ExtensionHost,
@@ -50,35 +33,18 @@ from hermes_core.kernel.contract import (
     MiddlewarePhase,
     TurnScope,
 )
-from hermes_core.kernel.tool_call import ToolCall
+from hermes_core.kernel.loop import TokenEstimate, run_turn
 from hermes_core.constants import (
     COMPRESSION_THRESHOLD_RATIO,
     CONTEXT_WINDOW_TOKENS,
     get_skills_dir,
 )
-from hermes_core.llm_client import LLMError
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.dispatcher import ToolDispatcher, create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 from hermes_core.tools.skills_tool import discover_skills
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_tool_arguments(raw: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
-    """모델이 보낸 도구 인자를 사전으로 읽는다. 실패하면 (None, 사유)를 반환.
-
-    빈 문자열(공백 포함)과 None은 「인자 없음」({})으로 본다.
-    """
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return {}, None
-    try:
-        args = json.loads(raw) if isinstance(raw, str) else raw
-    except ValueError as e:
-        return None, str(e)
-    if not isinstance(args, dict):
-        return None, "arguments must be a JSON object"
-    return args, None
 
 
 # =============================================================================
@@ -173,8 +139,7 @@ class HermesAgent:
         self._session_slots: dict[str, dict[str, Any]] = {}
 
         # 토큰 추정 상태 (세션 간 미보존)
-        self._last_input_tokens: Optional[int] = None
-        self._last_message_count: Optional[int] = None
+        self._token_estimate = TokenEstimate()
 
         # 의존성 주입 및 격리
         self.session_db = session_db or SessionDB()
@@ -241,6 +206,22 @@ class HermesAgent:
         # 기본 압축 확장 설치
         self.install_extension(CompressionExtension(self._compression_config))
         self.install_extension(LoopGuardExtension())
+
+    @property
+    def _last_input_tokens(self) -> Optional[int]:
+        return self._token_estimate.input_tokens
+
+    @_last_input_tokens.setter
+    def _last_input_tokens(self, val: Optional[int]) -> None:
+        self._token_estimate.input_tokens = val
+
+    @property
+    def _last_message_count(self) -> Optional[int]:
+        return self._token_estimate.message_count
+
+    @_last_message_count.setter
+    def _last_message_count(self, val: Optional[int]) -> None:
+        self._token_estimate.message_count = val
 
     @property
     def _rejected_at_tokens(self) -> Optional[int]:
@@ -362,12 +343,7 @@ class HermesAgent:
 
     def _emit(self, kind: str, **data: Any) -> None:
         """이벤트 싱크가 등록되어 있으면 이벤트를 방출한다. 싱크 예외는 경고 로그 후 삼킨다."""
-        if self.event_sink is None:
-            return
-        try:
-            self.event_sink(AgentEvent(kind=kind, data=data))
-        except Exception as e:
-            logger.warning("EventSink failed for event '%s': %s", kind, e)
+        emit_event(self.event_sink, kind, data, logger)
 
     def _on_hook_error(self, point: str, hook: Any, exc: Exception) -> None:
         """훅 실행 중 발생한 예외 처리: 경고 로그 및 hook_error 이벤트 방출."""
@@ -380,91 +356,6 @@ class HermesAgent:
         if ext_name:
             self._on_extension_error(ext_name, point, exc)
 
-    def _replace_transcript(
-        self,
-        messages: list[dict[str, Any]],
-        new_messages: list[dict[str, Any]],
-        *,
-        summary_index: Optional[int] = None,
-        usage: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """대화 교체 및 세션 DB 원장 압축 단일 진입로."""
-        if not new_messages:
-            raise ValueError("new_messages cannot be empty.")
-        if not messages:
-            raise ValueError("active transcript cannot be empty.")
-
-        first_orig = messages[0]
-        first_new = new_messages[0]
-        if first_new.get("role") != first_orig.get("role") or first_new.get("content") != first_orig.get("content"):
-            raise ValueError("system message modified by replace_transcript")
-
-        # 세션 DB 원장 압축 (실패 시 예외 전파되어 메모리 메시지는 불변 유지)
-        self.session_db.archive_and_compact(
-            self.session_id,
-            new_messages[1:],
-            summary_index=summary_index,
-        )
-
-        # 원장 압축 성공 시에만 메모리 목록 원자적 교체
-        messages[:] = new_messages
-        self._last_input_tokens = None
-        self._last_message_count = None
-
-        if usage and isinstance(usage, dict):
-            in_tok = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-            out_tok = usage.get("completion_tokens") or usage.get("output_tokens") or 0
-            if in_tok or out_tok:
-                self.session_db.update_token_counts(
-                    self.session_id, input_tokens=in_tok, output_tokens=out_tok
-                )
-
-    def _execute_tool_calls(
-        self,
-        tool_calls: list[dict[str, Any]],
-        messages: list[dict[str, Any]],
-        scope: Optional[TurnScope] = None,
-    ) -> None:
-        """assistant_message의 tool_calls를 실행하고 결과를 messages에 append."""
-        for tc in tool_calls:
-            call_id = tc.get("id") or str(uuid.uuid4())
-            func_obj = tc.get("function", {})
-            func_name = func_obj.get("name") or tc.get("name", "unknown")
-            args_str = func_obj.get("arguments", "{}")
-
-            self._emit(EVENT_TOOL_CALL, name=func_name, arguments=args_str)
-
-            args, parse_error = _parse_tool_arguments(args_str)
-            if parse_error is not None:
-                logger.warning("Invalid JSON arguments for tool '%s': %s", func_name, parse_error)
-
-            call = ToolCall(
-                name=func_name,
-                args=args or {},
-                task_id=call_id,
-                scope=scope,
-                raw_arguments=args_str if isinstance(args_str, str) else None,
-                parse_error=parse_error,
-            )
-            result_str = self.dispatcher.dispatch(call)
-
-            # messages에 추가 (Strict Role Alternation)
-            tool_msg = {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": result_str,
-            }
-            messages.append(tool_msg)
-
-            # 세션 DB 원장 기록
-            self.session_db.append_message(
-                session_id=self.session_id,
-                role="tool",
-                content=result_str,
-                tool_call_id=call_id,
-                tool_name=func_name,
-            )
-
     def run_conversation(
         self,
         user_message: str,
@@ -474,137 +365,32 @@ class HermesAgent:
         """단일 대화 턴 루프 실행. 최종 응답 문자열과 전체 messages 목록 반환."""
         sys_prompt = self._build_system_prompt(system_message)
 
-        # 메시지 히스토리 조립
         messages: list[dict[str, Any]] = []
         if conversation_history:
             messages.extend(conversation_history)
         else:
             messages.append({"role": "system", "content": sys_prompt})
 
-        # 사용자 메시지 추가 및 원장 기록
-        messages.append({"role": "user", "content": user_message})
-        self.session_db.append_message(
-            session_id=self.session_id,
-            role="user",
-            content=user_message,
-        )
-
-        final_response: str = ""
-        stopped_reason = "max_iterations"
-        iterations = 0
-        error_info: Optional[dict[str, str]] = None
-
         scope = TurnScope(
             session_id=self.session_id,
             session_slots=self._session_slots,
             on_extension_error=self._on_extension_error,
         )
-        ctx = TurnContext(
+
+        return run_turn(
             messages=messages,
-            tools_schema=None,
-            iteration=0,
-            session_id=self.session_id,
+            user_message=user_message,
+            llm=self.llm_client,
+            tools=self.dispatcher,
+            store=self.session_db,
+            hooks=self.hooks,
             scope=scope,
-            last_input_tokens=self._last_input_tokens,
-            last_message_count=self._last_message_count,
-            _live_messages=messages,
-            _replace_fn=lambda new_msgs, summary_index=None, usage=None: self._replace_transcript(
-                messages, new_msgs, summary_index=summary_index, usage=usage
-            ),
+            estimate=self._token_estimate,
+            max_iterations=self.max_iterations,
+            event_sink=self.event_sink,
+            on_hook_error=self._on_hook_error,
+            logger=logger,
         )
-
-        while iterations < self.max_iterations:
-            iterations += 1
-
-            tools_schema = self.dispatcher.get_tools_schema()
-            schema_list = tools_schema if tools_schema else None
-
-            ctx.iteration = iterations
-            scope.iteration = iterations
-            ctx.tools_schema = schema_list
-            ctx.last_input_tokens = self._last_input_tokens
-            ctx.last_message_count = self._last_message_count
-
-            self.hooks.run(BEFORE_LLM, ctx, on_error=self._on_hook_error)
-            if ctx.stop_reason is not None:
-                stopped_reason = ctx.stop_reason
-                final_response = ""
-                break
-
-            # LLM 호출 직전 메시지 수 기록
-            msgs_len_before_call = len(messages)
-
-            # LLM 호출
-            try:
-                resp = self.llm_client.chat_completion(
-                    messages=messages,
-                    tools=schema_list,
-                )
-            except LLMError as e:
-                logger.warning("LLM call failed with error: %s", e)
-                stopped_reason = "llm_error"
-                final_response = ""
-                error_info = {"kind": e.kind, "message": str(e)}
-                break
-
-            # 응답에 usage가 있으면 update_token_counts로 누적 및 추정 상태 보관
-            usage = getattr(resp, "usage", None)
-            if usage and isinstance(usage, dict):
-                in_tok = usage.get("input_tokens") or 0
-                out_tok = usage.get("output_tokens") or 0
-                if in_tok or out_tok:
-                    self.session_db.update_token_counts(
-                        self.session_id, input_tokens=in_tok, output_tokens=out_tok
-                    )
-                if in_tok:
-                    self._last_input_tokens = in_tok
-                    self._last_message_count = msgs_len_before_call
-
-            assistant_msg: dict[str, Any] = {"role": "assistant"}
-            if resp.content:
-                assistant_msg["content"] = resp.content
-            if resp.tool_calls:
-                assistant_msg["tool_calls"] = resp.tool_calls
-
-            messages.append(assistant_msg)
-
-            # 세션 DB 기록
-            self.session_db.append_message(
-                session_id=self.session_id,
-                role="assistant",
-                content=resp.content,
-                tool_calls=resp.tool_calls,
-            )
-
-            # 도구 호출이 있으면 실행 후 루프 계속
-            if resp.tool_calls:
-                self._execute_tool_calls(resp.tool_calls, messages, scope=scope)
-                self.hooks.run(AFTER_TOOL_CALLS, ctx, on_error=self._on_hook_error)
-                if ctx.stop_reason is not None:
-                    stopped_reason = ctx.stop_reason
-                    final_response = ""
-                    break
-            else:
-                # 도구 호출이 없으면 최종 텍스트 응답으로 루프 종료
-                final_response = resp.content or ""
-                stopped_reason = "completed"
-                break
-
-        if stopped_reason == "max_iterations":
-            logger.warning("Agent loop stopped at max_iterations=%d without a final response.", self.max_iterations)
-
-        result: dict[str, Any] = {
-            "final_response": final_response,
-            "messages": messages,
-            "iterations": iterations,
-            "session_id": self.session_id,
-            "stopped_reason": stopped_reason,
-        }
-        if error_info is not None:
-            result["error"] = error_info
-        result.update(scope.reports)
-
-        return result
 
 
 class _ExtensionHost:

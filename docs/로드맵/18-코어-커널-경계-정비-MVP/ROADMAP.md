@@ -97,7 +97,7 @@ classDiagram
   class run_turn {
     <<kernel/loop.py>>
     messages, llm, tools, store
-    hooks, scope, max_iterations
+    hooks, scope, estimate, max_iterations
     returns 결과 사전
   }
   class LLMPort {
@@ -108,13 +108,16 @@ classDiagram
     <<Protocol>>
     append_message(...)
     archive_and_compact(...)
+    update_token_counts(...)
   }
   class ToolExecutor {
     <<Protocol>>
+    get_tools_schema()
     dispatch(call) str
   }
   class HermesAgent {
     <<파사드>>
+    _token_estimate: TokenEstimate
     run_conversation() dict
   }
   class SessionDB
@@ -152,11 +155,12 @@ sequenceDiagram
   RT->>LP: chat_completion
   LP-->>RT: content
   RT->>PT: append(assistant)
-  RT-->>AG: 결과 사전 + 직전 토큰 추정값
+  RT-->>AG: 결과 사전 (추정값은 estimate 객체 제자리 갱신)
 ```
 
 - 050 전에는 「LLM 체인」 자리에 LLM 포트를 직접 부른다.
 - 정지 사유 확인 시점(before_llm 뒤, after_tool_calls 뒤)과 원장 기록 시점(assistant는 도구 실행 전, tool은 호출마다 즉시)은 지금과 같다.
+- 직전 토큰 추정값은 파사드가 소유한 `TokenEstimate` 객체를 커널이 제자리에서 갱신하여, 중간 예외로 중단되어도 즉시 반영을 보존한다.
 
 ---
 
@@ -180,8 +184,8 @@ sequenceDiagram
 
 | # | 위험 | 대표 위험 분류 | 방어 |
 |---|---|---|---|
-| 1 | 루프 이동 중 인자 해석(`_parse_tool_arguments`)·깨진 JSON 처리 동작이 바뀜 | 파라미터·파싱 실패 | 함수를 그대로 옮기고 구 이름은 남긴다. 기존 `test_dispatch_single_entry.py` 등 무수정 통과 |
-| 2 | 직전 토큰 추정값(`_last_input_tokens`·`_last_message_count`) 동기화 누락 → 압축이 안 일어나 컨텍스트 초과 | 루프·토큰 오버플로 | 커널이 결과에 추정값을 돌려주고 파사드가 즉시 반영. 기존 압축 시험(`test_compression_agent.py`)과 030 시나리오로 확인 |
+| 1 | 루프 이동 중 인자 해석(`_parse_tool_arguments`)·깨진 JSON 처리 동작이 바뀜 | 파라미터·파싱 실패 | 함수를 `kernel/transcript.py`로 옮기고 인자 해석 및 `Invalid JSON arguments` 로깅 불변 유지 |
+| 2 | 직전 토큰 추정값(`_last_input_tokens`·`_last_message_count`) 동기화 누락 → 압축이 안 일어나 컨텍스트 초과 | 루프·토큰 오버플로 | 파사드가 소유한 `TokenEstimate` 객체를 커널이 제자리에서 갱신(예외 중단 경로 포함 즉시 반영). 기존 압축 시험(`test_compression_agent.py`)과 030 시나리오로 확인 |
 | 3 | 정지 사유 우선순위·확인 시점이 바뀜 → `stuck_loop` 뒤에도 바퀴가 돌거나 도구 쌍이 깨짐 | 루프 무한 반복 | 030 커널 시나리오에 「배치 중 정지 요청 → 배치의 tool 기록 완료 후 정지」를 명시. 기존 `test_loop_guard.py`·`test_transcript_integrity.py` 무수정 통과 |
 | 4 | 재수출이 클래스를 복사해 `isinstance`·`Enum` 비교가 깨짐 | — | 재수출은 `from kernel.x import Name` 형태만(재정의 금지). 010 시험에 「구 경로 이름 is 새 경로 이름」 확인을 020 지시서에서 추가 |
 | 5 | 커널 단독 시험이 몰래 파일·DB를 씀 | 파일시스템 오염 | `tests/test_kernel`은 `kernel/`만 import. 아키텍처 시험이 시험 폴더의 import도 검사하도록 030 지시서에서 정한다 |
@@ -221,9 +225,9 @@ sequenceDiagram
 
 ### 6-3. 030 턴 루프 추출과 단독 시험
 - `kernel/ports.py`: `LLMPort`, `TranscriptStore`, `ToolExecutor`, `LLMError(kind)`. 메서드 이름은 현재 `MockLLMClient`·`OpenRouterClient`·`SessionDB`·`ToolDispatcher`와 같게 둔다.
-- `kernel/transcript.py`: 시스템 메시지 불변 검사(현재 두 곳 → 한 함수), 도구 결과 메시지 생성, 도구 인자 해석(`_parse_tool_arguments` 이동, `agent.py`에는 같은 객체 이름 유지).
+- `kernel/transcript.py`: 시스템 메시지 불변 검사(현재 두 곳 → 한 함수 `first_message_unchanged`), 도구 결과 메시지 생성(`tool_result_message`), 도구 인자 해석(`parse_tool_arguments`).
 - `kernel/loop.py`: 현재 `run_conversation`의 사용자 메시지 기록부터 결과 사전 조립까지와 `_execute_tool_calls`, `_replace_transcript`의 본문. 시스템 프롬프트 조립·스킬 인덱스·기억 블록은 파사드에 남는다(변동 영역).
-- `HermesAgent.run_conversation`: 시스템 프롬프트 준비 → `run_turn` 호출 → 결과의 직전 토큰 추정값을 자기 속성에 반영 → 결과 반환.
+- `HermesAgent.run_conversation`: 시스템 프롬프트 준비 → `TokenEstimate` 객체와 함께 `run_turn` 호출 → 결과 반환(추정값은 커널이 제자리에서 갱신, 프로퍼티로 노출).
 - `tests/test_kernel/`: 메모리 안 목록 기반 가짜 포트. 시나리오(정상 종료, 최대 횟수, LLM 오류, before_llm 정지, 배치 중 정지 요청과 도구 쌍, 훅 예외 격리, 훅의 대화 직접 변조 감지, 대화 교체 원장 실패 시 메모리 불변, 결과 예약 키 보호 등)는 030 지시서에 구현 전에 적는다.
 
 ### 6-4. 040 기본 확장 조립 분리

@@ -13,6 +13,7 @@ import logging
 from typing import Any, Optional
 
 from hermes_core.kernel.contract import TurnScope
+from hermes_core.kernel.transcript import first_message_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -122,14 +123,7 @@ class HookRegistry:
             # replace_transcript가 호출된 경우 comparison도 live_source로 맞춰졌을 수 있으므로 대조
             if ctx.messages != comparison:
                 has_comp_sys = bool(comparison and comparison[0].get("role") == "system")
-                comp_sys_role = comparison[0].get("role") if has_comp_sys else None
-                comp_sys_content = comparison[0].get("content") if has_comp_sys else None
-
-                current_first = ctx.messages[0] if ctx.messages else None
-                first_role = current_first.get("role") if current_first else None
-                first_content = current_first.get("content") if current_first else None
-
-                if has_comp_sys and (first_role != comp_sys_role or first_content != comp_sys_content):
+                if has_comp_sys and not first_message_unchanged(comparison, ctx.messages):
                     err = ValueError("system message modified by hook")
                 else:
                     err = ValueError("transcript modified outside replace_transcript")

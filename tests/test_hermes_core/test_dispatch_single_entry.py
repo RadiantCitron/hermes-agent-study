@@ -270,9 +270,9 @@ def test_scenario_09_chain_execution_only_in_dispatch():
 
 
 def test_scenario_10_no_error_json_construction_in_agent_py():
-    """시나리오 10: agent.py 소스에 Invalid JSON arguments 로그 문자열 1건 외에 직접 에러 JSON 생성 0건."""
-    agent_path = Path(__file__).resolve().parent.parent.parent / "src" / "hermes_core" / "agent" / "agent.py"
-    content = agent_path.read_text(encoding="utf-8")
+    """시나리오 10: kernel/loop.py(및 agent.py) 소스에 Invalid JSON arguments 로그 문자열 1건 외에 직접 에러 JSON 생성 0건."""
+    loop_path = Path(__file__).resolve().parent.parent.parent / "src" / "hermes_core" / "kernel" / "loop.py"
+    content = loop_path.read_text(encoding="utf-8")
     # 'Invalid JSON arguments'는 logger.warning에만 1회 존재
     occurrences = [line for line in content.splitlines() if "Invalid JSON arguments" in line]
     assert len(occurrences) == 1

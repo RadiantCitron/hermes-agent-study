@@ -5,9 +5,10 @@
 - 차이점: 에이전트 이벤트(AgentEvent)와 이벤트 수신 인터페이스(EventSink)를 커널 계약으로 격리한다.
 """
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 EVENT_TOOL_CALL = "tool_call"
 EVENT_HOOK_ERROR = "hook_error"
@@ -23,3 +24,19 @@ class AgentEvent:
 
 
 EventSink = Callable[[AgentEvent], None]
+
+
+def emit_event(
+    sink: Optional[EventSink],
+    kind: str,
+    data: dict[str, Any],
+    logger: logging.Logger,
+) -> None:
+    """이벤트를 방출하되 EventSink 예외는 삼키고 경고 로깅한다."""
+    if sink is None:
+        return
+    try:
+        sink(AgentEvent(kind=kind, data=data))
+    except Exception as e:
+        logger.warning("EventSink failed for event '%s': %s", kind, e)
+

@@ -22,28 +22,9 @@ from hermes_core.constants import (
     LLM_TIMEOUT_SECONDS,
     OPENROUTER_CHAT_URL,
 )
+from hermes_core.kernel.ports import LLMError
 
 logger = logging.getLogger(__name__)
-
-
-class LLMError(Exception):
-    """LLM API 호출 실패 예외.
-
-    속성:
-    - kind: rate_limited | timeout | network | http_error | bad_response
-    - message: 오류 설명 (API 키 마스킹 적용)
-    """
-
-    def __init__(self, kind: str, message: str):
-        self.kind = kind
-        self.message = message
-        super().__init__(message)
-
-    def __repr__(self) -> str:
-        return f"LLMError(kind={self.kind!r}, message={self.message!r})"
-
-    def __str__(self) -> str:
-        return self.message
 
 
 @dataclass
