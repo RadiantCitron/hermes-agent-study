@@ -273,7 +273,7 @@ stateDiagram-v2
           return result
       return gated
   ```
-  - 훅도 같은 모양으로 감싼다. 꺼졌으면 `None`을 돌려준다. 훅 반환값의 의미는 `kernel/turn_hooks.py`에서 **탐침**한다.
+  - 훅도 같은 모양으로 감싼다. 꺼졌으면 `None`을 돌려준다. **탐침 확인 완료**: `HookRegistry.run`(`kernel/turn_hooks.py` 111행)은 훅 반환값을 쓰지 않으며, 124~136행에서 `ctx.messages != comparison`으로 불법 변조를 사후 검사하므로 턴 훅 게이트는 호출 전 `before = copy.deepcopy(ctx.messages)`와 비교해 `ctx.messages == before`일 때만 `_extension_succeeded(name)`를 부른다.
   - 감싼 객체를 `hooks.register`와 `_hook_to_extension`에 같이 쓴다(위험 3).
 - **공개 메서드**:
   - `set_extension_enabled(name: str, enabled: bool) -> None`: 모르는 이름이면 `ValueError`. 켜면 연속 수를 0으로 한다.
@@ -283,9 +283,10 @@ stateDiagram-v2
   - `_on_extension_error`에서 연속 수를 +1 한다. 임계 > 0이고 연속 수 ≥ 임계이면 꺼짐으로 바꾸고, `tripped=True`로 표시한 뒤 `EVENT_EXTENSION_TRIPPED(name, failures)`를 낸다.
   - 감사 기록은 040에서 이 지점에 더한다.
 - **조립**: `assembly.create_agent`가 `settings.breaker_threshold`로 `set_extension_breaker`를 부른다. 020 스냅샷에 켜짐·연속 실패를 더한다.
-- **탐침**:
-  - 디스패처가 미들웨어를 부를 때 `name`을 어디서 얻는지 확인한다(`add_middleware(name=)`).
-  - 감싼 함수가 `phase` 판정이나 시험의 미들웨어 동일성 비교(`is`)에 걸리는지 확인한다. `grep -rn "add_middleware\|_middlewares" tests`.
+- **탐침 확인 완료**:
+  - `ToolDispatcher.add_middleware(name=)`에 `_ExtensionHost`가 `self._extension_name`을 명시해 넘기며, `dispatch`의 `mw_exc is inner_exc` 판정 덕분에 게이트가 예외를 그대로 통과시키면 안쪽 예외는 중립(연속 수 변화 없음)이고 미들웨어 자체 예외만 집계된다.
+  - `grep -rn "add_middleware\|_middlewares\|add_turn_hook\|_hooks" tests` 확인 결과 미들웨어·훅 동일성(`is`) 비교 시험은 0건이다.
+  - `test_compat_layers.py` 시나리오 4(`src/` 내부 `from hermes_core.agent.events import` 허용 목록 제한)와 `test_llm_entry_boundary.py` 시나리오 17(`agent.py` 내 `hasattr` 금지)을 준수하도록 `EVENT_EXTENSION_TRIPPED`는 `agent/events.py`와 `agent/agent.py` 양쪽에 정의한다.
 - **인수 시나리오 후보**:
   1. 꺼진 GUARD 미들웨어는 호출되지 않고 도구 결과는 같다.
   2. 꺼진 턴 훅은 호출되지 않는다.
