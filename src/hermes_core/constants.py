@@ -42,8 +42,16 @@ SKILLS_INDEX_MAX_ENTRIES = 50
 SKILLS_INDEX_DESC_MAX_CHARS = 120
 SKILLS_INDEX_MAX_CHARS = 4_000
 
-# 서브에이전트(자식) 허용 도구 목록 (07 로드맵)
-CHILD_TOOL_NAMES = ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view")
+# 서브에이전트(자식) 허용 도구 목록 (07 로드맵, 17 로드맵 search_files 추가)
+CHILD_TOOL_NAMES = (
+    "terminal",
+    "read_file",
+    "write_file",
+    "patch",
+    "search_files",
+    "skills_list",
+    "skill_view",
+)
 
 # 서브에이전트(자식) 실행 및 반환 제한 상수 (07 로드맵)
 DELEGATE_CHILD_MAX_ITERATIONS = 25
@@ -127,6 +135,11 @@ FILE_WRITE_MAX_CHARS = 100_000
 
 # 읽기·수정 대상 파일 크기 상한 (바이트)
 FILE_MAX_BYTES = 1_000_000
+
+# 파일·내용 탐색 도구(search_files) 제한 상수 (17 로드맵)
+SEARCH_MAX_MATCHES = 50
+SEARCH_MAX_LINE_CHARS = 200
+SEARCH_MAX_FILES_SCANNED = 5000
 
 
 # =============================================================================

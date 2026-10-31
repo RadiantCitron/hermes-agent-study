@@ -77,7 +77,7 @@ def test_scenario_01_real_mode_without_delegate_flag(cli_test_env, monkeypatch: 
     first_call = parent_client.call_history[0]
 
     tool_names = {t["function"]["name"] for t in first_call["tools"]}
-    expected_8 = {"memory", "session_search", "terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"}
+    expected_8 = {"memory", "session_search", "terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"}
     assert tool_names == expected_8
 
     sys_msg = first_call["messages"][0]["content"]
@@ -102,7 +102,7 @@ def test_scenario_02_real_mode_with_delegate_flag(cli_test_env, monkeypatch: pyt
     first_call = parent_client.call_history[0]
 
     tool_names = {t["function"]["name"] for t in first_call["tools"]}
-    expected_8 = {"memory", "session_search", "terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"}
+    expected_8 = {"memory", "session_search", "terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"}
     assert tool_names == expected_8 | {"delegate_task"}
 
     sys_msg = first_call["messages"][0]["content"]

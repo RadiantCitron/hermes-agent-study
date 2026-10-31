@@ -726,6 +726,7 @@ def test_scenario_16_non_terminal_tools_and_prompt_unchanged(
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     }

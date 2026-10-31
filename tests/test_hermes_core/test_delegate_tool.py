@@ -36,6 +36,7 @@ def test_scenario_01_registration_and_schema(base_env):
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     ]
@@ -144,7 +145,7 @@ def test_scenario_02_03_04_successful_delegation(base_env):
 
     # 자식에게 전달된 도구는 정확히 허용 목록 6종
     child_tool_names = {t["function"]["name"] for t in first_child_call["tools"]}
-    assert child_tool_names == {"terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"}
+    assert child_tool_names == {"terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"}
 
     # 시나리오 4 검증: DB 세션 레코드
     child_sess = db.get_session(payload["child_session_id"])

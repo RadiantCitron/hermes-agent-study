@@ -10,6 +10,7 @@ from hermes_core.agent.agent import HermesAgent, MockLLMClient, MockLLMResponse
 from hermes_core.agent.prompt_builder import (
     CHILD_AGENT_PROMPT,
     MEMORY_GUIDANCE,
+    SEARCH_FILES_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
     SUBAGENT_GUIDANCE,
@@ -73,10 +74,10 @@ def test_scenario_03_default_parent_system_prompt_byte_identical(tmp_path: Path,
     agent_prompt = agent._build_system_prompt()
     assert "delegate_task" not in agent_prompt
 
-    # 동일 시각 기준 분리 조립 비교
+    # 동일 시각 기준 분리 조립 비교 (17 로드맵: SEARCH_FILES_GUIDANCE 포함)
     now = datetime.now()
     oracle_prompt = build_system_prompt(
-        tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE],
+        tools_guidance=[MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SEARCH_FILES_GUIDANCE, SKILLS_GUIDANCE],
         memory_block=store.format_for_system_prompt("memory"),
         context_files_block=None,
         platform="cli",

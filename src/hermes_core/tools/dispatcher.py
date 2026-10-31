@@ -32,9 +32,11 @@ from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
     READ_FILE_SCHEMA,
+    SEARCH_FILES_SCHEMA,
     WRITE_FILE_SCHEMA,
     patch_tool,
     read_file_tool,
+    search_files_tool,
     write_file_tool,
 )
 from hermes_core.tools.path_guard import resolve_workspace
@@ -271,6 +273,7 @@ _DEFAULT_TOOL_NAMES = (
     "read_file",
     "write_file",
     "patch",
+    "search_files",
     "skills_list",
     "skill_view",
 )
@@ -419,11 +422,15 @@ def create_default_dispatcher(
             PATCH_SCHEMA,
         )
 
-    # 7. Skills List 도구 등록
+    # 7. Search Files 도구 등록 (17 로드맵)
+    if _should_register("search_files"):
+        dispatcher.register_tool("search_files", search_files_tool, SEARCH_FILES_SCHEMA)
+
+    # 8. Skills List 도구 등록
     if _should_register("skills_list"):
         dispatcher.register_tool("skills_list", skills_list_tool, SKILLS_LIST_SCHEMA)
 
-    # 8. Skill View 도구 등록
+    # 9. Skill View 도구 등록
     if _should_register("skill_view"):
         dispatcher.register_tool("skill_view", skill_view_tool, SKILL_VIEW_SCHEMA)
 

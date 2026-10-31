@@ -117,6 +117,25 @@ def check_path(path: str, workspace: Path) -> tuple[Optional[Path], Optional[str
     return (workspace / path).resolve(), None
 
 
+def is_hermes_home_path(target_path: Path, workspace: Path) -> bool:
+    """대상 경로가 Hermes 상태 폴더(get_hermes_home()) 내부인지 판정한다.
+
+    단, workspace 자체가 hermes_home의 안쪽(엄격한 하위 디렉터리, !=)인 경우(예: .hermes/workspace)에는
+    작업 폴더 안의 정상 파일이 상태 폴더 내부로 오판되지 않도록 False를 반환한다.
+    """
+    try:
+        hermes_home = get_hermes_home().resolve()
+        resolved_workspace = workspace.resolve()
+        resolved_target = target_path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return True
+    is_workspace_inside_home = (
+        resolved_workspace.is_relative_to(hermes_home)
+        and resolved_workspace != hermes_home
+    )
+    return (not is_workspace_inside_home) and resolved_target.is_relative_to(hermes_home)
+
+
 def check_write_path(path: str, workspace: Path) -> tuple[Optional[Path], Optional[str]]:
     """파일 쓰기·수정용 경로 안전성 검증.
 
@@ -147,14 +166,7 @@ def check_write_path(path: str, workspace: Path) -> tuple[Optional[Path], Option
                 pass
 
     # 4. Hermes 상태 폴더 내부 검사
-    # workspace가 hermes_home의 안쪽(엄격한 하위 디렉터리, !=)인 경우 건너뜀
-    hermes_home = get_hermes_home().resolve()
-    resolved_workspace = workspace.resolve()
-    is_workspace_inside_home = (
-        resolved_workspace.is_relative_to(hermes_home)
-        and resolved_workspace != hermes_home
-    )
-    if not is_workspace_inside_home and target_path.is_relative_to(hermes_home):
+    if is_hermes_home_path(target_path, workspace):
         return None, "Writing inside the Hermes state folder is not allowed."
 
     return target_path, None

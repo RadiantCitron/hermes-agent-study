@@ -8,9 +8,11 @@
   - 안전성 가드: NUL 바이트(바이너리) 차단, 비UTF-8 차단, 작업 폴더 외부 탈출 차단.
 """
 
+import fnmatch
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 from typing import Optional
@@ -20,8 +22,18 @@ from hermes_core.constants import (
     FILE_READ_MAX_CHARS,
     FILE_READ_MAX_LINES,
     FILE_WRITE_MAX_CHARS,
+    SEARCH_MAX_FILES_SCANNED,
+    SEARCH_MAX_LINE_CHARS,
+    SEARCH_MAX_MATCHES,
 )
-from hermes_core.tools.path_guard import check_path, check_write_path, resolve_workspace
+from hermes_core.tools.path_guard import (
+    check_path,
+    check_write_path,
+    is_hermes_home_path,
+    is_inside,
+    is_protected_path,
+    resolve_workspace,
+)
 
 READ_FILE_SCHEMA = {
     "type": "function",
@@ -421,3 +433,208 @@ def patch_tool(
         "chars_after": len(new_text),
     }
     return json.dumps(result, ensure_ascii=False)
+
+
+SEARCH_FILES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_files",
+        "description": (
+            "Search for files by glob pattern or search text content inside files within the working directory. "
+            "Use this instead of find or grep in terminal. "
+            "If 'pattern' is empty, returns matching file paths (file search mode). "
+            "If 'pattern' is provided, returns matching lines with 1-based line numbers (content search mode). "
+            "Protected paths (.env*, .git, state folder), symlinks, and binary files are automatically skipped."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative directory or file path to search in (default '.').",
+                    "default": ".",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Text or regex pattern to search inside file contents. Leave empty ('') to list files matching file_glob.",
+                    "default": "",
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Filename or relative-path glob filter (e.g. '*.py', 'src/*.py', default '*').",
+                    "default": "*",
+                },
+                "regex": {
+                    "type": "boolean",
+                    "description": "If true, treat 'pattern' as a regular expression. If false (default), match literal substring.",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
+def search_files_tool(
+    path: str = ".",
+    pattern: str = "",
+    file_glob: str = "*",
+    regex: bool = False,
+    workspace: Optional[Path] = None,
+) -> str:
+    """작업 폴더 내에서 파일 이름 검색 또는 파일 내용 텍스트 검색을 수행한다."""
+    # 인자 정규화 및 검증
+    if path is None or (isinstance(path, str) and not path.strip()):
+        path = "."
+    elif not isinstance(path, str):
+        return _failure("path must be a string.")
+
+    if pattern is None:
+        pattern = ""
+    elif not isinstance(pattern, str):
+        return _failure("pattern must be a string.")
+
+    if file_glob is None:
+        file_glob = "*"
+    elif not isinstance(file_glob, str):
+        return _failure("file_glob must be a string.")
+
+    if not isinstance(regex, bool):
+        return _failure("regex must be a boolean.")
+
+    if pattern == "" and file_glob.strip() == "":
+        return _failure("At least one of 'pattern' or 'file_glob' must be non-empty.")
+
+    eff_glob = file_glob.strip() or "*"
+
+    # 시작 경로 보안 검증
+    base = resolve_workspace(workspace)
+    raw_start = base / path
+    if raw_start.is_symlink():
+        return _failure(f"Path '{path}' is a symbolic link; symlinks are not searched.")
+
+    target_path, err = check_path(path, base)
+    if err or target_path is None:
+        return _failure(err or "Invalid path.")
+
+    if is_hermes_home_path(target_path, base):
+        return _failure("Searching inside the Hermes state folder is not allowed.")
+
+    if not target_path.exists():
+        return _failure(f"Path not found: '{path}'")
+
+    # 정규식 사전 컴파일
+    compiled_re = None
+    if pattern and regex:
+        try:
+            compiled_re = re.compile(pattern)
+        except re.error as e:
+            return _failure(f"Invalid regex pattern: {e}")
+
+    # 탐색 대상 파일 목록 수집 (결정론적 순회)
+    candidate_files: list[Path] = []
+    if target_path.is_file():
+        # 단일 파일 직접 지정 시에도 eff_glob 일치 확인
+        try:
+            rel_str = target_path.relative_to(base).as_posix()
+        except ValueError:
+            rel_str = target_path.name
+        if fnmatch.fnmatchcase(target_path.name, eff_glob) or fnmatch.fnmatchcase(rel_str, eff_glob):
+            candidate_files.append(target_path)
+    else:
+        def _collect(cur_dir: Path) -> None:
+            try:
+                entries = sorted(cur_dir.iterdir(), key=lambda p: p.name)
+            except OSError:
+                return
+
+            for entry in entries:
+                if entry.is_symlink():
+                    continue
+                try:
+                    rel_str = entry.relative_to(base).as_posix()
+                except ValueError:
+                    continue
+
+                if not is_inside(rel_str, base) or is_protected_path(rel_str, base) or is_hermes_home_path(entry, base):
+                    continue
+
+                if entry.is_dir():
+                    _collect(entry)
+                elif entry.is_file():
+                    if fnmatch.fnmatchcase(entry.name, eff_glob) or fnmatch.fnmatchcase(rel_str, eff_glob):
+                        candidate_files.append(entry)
+
+        _collect(target_path)
+
+    # 상한 및 매칭
+    files_scanned = 0
+    truncated = False
+    matches: list[dict] = []
+
+    for file_path in candidate_files:
+        if files_scanned >= SEARCH_MAX_FILES_SCANNED:
+            truncated = True
+            break
+        files_scanned += 1
+
+        try:
+            rel_str = file_path.relative_to(base).as_posix()
+        except ValueError:
+            rel_str = file_path.name
+
+        if not pattern:
+            # 파일 찾기 모드
+            if len(matches) >= SEARCH_MAX_MATCHES:
+                truncated = True
+                break
+            matches.append({"path": rel_str})
+        else:
+            # 내용 찾기 모드
+            try:
+                st = file_path.stat()
+                if st.st_size > FILE_MAX_BYTES:
+                    continue
+                raw_bytes = file_path.read_bytes()
+            except OSError:
+                continue
+
+            if b"\x00" in raw_bytes:
+                continue
+
+            try:
+                text_content = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+
+            lines = [ln.rstrip("\r") for ln in text_content.split("\n")]
+            file_truncated = False
+            for line_num, line in enumerate(lines, start=1):
+                is_match = (compiled_re.search(line) is not None) if compiled_re else (pattern in line)
+                if is_match:
+                    if len(matches) >= SEARCH_MAX_MATCHES:
+                        truncated = True
+                        file_truncated = True
+                        break
+                    preview = (
+                        line[:SEARCH_MAX_LINE_CHARS] + "..."
+                        if len(line) > SEARCH_MAX_LINE_CHARS
+                        else line
+                    )
+                    matches.append({"path": rel_str, "line": line_num, "content": preview})
+
+            if file_truncated:
+                break
+
+    return json.dumps(
+        {
+            "success": True,
+            "mode": "content" if pattern else "files",
+            "matches": matches,
+            "total_matches": len(matches),
+            "files_scanned": files_scanned,
+            "truncated": truncated,
+        },
+        ensure_ascii=False,
+    )

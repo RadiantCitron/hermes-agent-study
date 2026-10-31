@@ -56,9 +56,10 @@ def test_scenario_06_agent_tools_schema_eight_tools():
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     }
     assert expected_eight.issubset(names)
-    assert len(names) == 8
+    assert len(names) == 9
 

@@ -51,6 +51,11 @@ SESSION_SEARCH_GUIDANCE = (
     "cross-session context exists, use session_search to recall it before asking them to repeat themselves."
 )
 
+SEARCH_FILES_GUIDANCE = (
+    "To locate files by name or find text inside files in the workspace, use search_files "
+    "before reading with read_file or editing with patch (prefer search_files over terminal find/grep)."
+)
+
 SKILLS_GUIDANCE = (
     "You have access to reusable skills (procedural memories) stored as read-only reference files. "
     "Before starting a task, use skills_list to check available skill names and descriptions. "
@@ -351,8 +356,9 @@ def select_tools_guidance(tool_names: Collection[str]) -> list[str]:
     선택 순서:
     1. MEMORY_GUIDANCE: 'memory' 포함 시
     2. SESSION_SEARCH_GUIDANCE: 'session_search' 포함 시
-    3. SKILLS_GUIDANCE: 'skills_list' 및 'skill_view' 모두 포함 시
-    4. SUBAGENT_GUIDANCE: 'delegate_task' 포함 시
+    3. SEARCH_FILES_GUIDANCE: 'search_files' 포함 시
+    4. SKILLS_GUIDANCE: 'skills_list' 및 'skill_view' 모두 포함 시
+    5. SUBAGENT_GUIDANCE: 'delegate_task' 포함 시
     """
     names_set = set(tool_names) if tool_names else set()
     guidance: list[str] = []
@@ -361,6 +367,8 @@ def select_tools_guidance(tool_names: Collection[str]) -> list[str]:
         guidance.append(MEMORY_GUIDANCE)
     if "session_search" in names_set:
         guidance.append(SESSION_SEARCH_GUIDANCE)
+    if "search_files" in names_set:
+        guidance.append(SEARCH_FILES_GUIDANCE)
     if "skills_list" in names_set and "skill_view" in names_set:
         guidance.append(SKILLS_GUIDANCE)
     if "delegate_task" in names_set:

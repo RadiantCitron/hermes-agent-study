@@ -14,12 +14,12 @@ from hermes_core.tools.memory_tool import MemoryStore
 
 
 def test_scenario_01_child_dispatcher_tool_names():
-    """시나리오 1: create_child_dispatcher().get_tools_schema() 도구 이름 집합 6종 검증."""
+    """시나리오 1: create_child_dispatcher().get_tools_schema() 도구 이름 집합 7종 검증 (17 로드맵 search_files 추가)."""
     child = create_child_dispatcher()
     schemas = child.get_tools_schema()
     names = {s["function"]["name"] for s in schemas}
-    assert names == {"terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"}
-    assert len(names) == 6
+    assert names == {"terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"}
+    assert len(names) == 7
 
 
 def test_scenario_02_child_dispatcher_excluded_tools():
@@ -33,7 +33,7 @@ def test_scenario_02_child_dispatcher_excluded_tools():
 
 
 def test_scenario_03_default_dispatcher_tool_names_and_order():
-    """시나리오 3: create_default_dispatcher() 8종 도구 이름 및 등록 순서 보존 검증."""
+    """시나리오 3: create_default_dispatcher() 9종 도구 이름 및 등록 순서 보존 검증 (17 로드맵)."""
     dispatcher = create_default_dispatcher()
     schemas = dispatcher.get_tools_schema()
     names = [s["function"]["name"] for s in schemas]
@@ -44,6 +44,7 @@ def test_scenario_03_default_dispatcher_tool_names_and_order():
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     ]
@@ -55,16 +56,17 @@ def test_scenario_03_default_dispatcher_tool_names_and_order():
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     }
 
 
 def test_scenario_05_schemas_identical():
-    """시나리오 5: 기본 통로와 자식 통로의 6종 공통 도구 스키마 동일성 검증."""
+    """시나리오 5: 기본 통로와 자식 통로의 7종 공통 도구 스키마 동일성 검증."""
     default_schemas = {s["function"]["name"]: s for s in create_default_dispatcher().get_tools_schema()}
     child_schemas = {s["function"]["name"]: s for s in create_child_dispatcher().get_tools_schema()}
-    for name in ("terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"):
+    for name in ("terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"):
         assert child_schemas[name] == default_schemas[name]
 
 
@@ -121,6 +123,7 @@ def test_scenario_12_default_dispatcher_backward_compatibility_with_injected_sto
         "read_file",
         "write_file",
         "patch",
+        "search_files",
         "skills_list",
         "skill_view",
     ]

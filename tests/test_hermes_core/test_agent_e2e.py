@@ -1694,8 +1694,8 @@ def test_r07_050_scenarios_01_02_03_06_07_full_delegation_cycle(r05_e2e_env):
         tool_names = {t["function"]["name"] for t in tools}
         assert tool_names == set(CHILD_TOOL_NAMES)
 
-    # 부모 요청의 tools는 8종 + delegate_task (9종)
-    expected_parent_tools = {"terminal", "read_file", "write_file", "patch", "memory", "session_search", "skills_list", "skill_view", "delegate_task"}
+    # 부모 요청의 tools는 9종 + delegate_task (10종)
+    expected_parent_tools = {"terminal", "read_file", "write_file", "patch", "search_files", "memory", "session_search", "skills_list", "skill_view", "delegate_task"}
     for preq in parent_transport.captured_requests:
         body = json.loads(preq.content.decode("utf-8"))
         tools = body.get("tools", [])
@@ -2185,7 +2185,7 @@ def test_r07_050_scenario_11_unenabled_parent_keeps_eight_tools(r05_e2e_env):
     req = json.loads(transport.captured_requests[0].content.decode("utf-8"))
     tools = req.get("tools", [])
     tool_names = {t["function"]["name"] for t in tools}
-    assert len(tool_names) == 8
+    assert len(tool_names) == 9
     assert "delegate_task" not in tool_names
 
     sys_msg = req["messages"][0]["content"]
@@ -2685,7 +2685,7 @@ def test_r08_040_scenario_07_delegate_child_isolation(r05_e2e_env):
     assert "<available_skills>" not in c_sys_msg
 
     c_tools = {t["function"]["name"] for t in c_req1.get("tools", [])}
-    expected_child_tools = {"terminal", "read_file", "write_file", "patch", "skills_list", "skill_view"}
+    expected_child_tools = {"terminal", "read_file", "write_file", "patch", "search_files", "skills_list", "skill_view"}
     assert c_tools == expected_child_tools
 
     _assert_no_key_in_db(db, fake_key)
