@@ -21,6 +21,7 @@ from hermes_core.tools.ports import (
     CommandExecutorPort,
     ControlAuditPort,
     DelegateStorePort,
+    MemoryStorePort,
     SessionSearchPort,
 )
 from hermes_core.tools.session_search_tool import session_search_tool
@@ -306,5 +307,132 @@ def test_scenario_r21_ports_conformance() -> None:
 
     sig_exec = inspect.signature(CommandExecutorPort.__call__)
     sig_exec.bind(None, ["echo", "1"], Path("/tmp"), 10)
+
+
+def test_scenario_r22_030_memory_store_port_conformance_and_signature_binding() -> None:
+    """시나리오 R22-030-1: MemoryStorePort 프로토콜 적합성 및 6대 공개 메서드 시그니처 바인딩 검증."""
+    from hermes_core.tools.memory_tool import MemoryStore
+
+    assert issubclass(MemoryStore, MemoryStorePort), "MemoryStore must satisfy MemoryStorePort"
+    store = MemoryStore(Path("/virtual/memory"))
+    assert isinstance(store, MemoryStorePort), "MemoryStore instance must satisfy MemoryStorePort"
+
+    # 1. load_from_disk
+    sig_load = inspect.signature(MemoryStore.load_from_disk)
+    sig_load.bind(None)
+
+    # 2. add
+    sig_add = inspect.signature(MemoryStore.add)
+    sig_add.bind(None, "memory", "fact")
+
+    # 3. replace
+    sig_replace = inspect.signature(MemoryStore.replace)
+    sig_replace.bind(None, "memory", "old", "new")
+
+    # 4. remove
+    sig_remove = inspect.signature(MemoryStore.remove)
+    sig_remove.bind(None, "memory", "old")
+
+    # 5. list_entries
+    sig_list = inspect.signature(MemoryStore.list_entries)
+    sig_list.bind(None)
+    sig_list.bind(None, target="user")
+
+    # 6. format_for_system_prompt
+    sig_format = inspect.signature(MemoryStore.format_for_system_prompt)
+    sig_format.bind(None)
+    sig_format.bind(None, target="memory")
+
+
+def test_scenario_r22_030_fake_memory_store_standalone_in_dispatcher() -> None:
+    """시나리오 R22-030-2: FakeMemoryStore 독립 완결 구동 및 디스패처 연동 인수 검증."""
+    from hermes_core.tools.dispatcher import create_default_dispatcher
+
+    class FakeMemoryStore:
+        def __init__(self) -> None:
+            self.storage: dict[str, list[str]] = {"memory": [], "user": []}
+
+        def load_from_disk(self) -> None:
+            pass
+
+        def add(self, target: str, content: str) -> dict[str, Any]:
+            self.storage.setdefault(target, []).append(content)
+            return {"success": True, "target": target, "action": "add"}
+
+        def replace(self, target: str, old_text: str, new_content: str) -> dict[str, Any]:
+            entries = self.storage.get(target, [])
+            for i, e in enumerate(entries):
+                if old_text in e:
+                    entries[i] = new_content
+                    return {"success": True, "target": target, "action": "replace"}
+            return {"success": False, "error": f"No entry matched '{old_text}'."}
+
+        def remove(self, target: str, old_text: str) -> dict[str, Any]:
+            entries = self.storage.get(target, [])
+            for i, e in enumerate(entries):
+                if old_text in e:
+                    entries.pop(i)
+                    return {"success": True, "target": target, "action": "remove"}
+            return {"success": False, "error": f"No entry matched '{old_text}'."}
+
+        def list_entries(self, target: str = "memory") -> dict[str, Any]:
+            entries = list(self.storage.get(target, []))
+            return {
+                "success": True,
+                "target": target,
+                "entries": entries,
+                "entry_count": len(entries),
+                "usage": "fake 100/1000 chars",
+            }
+
+        def format_for_system_prompt(self, target: str = "memory") -> Optional[str]:
+            entries = self.storage.get(target, [])
+            return "\n".join(entries) if entries else None
+
+    assert issubclass(FakeMemoryStore, MemoryStorePort), "FakeMemoryStore must satisfy MemoryStorePort"
+    fake = FakeMemoryStore()
+    assert isinstance(fake, MemoryStorePort), "fake instance must satisfy MemoryStorePort"
+
+    dispatcher = create_default_dispatcher(memory_store=fake)
+
+    # 1. add
+    res_raw = dispatcher.handle_function_call(
+        "memory", {"action": "add", "target": "memory", "content": "Fake item 1"}
+    )
+    res = json.loads(res_raw)
+    assert res["success"] is True
+    assert fake.storage["memory"] == ["Fake item 1"]
+
+    # 2. list
+    res_raw = dispatcher.handle_function_call("memory", {"action": "list", "target": "memory"})
+    res = json.loads(res_raw)
+    assert res["success"] is True
+    assert res["entries"] == ["Fake item 1"]
+
+    # 3. replace
+    res_raw = dispatcher.handle_function_call(
+        "memory",
+        {"action": "replace", "target": "memory", "old_text": "item 1", "content": "Fake item 2"},
+    )
+    res = json.loads(res_raw)
+    assert res["success"] is True
+    assert fake.storage["memory"] == ["Fake item 2"]
+
+    # 4. remove
+    res_raw = dispatcher.handle_function_call(
+        "memory", {"action": "remove", "target": "memory", "old_text": "item 2"}
+    )
+    res = json.loads(res_raw)
+    assert res["success"] is True
+    assert fake.storage["memory"] == []
+
+
+# 지시서 2.1 별칭 호환성
+test_scenario_r22_memory_store_port_conformance = (
+    test_scenario_r22_030_memory_store_port_conformance_and_signature_binding
+)
+test_scenario_r22_fake_memory_store_standalone_in_dispatcher = (
+    test_scenario_r22_030_fake_memory_store_standalone_in_dispatcher
+)
 
 
