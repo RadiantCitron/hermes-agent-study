@@ -6,6 +6,7 @@ I/O(SQLite 커넥션, 파일 시스템) 의존성 없이
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from hermes_core.constants import (
@@ -276,6 +277,38 @@ def extract_tool_name_map(messages: list[dict[str, Any]]) -> dict[str, str]:
     return tool_name_map
 
 
+_FTS5_RESERVED = frozenset({"AND", "OR", "NOT", "NEAR"})
+_NON_WORD_PATTERN = re.compile(r"[^\w]")
+
+
+def sanitize_fts_query(query: str) -> str:
+    """FTS5 전문 검색 쿼리를 안전화하여 SQLite OperationalError 크래시를 방지한다.
+
+    - 빈 문자열이거나 공백뿐이면 "" 반환.
+    - 공백 기준으로 개별 토큰 분리.
+    - FTS5 예약어(AND, OR, NOT, NEAR)는 대소문자 무관하게 큰따옴표로 감쌈.
+    - 영숫자, 언더스코어, 유니코드 문자/숫자 외의 특수문자가 포함된 토큰은
+      내부의 "를 ""로 이스케이프한 뒤 큰따옴표로 감쌈.
+    - 순수 일반 단어 토큰은 원형을 그대로 유지하여 기존 단위 테스트 및 평문 검색 계약을 보존함.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return ""
+
+    tokens = query.strip().split()
+    sanitized_tokens: list[str] = []
+
+    for token in tokens:
+        if token.upper() in _FTS5_RESERVED:
+            sanitized_tokens.append(f'"{token}"')
+        elif _NON_WORD_PATTERN.search(token):
+            escaped = token.replace('"', '""')
+            sanitized_tokens.append(f'"{escaped}"')
+        else:
+            sanitized_tokens.append(token)
+
+    return " ".join(sanitized_tokens)
+
+
 def build_fts_search_query(
     query: str,
     source_filter: Optional[list[str]] = None,
@@ -284,14 +317,15 @@ def build_fts_search_query(
     offset: int = 0,
 ) -> tuple[str, list[Any]]:
     """FTS5 전문 검색을 위한 SQL 문과 바인딩 파라미터 리스트를 순수하게 조립하여 반환한다."""
-    if not query or not query.strip():
+    sanitized = sanitize_fts_query(query)
+    if not sanitized:
         return ("", [])
 
     if source_filter is None:
         source_filter = ["cli", "telegram", "discord", "whatsapp", "slack"]
 
     where_clauses = ["messages_fts MATCH ?", "m.is_copy = 0"]
-    params: list[Any] = [query]
+    params: list[Any] = [sanitized]
 
     source_placeholders = ",".join("?" for _ in source_filter)
     where_clauses.append(f"s.source IN ({source_placeholders})")

@@ -26,7 +26,12 @@ from hermes_core.kernel.contract import (
 )
 from hermes_core.kernel.tool_call import ToolCall, ToolMiddleware
 from hermes_core.tools.checkpoint import Checkpointer, CheckpointLimitError
-from hermes_core.tools.ports import ApproverPort, CommandExecutorPort, SessionSearchPort
+from hermes_core.tools.ports import (
+    ApproverPort,
+    CommandExecutorPort,
+    MemoryStorePort,
+    SessionSearchPort,
+)
 from hermes_core.tools.file_tools import (
     PATCH_SCHEMA,
     READ_FILE_SCHEMA,
@@ -38,7 +43,7 @@ from hermes_core.tools.file_tools import (
     write_file_tool,
 )
 from hermes_core.tools.path_guard import resolve_workspace
-from hermes_core.tools.memory_tool import MEMORY_SCHEMA, MemoryStore, memory_tool
+from hermes_core.tools.memory_tool import MEMORY_SCHEMA, memory_tool
 from hermes_core.tools.session_search_tool import SESSION_SEARCH_SCHEMA, session_search_tool
 from hermes_core.tools.skills_tool import (
     SKILLS_LIST_SCHEMA,
@@ -336,7 +341,7 @@ def _checkpointed_handler(
 
 
 def create_default_dispatcher(
-    memory_store: Optional[MemoryStore] = None,
+    memory_store: Optional[MemoryStorePort] = None,
     session_db: Optional[SessionSearchPort] = None,
     include: Optional[Collection[str]] = None,
     approver: Optional[ApproverPort] = None,

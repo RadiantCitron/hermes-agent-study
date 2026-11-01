@@ -95,6 +95,23 @@ class SessionSearchPort(Protocol):
 
 
 @runtime_checkable
+class MemoryStorePort(Protocol):
+    """Memory 도구 및 ToolDispatcher가 의존하는 바운디드 메모리 저장소 포트 (ADR-0022 D-05)."""
+
+    def load_from_disk(self) -> None: ...
+
+    def add(self, target: str, content: str) -> dict[str, Any]: ...
+
+    def replace(self, target: str, old_text: str, new_content: str) -> dict[str, Any]: ...
+
+    def remove(self, target: str, old_text: str) -> dict[str, Any]: ...
+
+    def list_entries(self, target: str = "memory") -> dict[str, Any]: ...
+
+    def format_for_system_prompt(self, target: str = "memory") -> Optional[str]: ...
+
+
+@runtime_checkable
 class ChildRunnerPort(Protocol):
     """delegate_task가 자식 에이전트 세션을 실행할 때 호출하는 콜백 포트 (020에서 연결)."""
 

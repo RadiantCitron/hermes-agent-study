@@ -35,14 +35,14 @@ MEMORY_SCHEMA = {
     "type": "function",
     "function": {
         "name": "memory",
-        "description": "Manage persistent bounded memory (add, replace, or remove durable facts).",
+        "description": "Manage persistent bounded memory (add, replace, remove, or list durable facts).",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "replace", "remove"],
-                    "description": "Action to perform on memory.",
+                    "enum": ["add", "replace", "remove", "list"],
+                    "description": "Action to perform on memory: 'add', 'replace', 'remove', or 'list'.",
                 },
                 "target": {
                     "type": "string",
@@ -323,6 +323,14 @@ class MemoryStore:
 
         return self._success_response(target, "Entry removed.")
 
+    def list_entries(self, target: str = "memory") -> dict[str, Any]:
+        """기억 항목 및 사용량 조회 (Read-Only 멱등 조회)."""
+        if target not in ("memory", "user"):
+            return {"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}
+
+        self._sync_from_disk_if_modified(target)
+        return self._success_response(target)
+
     def format_for_system_prompt(self, target: str = "memory") -> Optional[str]:
         """시스템 프롬프트 주입용 동결 스냅샷 반환 (비어있으면 None)."""
         block = self._system_prompt_snapshot.get(target, "")
@@ -473,9 +481,12 @@ def memory_tool(
             )
         result = store.remove(target, old_text)
 
+    elif action == "list":
+        result = store.list_entries(target)
+
     else:
         return json.dumps(
-            {"success": False, "error": f"Unknown action '{action}'. Use: add, replace, remove"},
+            {"success": False, "error": f"Unknown action '{action}'. Use: add, replace, remove, list"},
             ensure_ascii=False,
         )
 
