@@ -57,6 +57,7 @@ def test_scenario_01_default_layer_and_sources(tmp_path: Path):
     assert loaded.file_path is None
     expected_settings = Settings(
         model=None,
+        provider=None,
         max_iterations=50,
         context_window_tokens=CONTEXT_WINDOW_TOKENS,
         compression_enabled=True,
@@ -70,7 +71,7 @@ def test_scenario_01_default_layer_and_sources(tmp_path: Path):
         breaker_threshold=3,
     )
     assert loaded.settings == expected_settings
-    assert len(loaded.sources) == 12
+    assert len(loaded.sources) == 13
     for k in SETTING_SPECS:
         assert loaded.sources[k] == "default"
 

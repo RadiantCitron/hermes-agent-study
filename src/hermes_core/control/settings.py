@@ -19,6 +19,7 @@ from hermes_core.constants import (
     CONTEXT_WINDOW_TOKENS,
     LOOP_GUARD_BLOCK_THRESHOLD,
     LOOP_GUARD_WARN_THRESHOLD,
+    SUPPORTED_PROVIDERS,
     get_hermes_home,
 )
 
@@ -46,6 +47,18 @@ class SettingSpec:
     mutability: Mutability
     validator: Callable[[Any], Any]
     nullable: bool = False
+
+
+def _validate_provider(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        normalized = v.strip().lower()
+        if normalized == "auto" or normalized in SUPPORTED_PROVIDERS:
+            return normalized
+    raise ValueError(
+        f"provider must be 'auto', one of {SUPPORTED_PROVIDERS}, or None"
+    )
 
 
 def _validate_model(v: Any) -> Optional[str]:
@@ -107,6 +120,14 @@ _SPECS_DICT: dict[str, SettingSpec] = {
         default=None,
         mutability="startup",
         validator=_validate_model,
+        nullable=True,
+    ),
+    "provider": SettingSpec(
+        key="provider",
+        type=str,
+        default=None,
+        mutability="startup",
+        validator=_validate_provider,
         nullable=True,
     ),
     "max_iterations": SettingSpec(
@@ -196,6 +217,7 @@ class Settings:
     """Hermes Core의 모든 설정값을 담는 동결 스냅샷."""
 
     model: Optional[str] = None
+    provider: Optional[str] = None
     max_iterations: int = 50
     context_window_tokens: int = CONTEXT_WINDOW_TOKENS
     compression_enabled: bool = True

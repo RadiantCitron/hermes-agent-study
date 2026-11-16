@@ -102,7 +102,7 @@ def test_scenario_02_setting_views_mapping_and_sources(
     dummy_agent = types.SimpleNamespace(session_id="dummy-sess", session_db=None, extensions=())
     snap = build_snapshot(dummy_agent, loaded)
 
-    assert len(snap.settings) == 12
+    assert len(snap.settings) == 13
     assert tuple(s.key for s in snap.settings) == tuple(SETTING_SPECS.keys())
 
     views = {s.key: s for s in snap.settings}
