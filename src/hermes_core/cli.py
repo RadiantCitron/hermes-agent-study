@@ -4,7 +4,7 @@
 - 대응 원본: hermes-agent/cli.py
 - 실행 방법:
   - `python -m hermes_core.cli --mock` (오프라인 테스트 및 스모크 실행 모드)
-  - `python -m hermes_core.cli` (실제 모델 모드: OPENROUTER_API_KEY 환경변수 필요)
+  - `python -m hermes_core.cli` (실제 모델 모드: OPENROUTER_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY 환경변수 또는 .env 필요)
 """
 
 import argparse
@@ -79,7 +79,6 @@ from hermes_core.constants import (
     CLI_UNSENT_NOTICE_ON_EXIT,
     CONTEXT_WINDOW_TOKENS,
     DEFAULT_REAL_MODEL,
-    OPENROUTER_API_KEY_ENV,
     SESSION_END_EOF,
     SESSION_END_ERROR,
     SESSION_END_USER_EXIT,
@@ -87,7 +86,15 @@ from hermes_core.constants import (
     get_default_workspace,
     get_hermes_home,
 )
+from hermes_core.anthropic_client import AnthropicClient
+from hermes_core.env_loader import load_dotenv_file
 from hermes_core.llm_client import OpenRouterClient
+from hermes_core.provider import (
+    ProviderResolutionError,
+    ResolvedProvider,
+    create_llm_client,
+    resolve_provider_config,
+)
 from hermes_core.session_db import SessionDB
 from hermes_core.tools.approval import Approver, is_approval_answer
 from hermes_core.tools.checkpoint import (
@@ -101,6 +108,28 @@ from hermes_core.tools.dispatcher import create_default_dispatcher
 from hermes_core.tools.memory_tool import MemoryStore
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_OPENROUTER_CLIENT = OpenRouterClient
+_DEFAULT_ANTHROPIC_CLIENT = AnthropicClient
+
+
+def _build_cli_llm_client(resolved: ResolvedProvider) -> object:
+    """확정된 프로바이더 설정에 맞는 LLMPort 클라이언트를 생성한다.
+
+    기존 CLI 테스트의 모듈 심볼 패치(`monkeypatch.setattr(cli, "OpenRouterClient", ...)`)와
+    호환되도록 심볼이 교체된 경우 해당 심볼을 사용하고, 기본 상태에서는 `create_llm_client()`를 위임한다.
+    """
+    if resolved.provider == "anthropic" and AnthropicClient is not _DEFAULT_ANTHROPIC_CLIENT:
+        return AnthropicClient(api_key=resolved.api_key, model=resolved.model)
+    if resolved.provider in ("openrouter", "gemini") and OpenRouterClient is not _DEFAULT_OPENROUTER_CLIENT:
+        if resolved.provider == "gemini":
+            return OpenRouterClient(
+                api_key=resolved.api_key,
+                model=resolved.model,
+                base_url=resolved.base_url,
+            )
+        return OpenRouterClient(api_key=resolved.api_key, model=resolved.model)
+    return create_llm_client(resolved)
 
 
 def _close_session(session_db: SessionDB, session_id: str, end_reason: str) -> None:
@@ -334,7 +363,13 @@ def main() -> None:
         "--model",
         type=str,
         default=None,
-        help=f"Model name (default: {DEFAULT_REAL_MODEL} in real mode)",
+        help=f"Model name (default depends on provider, e.g. {DEFAULT_REAL_MODEL})",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default=None,
+        help="LLM provider (auto, openrouter, gemini, anthropic)",
     )
     parser.add_argument(
         "--context-window",
@@ -383,9 +418,14 @@ def main() -> None:
         print(CLI_RESUME_MOCK_ERROR, file=sys.stderr)
         sys.exit(2)
 
+    if not args.mock:
+        load_dotenv_file()
+
     cli_overrides: dict[str, Any] = {}
     if args.model is not None:
         cli_overrides["model"] = args.model
+    if args.provider is not None:
+        cli_overrides["provider"] = args.provider
     if args.context_window is not None:
         cli_overrides["context_window_tokens"] = args.context_window
     if args.delegate:
@@ -406,6 +446,7 @@ def main() -> None:
     settings = loaded.settings
     model = settings.model
     llm_client = None
+    resolved: Optional[ResolvedProvider] = None
 
     if args.mock:
         # 스모크 및 데모용 Mock 응답 사전 준비
@@ -425,14 +466,11 @@ def main() -> None:
         )
         llm_client = mock_client
     else:
-        # 실제 모델 모드: 환경변수 검사
-        api_key = os.environ.get(OPENROUTER_API_KEY_ENV, "").strip()
-        if not api_key:
-            print(
-                f"Error: {OPENROUTER_API_KEY_ENV} environment variable is not set. "
-                "Run with --mock to use the built-in Mock LLM without API keys.",
-                file=sys.stderr,
-            )
+        # 실제 모델 모드: 우선순위 사다리로 프로바이더·모델·키 결정 (Fail-Closed)
+        try:
+            resolved = resolve_provider_config(provider=settings.provider, model=model)
+        except ProviderResolutionError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             sys.exit(2)
 
         # HERMES_HOME 상대경로 고정
@@ -443,10 +481,8 @@ def main() -> None:
         workspace = get_default_workspace()
         os.chdir(workspace)
 
-        if model is None:
-            model = DEFAULT_REAL_MODEL
-
-        llm_client = OpenRouterClient(api_key=api_key, model=model)
+        model = resolved.model
+        llm_client = _build_cli_llm_client(resolved)
 
     approval_enabled = settings.approval_enabled and is_interactive_terminal()
     session_db = SessionDB()
@@ -524,7 +560,7 @@ def main() -> None:
         agent,
         settings,
         mock=args.mock,
-        llm_client_factory=lambda: OpenRouterClient(api_key=api_key, model=model),
+        llm_client_factory=lambda: _build_cli_llm_client(resolved) if resolved is not None else None,
     )
 
     print("=" * 60)
@@ -546,7 +582,8 @@ def main() -> None:
     if args.mock:
         print("💡 Running in MOCK mode (Offline test).")
     else:
-        print(f"🚀 Running in REAL mode (Model: {agent.model}).")
+        provider_name = resolved.provider if resolved is not None else "openrouter"
+        print(f"🚀 Running in REAL mode (Provider: {provider_name}, Model: {agent.model}).")
         print(f"📁 Working directory: {os.getcwd()}")
     if delegated:
         print("Delegation enabled (delegate_task).")

@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_core.agent.agent import MockLLMClient
+from hermes_core.anthropic_client import AnthropicClient
 from hermes_core.kernel.contract import TurnScope
-from hermes_core.kernel.ports import LLMPort, ToolExecutor, TranscriptStore
+from hermes_core.kernel.ports import CallRecordable, LLMPort, ToolExecutor, TranscriptStore
 from hermes_core.kernel.tool_call import ToolCall
 from hermes_core.llm_client import OpenRouterClient
 from hermes_core.session_db import SessionDB
@@ -434,5 +435,48 @@ test_scenario_r22_memory_store_port_conformance = (
 test_scenario_r22_fake_memory_store_standalone_in_dispatcher = (
     test_scenario_r22_030_fake_memory_store_standalone_in_dispatcher
 )
+
+
+def test_scenario_r23_anthropic_client_port_conformance() -> None:
+    """시나리오 R23-040-8: AnthropicClient 및 3종 프로바이더 팩토리의 LLMPort/CallRecordable 적합성 잠금."""
+    from hermes_core.constants import (
+        ANTHROPIC_MESSAGES_URL,
+        GEMINI_OPENAI_CHAT_URL,
+        OPENROUTER_CHAT_URL,
+    )
+    from hermes_core.provider import ResolvedProvider, create_llm_client
+
+    # 1. 프로토콜 적합성 (issubclass & isinstance)
+    assert issubclass(AnthropicClient, LLMPort), "AnthropicClient must satisfy LLMPort"
+    assert issubclass(AnthropicClient, CallRecordable), "AnthropicClient must satisfy CallRecordable"
+    assert issubclass(OpenRouterClient, CallRecordable), "OpenRouterClient must satisfy CallRecordable"
+
+    ant = AnthropicClient("dummy-ant-key", "claude-sonnet-4-5")
+    assert isinstance(ant, LLMPort)
+    assert isinstance(ant, CallRecordable)
+
+    # 2. inspect.signature().bind() 호출 형태 검증
+    sig_chat = inspect.signature(AnthropicClient.chat_completion)
+    sig_chat.bind(None, messages=[], tools=[])
+    sig_chat.bind(None, messages=[{"role": "user", "content": "hi"}], tools=None)
+
+    sig_recorder = inspect.signature(AnthropicClient.set_call_recorder)
+    sig_recorder.bind(None, lambda rec: None)
+
+    # 3. create_llm_client() 3종 프로바이더 반환 적합성
+    for prov, model, url in (
+        ("openrouter", "deepseek/deepseek-v4.1-flash-1017", OPENROUTER_CHAT_URL),
+        ("gemini", "gemini-2.5-flash", GEMINI_OPENAI_CHAT_URL),
+        ("anthropic", "claude-sonnet-4-5", ANTHROPIC_MESSAGES_URL),
+    ):
+        resolved = ResolvedProvider(
+            provider=prov,
+            model=model,
+            api_key="dummy-key-for-conformance",
+            base_url=url,
+        )
+        client = create_llm_client(resolved)
+        assert isinstance(client, LLMPort), f"{prov} client must satisfy LLMPort"
+        assert isinstance(client, CallRecordable), f"{prov} client must satisfy CallRecordable"
 
 

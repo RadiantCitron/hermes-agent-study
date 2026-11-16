@@ -57,6 +57,7 @@ def cli_test_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-safe-delegate")
     monkeypatch.setattr(cli, "OpenRouterClient", ScriptableClient)
+    monkeypatch.chdir(tmp_path)
     return {"hermes_home": hermes_home, "tmp_path": tmp_path}
 
 
@@ -207,6 +208,7 @@ def test_scenario_06_delegate_without_api_key_rejected(tmp_path: Path, monkeypat
     hermes_home = tmp_path / "hermes_home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.argv", ["hermes_core.cli", "--delegate"])
 
     with pytest.raises(SystemExit) as excinfo:
@@ -214,7 +216,8 @@ def test_scenario_06_delegate_without_api_key_rejected(tmp_path: Path, monkeypat
 
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
-    assert "OPENROUTER_API_KEY environment variable is not set" in captured.err
+    assert "No LLM API key found" in captured.err
+    assert "OPENROUTER_API_KEY" in captured.err
     assert "--mock" in captured.err
     assert not (hermes_home / "state.db").exists()
 
