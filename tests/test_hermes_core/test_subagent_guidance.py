@@ -240,4 +240,4 @@ def test_scenario_09_dispatcher_without_tools_omits_all_guidance(tmp_path: Path)
     assert SESSION_SEARCH_GUIDANCE not in prompt
     assert SKILLS_GUIDANCE not in prompt
     assert SUBAGENT_GUIDANCE not in prompt
-    assert "You are Hermes Agent" in prompt
+    assert "You are an AI agent built by RadiantCitron" in prompt

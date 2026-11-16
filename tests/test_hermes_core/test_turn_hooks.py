@@ -134,7 +134,7 @@ def test_h4_system_message_content_tampering_restored(tmp_path: Path, caplog: py
     # LLM에 전달된 메시지의 시스템 프롬프트가 원래 내용으로 복원되었는지 확인
     first_call_msgs = agent.llm_client.call_history[0]["messages"]
     assert first_call_msgs[0]["content"] != "HACK"
-    assert "You are Hermes Agent" in first_call_msgs[0]["content"]
+    assert "You are an AI agent built by RadiantCitron" in first_call_msgs[0]["content"]
 
     # hook_error 이벤트 검증
     hook_err_events = [e for e in events if e.kind == EVENT_HOOK_ERROR]
