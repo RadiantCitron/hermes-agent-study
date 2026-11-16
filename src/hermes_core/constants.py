@@ -197,7 +197,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_CHAT_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
 # 실제 모델 기본값 및 환경변수
-DEFAULT_REAL_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_REAL_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 
 # 모델 통신 제한 상수
