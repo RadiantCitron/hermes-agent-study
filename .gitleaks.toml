@@ -33,3 +33,8 @@ keywords = ["AIzaSy"]
 description = "코어 시험 코드의 가짜 키 상수"
 targetRules = ["generic-api-key"]
 paths = ['''^tests/test_hermes_core/.*\.py$''']
+
+[[allowlists]]
+description = "로드맵 23 구현지시서 인수 테스트 시나리오의 가짜 Gemini 키 예시"
+targetRules = ["generic-api-key"]
+regexes = ['''AIzaSyTestKey1234567890''']
