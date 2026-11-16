@@ -37,22 +37,39 @@ class LLMResponse:
     finish_reason: Optional[str] = None
 
 
-def _mask_str(text: str, key: str) -> str:
+def mask_str(text: str, key: str) -> str:
     """문자열에 포함된 API 키를 ***로 마스킹한다."""
     if key and key in text:
         return text.replace(key, "***")
     return text
 
 
-def _mask_obj(obj: Any, key: str) -> Any:
+def mask_obj(obj: Any, key: str) -> Any:
     """사전, 리스트 또는 문자열 객체 내부의 API 키를 재귀적으로 마스킹한 사본을 반환한다."""
     if isinstance(obj, str):
-        return _mask_str(obj, key)
+        return mask_str(obj, key)
     if isinstance(obj, dict):
-        return {k: _mask_obj(v, key) for k, v in obj.items()}
+        return {k: mask_obj(v, key) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_mask_obj(item, key) for item in obj]
+        return [mask_obj(item, key) for item in obj]
     return obj
+
+
+def invoke_on_call_safe(
+    on_call: Optional[Callable[[dict[str, Any]], None]],
+    record: dict[str, Any],
+    call_logger: logging.Logger = logger,
+) -> None:
+    """on_call 콜백을 안전하게 호출한다 (예외 발생 시 삼키고 경고 기록)."""
+    if on_call is not None:
+        try:
+            on_call(record)
+        except Exception as e:
+            call_logger.warning("on_call recorder raised an exception: %s", e)
+
+
+_mask_str = mask_str
+_mask_obj = mask_obj
 
 
 class OpenRouterClient:
@@ -89,11 +106,7 @@ class OpenRouterClient:
 
     def _invoke_on_call(self, record: dict[str, Any]) -> None:
         """on_call 콜백을 안전하게 호출한다 (예외 발생 시 삼키고 경고 기록)."""
-        if self._on_call is not None:
-            try:
-                self._on_call(record)
-            except Exception as e:
-                logger.warning("on_call recorder raised an exception: %s", e)
+        invoke_on_call_safe(self._on_call, record, logger)
 
     def chat_completion(
         self,
