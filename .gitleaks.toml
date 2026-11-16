@@ -13,6 +13,18 @@ description = "OpenRouter API key (sk-or-v1-...)"
 regex = '''sk-or-v1-[A-Za-z0-9]{32,}'''
 keywords = ["sk-or-v1-"]
 
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key (sk-ant-...)"
+regex = '''sk-ant-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "gemini-api-key"
+description = "Google Gemini API key (AIzaSy...)"
+regex = '''AIzaSy[A-Za-z0-9_-]{33}'''
+keywords = ["AIzaSy"]
+
 # 시험용 가짜 키 상수 허용 (RULE-004). 04 구현 커밋의 시험 코드(`fake_key = "..."` 등)가 generic-api-key에 걸려
 # 푸시가 막혔다(2026-10-28). 허용 범위는 코어 시험 코드 한 곳과 이 규칙 하나로 좁힌다:
 # tests/test_hermes_core/ 아래 .py 파일의 generic-api-key만 제외하며, openrouter-api-key 규칙과

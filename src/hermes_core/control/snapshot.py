@@ -20,6 +20,7 @@ from hermes_core.control.settings import (
 
 _BEARER_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[^\s\"',;\)]+")
 _SK_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+_GEMINI_KEY_PATTERN = re.compile(r"\bAIzaSy[A-Za-z0-9_-]{20,}\b")
 
 
 def mask_secrets(text: str) -> str:
@@ -28,6 +29,7 @@ def mask_secrets(text: str) -> str:
         return text
     text = _BEARER_PATTERN.sub(r"\g<1>***", text)
     text = _SK_PATTERN.sub("***", text)
+    text = _GEMINI_KEY_PATTERN.sub("***", text)
     return text
 
 

@@ -190,15 +190,30 @@ SUMMARY_INPUT_TOTAL_CHARS = 160_000
 
 
 # =============================================================================
-# 외부 LLM 엔드포인트 기본값 (OpenRouter 호환)
+# 외부 LLM 엔드포인트 및 프로바이더 기본값 (OpenRouter · Gemini · Anthropic)
 # =============================================================================
+
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("openrouter", "gemini", "anthropic")
+PROVIDER_KEY_PRIORITY: tuple[str, ...] = ("openrouter", "gemini", "anthropic")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_CHAT_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_OPENAI_CHAT_URL = f"{GEMINI_OPENAI_BASE_URL}/chat/completions"
+
+ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+ANTHROPIC_MESSAGES_URL = f"{ANTHROPIC_BASE_URL}/v1/messages"
+ANTHROPIC_API_VERSION = "2023-06-01"
+
 # 실제 모델 기본값 및 환경변수
 DEFAULT_REAL_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
+ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 
 # 모델 통신 제한 상수
 LLM_TIMEOUT_SECONDS = 60
@@ -407,7 +422,11 @@ APPROVAL_TOO_LONG_MESSAGE = (
 )
 
 # 터미널 실행 시 하위 프로세스 환경에서 제거할 환경변수 이름 목록
-TERMINAL_STRIPPED_ENV_NAMES = (OPENROUTER_API_KEY_ENV,)
+TERMINAL_STRIPPED_ENV_NAMES = (
+    OPENROUTER_API_KEY_ENV,
+    GEMINI_API_KEY_ENV,
+    ANTHROPIC_API_KEY_ENV,
+)
 
 
 # =============================================================================
