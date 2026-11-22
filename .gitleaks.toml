@@ -38,3 +38,8 @@ paths = ['''^tests/test_hermes_core/.*\.py$''']
 description = "로드맵 23 구현지시서 인수 테스트 시나리오의 가짜 Gemini 키 예시"
 targetRules = ["generic-api-key"]
 regexes = ['''AIzaSyTestKey1234567890''']
+
+[[allowlists]]
+description = "로드맵 23 구현지시서 인수 테스트 시나리오의 가짜 Anthropic 키 예시"
+targetRules = ["anthropic-api-key"]
+regexes = ['''sk-ant-DummyToken1234567890''']
